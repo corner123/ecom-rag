@@ -142,6 +142,7 @@ def test_federated_retriever_partitions_and_filters():
         ("根据 MCP 官方规范，client 初始化包含什么？", SourceIntent.OFFICIAL),
         ("什么是langchain？", SourceIntent.OFFICIAL),
         ("什么是LangChain？", SourceIntent.OFFICIAL),
+        ("Langchian是什么", SourceIntent.OFFICIAL),
         ("对比当前 MCPToolAdapter 与官方 MCP Client", SourceIntent.COMPARISON),
         ("今天上海天气如何？", SourceIntent.OUT_OF_SCOPE),
     ],
@@ -150,6 +151,21 @@ def test_source_intent_router(query, expected):
     router = SourceIntentRouter()
     assert router.classify(query) is expected
     assert router.route(query).intent is expected
+
+
+def test_query_normalization_only_applies_curated_unambiguous_alias():
+    router = SourceIntentRouter()
+
+    normalized, warning = router.normalize_query("Langchian是什么")
+    unknown, unknown_warning = router.normalize_query("LangChaine是什么")
+    literal, literal_warning = router.normalize_query("`langchian` 在哪里定义？")
+
+    assert normalized == "LangChain是什么"
+    assert warning == "query_normalized_langchian_to_langchain"
+    assert unknown == "LangChaine是什么"
+    assert unknown_warning is None
+    assert literal == "`langchian` 在哪里定义？"
+    assert literal_warning is None
 
 
 def test_live_code_python_fallback_is_bounded_and_returns_lines(tmp_path: Path):

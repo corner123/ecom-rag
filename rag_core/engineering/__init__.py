@@ -16,6 +16,8 @@ from .index import (
 from .models import (
     AnswerOutcome,
     EvidenceCitation,
+    GenerationStatus,
+    RetrievedEvidence,
     RetrievalOutcome,
 )
 from .service import EngineeringRAGService
@@ -36,9 +38,11 @@ __all__ = [
     "EngineeringRAGService",
     "EvidenceSufficiencyGuard",
     "EvidenceCitation",
+    "GenerationStatus",
     "GroundedAnswerer",
     "HybridPartitionRetriever",
     "RetrievalOutcome",
+    "RetrievedEvidence",
     "infer_partition",
     "build_engineering_index",
     "build_deepseek_generator_from_env",

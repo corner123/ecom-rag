@@ -18,10 +18,10 @@
     <div id="nav-overlay" class="nav-overlay" hidden></div>
     <aside id="app-sidebar" class="app-sidebar" aria-label="主导航">
       <div class="sidebar-head">
-        <a class="brand" href="#dashboard" aria-label="返回工程知识首页">
+        <a class="brand" href="#query-workspace" aria-label="返回工程知识问答工作台">
           <span class="brand-mark" aria-hidden="true">EK</span>
           <span class="brand-copy">
-            <strong>Engineering<br />Knowledge</strong>
+            <strong>Engineering Knowledge</strong>
             <small>Evidence-first RAG</small>
           </span>
         </a>
@@ -31,27 +31,19 @@
       </div>
 
       <nav class="sidebar-nav">
-        <p class="nav-label">工作区</p>
-        <a class="nav-link is-active" href="#dashboard" data-nav-section="dashboard" aria-current="page">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z" />
-          </svg>
-          <span>控制台</span>
-        </a>
-        <a class="nav-link" href="#knowledge-overview" data-nav-section="knowledge-overview">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M5 4.5A2.5 2.5 0 0 1 7.5 2H19v17H7.5A2.5 2.5 0 0 0 5 21.5zm0 0v17M8 6h7M8 10h8" />
-          </svg>
-          <span>知识概览</span>
-        </a>
-        <a class="nav-link" href="#query-workspace" data-nav-section="query-workspace">
+        <a
+          class="nav-link is-active"
+          href="#query-workspace"
+          data-nav-section="query-workspace"
+          aria-current="page"
+        >
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8a2.5 2.5 0 0 1-2.5 2.5H10l-5 4v-4.5A2.5 2.5 0 0 1 4 13.5z" />
           </svg>
-          <span>查询与回答</span>
+          <span>问答工作台</span>
         </a>
 
-        <p class="nav-label nav-label-secondary">说明</p>
+        <p class="nav-label">查看</p>
         <button
           class="nav-link nav-button"
           type="button"
@@ -87,7 +79,6 @@
           </svg>
           只读知识服务
         </span>
-        <p>独立于 Mini-Nanobot，通过 HTTP 提供检索能力。</p>
       </div>
     </aside>
 
@@ -104,11 +95,8 @@
           >
             <span aria-hidden="true">☰</span>
           </button>
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="m4 11 8-7 8 7v9h-6v-6h-4v6H4z" />
-          </svg>
-          <span aria-hidden="true">›</span>
-          <strong>控制台</strong>
+          <strong>工程知识问答</strong>
+          <span class="header-description">检索、综合与引用在同一条链路完成</span>
         </div>
         <div class="service-control">
           <span id="service-status" class="status-badge status-pending">
@@ -122,280 +110,157 @@
       </header>
 
       <main id="main-content" class="page-shell" tabindex="-1">
-        <section id="dashboard" class="welcome-card" aria-labelledby="hero-title">
-          <div class="welcome-copy">
-            <p class="eyebrow">MINI-NANOBOT · MULTI-SOURCE RAG</p>
-            <h1 id="hero-title">Engineering Knowledge Assistant</h1>
-            <span class="welcome-alias">工程知识检索台</span>
-            <p>
-              面向项目设计、历史决策与外部官方规范的只读知识助手。
-              每个回答都以可追溯证据为边界，当前代码事实由 rg、AST 与 Git 实时核验。
-            </p>
-          </div>
-          <button class="button button-primary welcome-action" type="button" data-workspace-mode="answer">
-            开始有据问答
-            <span aria-hidden="true">→</span>
-          </button>
-          <div class="welcome-orbit" aria-hidden="true"><span></span><span></span></div>
-        </section>
+        <span id="dashboard" class="anchor-target" aria-hidden="true"></span>
+        <span id="knowledge-overview" class="anchor-target" aria-hidden="true"></span>
 
-        <section id="knowledge-overview" class="dashboard-section" aria-labelledby="overview-title">
-          <div class="section-heading">
+        <section id="query-workspace" class="workspace" aria-labelledby="workspace-title">
+          <div class="workspace-intro">
             <div>
-              <p class="section-kicker">OVERVIEW</p>
-              <h2 id="overview-title">知识服务概览</h2>
+              <p class="eyebrow">MINI-NANOBOT · MULTI-SOURCE RAG</p>
+              <h1 id="workspace-title">先检索证据，再生成回答</h1>
             </div>
-            <p>数据由服务健康接口实时更新</p>
-          </div>
-
-          <div class="health-grid" aria-label="服务快照">
-            <article class="metric-card metric-primary">
-              <span class="metric-icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24"><path d="M5 4.5A2.5 2.5 0 0 1 7.5 2H19v17H7.5A2.5 2.5 0 0 0 5 21.5zm0 0v17M8 6h7M8 10h8" /></svg>
-              </span>
-              <div>
-                <span>知识分块</span>
-                <strong id="metric-documents">—</strong>
-                <small id="metric-partitions">— 个物理分区</small>
-              </div>
-            </article>
-            <article class="metric-card metric-indigo">
-              <span class="metric-icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24"><path d="M8 5H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h3M16 5h3a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-3M9 12h6M12 9v6" /></svg>
-              </span>
-              <div>
-                <span>实时核验</span>
-                <strong id="metric-live">—</strong>
-                <small>rg · AST · Git</small>
-              </div>
-            </article>
-            <article class="metric-card metric-violet">
-              <span class="metric-icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24"><path d="M4 7h16M7 3v4M17 3v4M5 7v13h14V7M8 11h3M13 11h3M8 15h3" /></svg>
-              </span>
-              <div>
-                <span>索引构建</span>
-                <strong id="metric-build">—</strong>
-                <small id="metric-freshness">等待健康检查</small>
-              </div>
-            </article>
-            <article class="metric-card metric-cyan">
-              <span class="metric-icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24"><path d="M7 7h10v10H7zM4 12H2M22 12h-2M12 4V2M12 22v-2M5.5 5.5 4 4M20 20l-1.5-1.5M18.5 5.5 20 4M4 20l1.5-1.5" /></svg>
-              </span>
-              <div>
-                <span>回答生成</span>
-                <strong id="metric-answer-provider">—</strong>
-                <small id="metric-answer-model">等待服务配置</small>
-              </div>
-            </article>
-          </div>
-
-          <div class="runtime-strip" aria-label="Mini-Nanobot 工作区状态">
-            <div>
-              <span class="runtime-dot" aria-hidden="true"></span>
-              <strong>Mini-Nanobot 实时工作区</strong>
-            </div>
-            <span id="metric-branch">—</span>
-            <small id="metric-revision">等待工作区信息</small>
-          </div>
-        </section>
-
-        <section class="dashboard-section quick-section" aria-labelledby="quick-title">
-          <div class="section-heading compact-heading">
-            <div>
-              <p class="section-kicker">QUICK ACTIONS</p>
-              <h2 id="quick-title">选择工作方式</h2>
-            </div>
-          </div>
-          <div class="quick-grid">
-            <button class="quick-card" type="button" data-workspace-mode="answer">
-              <span class="quick-icon quick-blue" aria-hidden="true">
-                <svg viewBox="0 0 24 24"><path d="M5 4h14v12H9l-4 4zM9 8h6M9 12h4" /></svg>
-              </span>
-              <strong>检索并生成回答</strong>
-              <p>自动检索证据，再生成带引用的回答</p>
-              <span class="quick-link">进入问答 <b aria-hidden="true">→</b></span>
-            </button>
-            <button class="quick-card" type="button" data-workspace-mode="retrieve">
-              <span class="quick-icon quick-indigo" aria-hidden="true">
-                <svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5" /><path d="m15.5 15.5 5 5" /></svg>
-              </span>
-              <strong>仅检索证据</strong>
-              <p>检查路由、证据排序和实时核验结果</p>
-              <span class="quick-link">进入检索 <b aria-hidden="true">→</b></span>
-            </button>
-            <button class="quick-card" type="button" data-health-action>
-              <span class="quick-icon quick-violet" aria-hidden="true">
-                <svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9M12 7v5l3 2M18 4v5h-5" /></svg>
-              </span>
-              <strong>检查服务状态</strong>
-              <p>刷新索引、实时核验和回答模型运行信息</p>
-              <span class="quick-link">立即检查 <b aria-hidden="true">→</b></span>
-            </button>
-          </div>
-        </section>
-
-        <section id="query-workspace" class="dashboard-section query-section" aria-labelledby="workspace-title">
-          <div class="section-heading">
-            <div>
-              <p class="section-kicker">KNOWLEDGE WORKSPACE</p>
-              <h2 id="workspace-title">工程知识查询</h2>
-            </div>
-            <p>Ctrl / Cmd + Enter 快速提交</p>
+            <p>系统先召回 Top-K 相关片段，核验证据边界，再由已配置的大模型综合回答并保留引用。</p>
           </div>
 
           <div class="workbench" aria-label="工程知识查询工作台">
             <aside class="query-panel panel">
-              <div class="panel-heading">
+              <div class="query-heading">
                 <div>
-                  <span class="panel-step">01</span>
-                  <div>
-                    <p class="panel-kicker">QUERY</p>
-                    <h3>提出工程问题</h3>
-                  </div>
+                  <p class="panel-kicker">QUERY</p>
+                  <h2>输入你的问题</h2>
                 </div>
                 <span class="shortcut" title="键盘快捷键">Ctrl ↵</span>
               </div>
 
               <div class="mode-switch" role="group" aria-label="查询模式">
                 <button
-                  class="mode-button is-active"
-                  type="button"
-                  data-mode="retrieve"
-                  aria-pressed="true"
-                >
-                  仅检索证据
-                </button>
-                <button
                   class="mode-button"
                   type="button"
-                  data-mode="answer"
+                  data-mode="retrieve"
+                  data-workspace-mode="retrieve"
                   aria-pressed="false"
                 >
-                  检索并生成回答
+                  仅检索
+                </button>
+                <button
+                  class="mode-button is-active"
+                  type="button"
+                  data-mode="answer"
+                  data-workspace-mode="answer"
+                  aria-pressed="true"
+                >
+                  检索并回答
                 </button>
               </div>
-              <p class="mode-explanation">
-                “检索并生成回答”会自动执行检索，无需先点“仅检索证据”。
-              </p>
 
               <form id="query-form" novalidate>
-                <label for="query-input">你的问题</label>
+                <label class="visually-hidden" for="query-input">你的问题</label>
                 <textarea
                   id="query-input"
                   name="query"
-                  rows="5"
+                  rows="6"
                   maxlength="1000"
-                  placeholder="例如：为什么 Mini-Nanobot 使用手写 ReAct 循环？"
+                  placeholder="例如：LangChain 是什么？"
                   required
                 ></textarea>
                 <div class="field-meta">
-                  <span id="query-hint">只返回证据列表，不生成回答</span>
+                  <span id="query-hint">会自动检索 Top-K 证据，再生成带引用的回答</span>
                   <span><span id="query-count">0</span>/1000</span>
                 </div>
 
-                <details id="example-menu" class="compact-settings example-menu">
-                  <summary>示例问题 <span>点击即可填入</span></summary>
-                  <div class="examples" aria-label="示例问题">
-                    <button type="button" data-question="为什么 Mini-Nanobot 使用手写 ReAct 循环？">
-                      <span>设计决策</span>
-                      为什么使用手写 ReAct 循环？
-                    </button>
-                    <button type="button" data-question="当前 QueryEngine.submit_message 在哪个文件实现？">
-                      <span>当前实现</span>
-                      QueryEngine 在哪里实现？
-                    </button>
-                    <button type="button" data-question="根据 MCP 2025-06-18 官方规范，tools/list 和 tools/call 是什么？">
-                      <span>官方规范</span>
-                      MCP tools 规范是什么？
-                    </button>
-                    <button type="button" data-question="对比当前 MCPToolAdapter 与 MCP 官方 tools 规范是否一致？">
-                      <span>跨源比较</span>
-                      当前实现是否符合规范？
-                    </button>
-                  </div>
-                </details>
-
-                <details class="compact-settings advanced-settings">
-                  <summary>高级选项 <span>Top-K: <strong id="top-k-summary">5</strong></span></summary>
-                  <div class="query-options">
-                    <label for="top-k-input">证据数量</label>
-                    <div class="number-control">
-                      <button id="top-k-down" type="button" aria-label="减少证据数量">−</button>
-                      <input id="top-k-input" type="number" min="1" max="20" value="5" />
-                      <button id="top-k-up" type="button" aria-label="增加证据数量">+</button>
-                    </div>
-                  </div>
-                </details>
-
-                <details id="token-settings" class="compact-settings token-settings">
-                  <summary>连接设置 <span>仅启用令牌时填写</span></summary>
-                  <div class="token-row">
-                    <input
-                      id="token-input"
-                      type="password"
-                      autocomplete="off"
-                      spellcheck="false"
-                      placeholder="仅当服务启用 RAG_API_TOKEN 时填写"
-                      aria-label="本地 RAG API 访问令牌"
-                    />
-                    <button id="toggle-token" type="button">显示</button>
-                  </div>
-                  <p>令牌只保留在当前页面内存中，不写入 URL 或浏览器存储。</p>
-                </details>
-
-                <p id="form-error" class="form-error" role="alert" hidden></p>
-
                 <div class="query-actions">
                   <button id="submit-button" class="button button-primary" type="submit">
-                    <span class="button-label">仅检索证据</span>
+                    <span class="button-label">检索并生成回答</span>
                     <span class="button-arrow" aria-hidden="true">→</span>
                   </button>
                   <button id="cancel-button" class="button button-secondary" type="button" hidden>
                     取消
                   </button>
                 </div>
+
+                <div class="settings-row">
+                  <details id="example-menu" class="compact-settings example-menu">
+                    <summary>示例问题</summary>
+                    <div class="examples" aria-label="示例问题">
+                      <button type="button" data-question="为什么 Mini-Nanobot 使用手写 ReAct 循环？">
+                        为什么使用手写 ReAct 循环？
+                      </button>
+                      <button type="button" data-question="当前 QueryEngine.submit_message 在哪个文件实现？">
+                        QueryEngine 在哪里实现？
+                      </button>
+                      <button type="button" data-question="LangChain 是什么？">
+                        LangChain 是什么？
+                      </button>
+                      <button type="button" data-question="对比当前 MCPToolAdapter 与 MCP 官方 tools 规范是否一致？">
+                        当前实现是否符合 MCP 规范？
+                      </button>
+                    </div>
+                  </details>
+
+                  <details class="compact-settings advanced-settings">
+                    <summary>Top-K: <strong id="top-k-summary">5</strong></summary>
+                    <div class="query-options">
+                      <label for="top-k-input">召回片段数量</label>
+                      <div class="number-control">
+                        <button id="top-k-down" type="button" aria-label="减少证据数量">−</button>
+                        <input id="top-k-input" type="number" min="1" max="20" value="5" />
+                        <button id="top-k-up" type="button" aria-label="增加证据数量">+</button>
+                      </div>
+                    </div>
+                  </details>
+
+                  <details id="token-settings" class="compact-settings token-settings">
+                    <summary>访问令牌</summary>
+                    <div class="token-row">
+                      <input
+                        id="token-input"
+                        type="password"
+                        autocomplete="off"
+                        spellcheck="false"
+                        placeholder="仅服务启用令牌时填写"
+                        aria-label="本地 RAG API 访问令牌"
+                      />
+                      <button id="toggle-token" type="button">显示</button>
+                    </div>
+                    <p>令牌只保留在页面内存中。</p>
+                  </details>
+                </div>
+
+                <p id="form-error" class="form-error" role="alert" hidden></p>
               </form>
             </aside>
 
-            <section class="result-panel panel" aria-busy="false">
+            <section class="result-panel panel" aria-busy="false" aria-labelledby="result-heading-title">
               <div id="result-announcer" class="visually-hidden" role="status" aria-live="polite"></div>
-              <div class="panel-heading result-heading">
+              <div class="result-heading">
                 <div>
-                  <span class="panel-step">02</span>
-                  <div>
-                    <p class="panel-kicker">EVIDENCE & ANSWER</p>
-                    <h3 id="result-heading-title" tabindex="-1">检索结果</h3>
-                  </div>
+                  <p class="panel-kicker">RESULT</p>
+                  <h2 id="result-heading-title" tabindex="-1">回答结果</h2>
                 </div>
-                <span id="request-time" class="request-time">—</span>
+                <span id="request-time" class="visually-hidden">—</span>
               </div>
 
               <div id="empty-state" class="empty-state">
-                <span class="empty-icon" aria-hidden="true">
-                  <svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5" /><path d="m15.5 15.5 5 5M8 10.5h5M10.5 8v5" /></svg>
-                </span>
-                <h4>答案从可靠证据开始</h4>
-                <p>提交问题后，这里会展示路由、充分性判断、回答和可展开的引用来源。</p>
+                <div class="empty-mark" aria-hidden="true">R</div>
+                <h3>等待你的问题</h3>
+                <p>点击“检索并生成回答”即可一次完成检索和生成，不需要先执行“仅检索”。</p>
                 <div class="empty-flow" aria-label="处理流程">
-                  <span>查询路由</span><b aria-hidden="true">→</b>
-                  <span>多路检索</span><b aria-hidden="true">→</b>
+                  <span>Top-K 检索</span><b aria-hidden="true">→</b>
                   <span>证据核验</span><b aria-hidden="true">→</b>
-                  <span>引用回答</span>
+                  <span>大模型综合</span>
                 </div>
               </div>
 
               <div id="loading-state" class="loading-state" hidden>
                 <div class="loading-line"><span></span></div>
                 <div class="loading-line short"><span></span></div>
-                <div class="loading-cards"><span></span><span></span><span></span></div>
-                <p>正在检索并检查证据边界，首次加载模型可能需要一些时间……</p>
+                <div class="loading-line medium"><span></span></div>
+                <p>正在召回相关证据并生成回答……</p>
               </div>
 
               <div id="error-state" class="error-state" hidden>
                 <span class="error-code">REQUEST FAILED</span>
-                <h4 id="error-title">服务暂时不可用</h4>
+                <h3 id="error-title">服务暂时不可用</h3>
                 <p id="error-message"></p>
                 <button id="retry-button" class="button button-secondary" type="button">
                   重试上次请求
@@ -403,19 +268,22 @@
               </div>
 
               <div id="response-state" hidden>
-                <div id="response-summary" class="response-summary"></div>
+                <div id="response-summary" class="response-summary" aria-label="本次处理状态"></div>
                 <div id="response-alerts" class="response-alerts"></div>
                 <div id="answer-block" class="answer-block" hidden>
-                  <span>GROUNDED ANSWER</span>
+                  <div class="answer-heading">
+                    <span id="answer-mode-label">模型综合回答</span>
+                    <small id="answer-mode-caption">基于下方 Top-K 证据生成</small>
+                  </div>
                   <div id="answer-text" class="answer-content"></div>
                 </div>
-                <details id="evidence-drawer" class="evidence-drawer" open>
+                <details id="evidence-drawer" class="evidence-drawer">
                   <summary class="evidence-heading">
                     <div>
-                      <span id="evidence-label">证据列表</span>
+                      <span id="evidence-label">检索到的 Top-K 证据</span>
                       <strong id="evidence-count">0</strong>
                     </div>
-                    <p id="evidence-caption">按综合排名展示</p>
+                    <p id="evidence-caption">展开查看原始片段与引用来源</p>
                     <span class="drawer-symbol" aria-hidden="true">⌄</span>
                   </summary>
                   <div id="evidence-list" class="evidence-list"></div>
@@ -425,18 +293,13 @@
           </div>
         </section>
       </main>
-
-      <footer>
-        <span>Engineering Knowledge RAG</span>
-        <span>Internal knowledge · Official specifications · Live verification</span>
-      </footer>
     </div>
 
-    <section id="about-popover" class="topbar-popover about-popover" hidden>
+    <section id="about-popover" class="topbar-popover about-popover" hidden aria-labelledby="about-title">
       <div class="popover-heading">
         <div>
           <p class="panel-kicker">EVIDENCE POLICY</p>
-          <h2>项目边界与证据责任</h2>
+          <h2 id="about-title">证据规则</h2>
         </div>
         <span>只读观察台</span>
       </div>
@@ -445,42 +308,28 @@
         系统回到 <code>rg</code>、AST 与 Git 实时核验。页面不会同步语料、构建索引或修改仓库。
       </p>
       <div class="legend-grid">
-        <article>
-          <span class="role-dot role-current"></span>
-          <strong>当前实现</strong>
-          <p>实时源码核验，证明当前工作区中的实际实现。</p>
-        </article>
-        <article>
-          <span class="role-dot role-design"></span>
-          <strong>内部设计</strong>
-          <p>说明架构意图与权衡，不单独证明代码已实现。</p>
-        </article>
-        <article>
-          <span class="role-dot role-history"></span>
-          <strong>历史记录</strong>
-          <p>说明演进过程，不代表当前版本仍保持相同行为。</p>
-        </article>
-        <article>
-          <span class="role-dot role-official"></span>
-          <strong>官方规范</strong>
-          <p>说明标准要求，不能反向证明项目已经符合。</p>
-        </article>
+        <article><span class="role-dot role-current"></span><strong>当前实现</strong><p>实时源码核验。</p></article>
+        <article><span class="role-dot role-design"></span><strong>内部设计</strong><p>说明架构意图与权衡。</p></article>
+        <article><span class="role-dot role-history"></span><strong>历史记录</strong><p>说明演进过程。</p></article>
+        <article><span class="role-dot role-official"></span><strong>官方规范</strong><p>说明标准要求。</p></article>
       </div>
     </section>
 
-    <section id="status-popover" class="topbar-popover status-popover" hidden>
+    <section id="status-popover" class="topbar-popover status-popover" hidden aria-labelledby="status-title">
       <div class="popover-heading">
         <div>
           <p class="panel-kicker">SYSTEM STATUS</p>
-          <h2>运行状态说明</h2>
+          <h2 id="status-title">系统状态</h2>
         </div>
-        <span>只读健康信息</span>
+        <button class="button button-secondary button-compact" type="button" data-health-action>刷新</button>
       </div>
-      <p class="about-copy">
-        首页“知识服务概览”来自 <code>/health</code>：包括索引构建与新鲜度、物理分区、
-        实时核验能力、Mini-Nanobot 工作区版本以及回答生成方式。点击“检查服务”可立即刷新。
-      </p>
-      <a class="popover-link" href="#knowledge-overview">前往知识服务概览 <span aria-hidden="true">→</span></a>
+      <div class="status-grid" aria-label="只读健康信息">
+        <article><span>索引构建</span><strong id="metric-build">—</strong><small id="metric-freshness">等待健康检查</small></article>
+        <article><span>知识分块</span><strong id="metric-documents">—</strong><small id="metric-partitions">— 个物理分区</small></article>
+        <article><span>实时核验</span><strong id="metric-live">—</strong><small>rg · AST · Git</small></article>
+        <article><span>回答生成</span><strong id="metric-answer-provider">—</strong><small id="metric-answer-model">等待服务配置</small></article>
+        <article class="status-wide"><span>Mini-Nanobot 工作区</span><strong id="metric-branch">—</strong><small id="metric-revision">等待工作区信息</small></article>
+      </div>
     </section>
   </body>
 </html>

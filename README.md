@@ -44,7 +44,7 @@ Mini-Nanobot 和本仓库始终是两个独立项目。Mini-Nanobot 负责 Agent
 6. 确定性路由、官方 topic scope、hard-anchor 与经验数据缺失检查共同决定回答或拒答；
 7. 返回结构化引用、证据角色、源码行号、symbol、commit/dirty 和官方内容 hash；
 8. 提供纯索引消融与完整检索策略两套独立评测，数据集、manifest 和索引 build 强绑定；
-9. `/answer` 可在证据充分性检查通过后调用 DeepSeek，把重复证据归纳为带 `[E#]` 引用的结构化回答；模型不可用或引用校验失败时，安全退回确定性证据摘要。
+9. `/answer` 可在证据充分性检查通过后调用 DeepSeek，把选中的 Top-K 证据归纳为带 `[E#]` 引用的结构化回答；模型未启用或调用失败时明确返回“仅证据/生成失败”状态，原始证据仍可单独展开，但不会伪装成 AI 总结。
 
 可选的 Cross-Encoder reranker 已封装但默认关闭；只有在真实下载模型并完成同配置实验后才应把其结果写进简历。检索、路由、实时核验、证据充分性、拒答和正式评测不依赖在线 LLM；DeepSeek 只作为 `/answer` 的可选证据归纳层。本项目的工程主链路不依赖 Milvus、RAGAS 或 Gradio。
 
@@ -136,44 +136,59 @@ $env:PYTHONIOENCODING = "utf-8"
 $env:MINI_NANOBOT_REPO = (Resolve-Path ..\Mini-Nanobot).Path
 $env:ENGINEERING_INDEX_DIR = "data/indexes/engineering"
 $env:ENGINEERING_MANIFEST_PATH = "data/manifests/builds/current.json"
-$env:ENGINEERING_GENERATION_PROVIDER = "deterministic"
+# 完整 RAG 演示：检索后调用 DeepSeek 归纳证据。
+# 需要在未跟踪的 .env 或 Conda 环境中配置有效 DEEPSEEK_API_KEY。
+$env:ENGINEERING_GENERATION_PROVIDER = "deepseek"
 
 # 可选：启用本地 API 鉴权；留空则仅依赖 loopback 网络边界
 $env:RAG_API_TOKEN = python -c "import secrets; print(secrets.token_urlsafe(32))"
 python app.py
 ```
 
+如果只想离线检查召回结果，不允许把问题和证据发送到外部模型，请把上面的 provider 改为：
+
+```powershell
+$env:ENGINEERING_GENERATION_PROVIDER = "deterministic"
+```
+
 浏览器打开 `http://127.0.0.1:8000/`；若启用了鉴权，展开查询面板中的“连接设置”，输入同一个 `RAG_API_TOKEN`。令牌只保留在当前页面内存中，不会写入 URL、HTML 或浏览器存储。收到 401 时页面会自动展开并提示该设置。首次健康检查需要加载本地 Embedding 模型，可能比后续请求慢。
 
 页面是 RAG 仓库的只读观察与演示界面，只提供健康检查、证据检索和基于证据的回答；不会提供语料同步、索引构建、评测上传或修改 Mini-Nanobot 的入口。它使用仓库内独立实现的原生 HTML/CSS/JS，由 FastAPI 同源托管，不需要 Node、CDN 或 Gradio。
 
-### Dashboard 前端
+### 单页问答工作台
 
-本地页面已经重构为紧凑的 dashboard 信息架构，同时保留原有 API 契约和证据语义：
+本地页面围绕一次完整 RAG 请求收敛为一个紧凑工作台：
 
-- **响应式导航**：桌面端使用固定侧栏组织“控制台、知识概览、查询与回答、证据规则、系统状态”；窄屏下切换为带遮罩的导航抽屉，可通过关闭按钮、遮罩或 `Escape` 退出。
-- **健康指标**：知识服务概览直接读取 `GET /health`，展示知识分块与物理分区、`rg` / AST / Git 实时核验、索引 build 与新鲜度、回答生成方式，以及 Mini-Nanobot 的分支和 revision。
-- **快捷入口**：首页提供“开始有据问答”“仅检索证据”和“检查服务”三个动作，只负责切换或聚焦现有工作流，不创建新的后端能力。
-- **查询与结果工作台**：左侧集中管理“仅检索证据 / 检索并生成回答”、示例问题、Top-K 和可选连接令牌；右侧统一显示路由、证据充分性、生成方式、耗时、结构化回答和可折叠引用证据。回答中的 `[E#]` 可以定位并展开对应引用。
+- **主路径唯一**：问题输入、模式选择和提交按钮放在同一查询区；“检索并生成回答”会直接执行检索，不要求先点“仅检索证据”。
+- **回答与证据分层**：主区域只展示模型综合回答或清晰的未启用/失败/拒答状态；Top-K 原始片段默认折叠，需要核查时再展开。
+- **流水线可观察**：紧凑状态条展示路由、证据充分性、生成方式和耗时，并区分检索到的证据、实际送入模型的上下文以及回答实际引用的证据。
+- **高级信息按需展开**：Top-K、访问令牌、证据规则、索引 build 与 Mini-Nanobot revision 不再占据起始页的主要空间。
 - **边界保持不变**：页面仍只调用 `GET /health`、`POST /retrieve` 和 `POST /answer`，不会上传文档、创建或删除知识库、同步语料、构建索引、修改 Mini-Nanobot，或引入多轮聊天状态。
-- **令牌仅驻留页面内存**：本地访问令牌只从当前输入框读取，不写入 URL、HTML、`localStorage` 或 `sessionStorage`；刷新或关闭页面后需要重新输入。
-- **可访问性**：提供跳转主内容链接、语义化标签、键盘可操作控件、移动导航焦点约束与焦点恢复、`aria-expanded` / `aria-pressed` / `aria-busy` 状态、结果 `aria-live` 通知，并尊重减少动态效果的系统偏好。
+- **安全与可访问性**：令牌只驻留页面内存；保留同源请求、内容安全策略、引用跳转、键盘操作、移动端布局、焦点恢复和 `aria-live` 通知。
 
 #### 设计参考与归属
 
-Dashboard 的侧栏、欢迎卡、指标卡和快捷操作布局受到 [RAG Web UI](https://github.com/rag-web-ui/rag-web-ui)（Apache-2.0）的视觉与信息架构启发。本仓库的界面针对现有只读工程知识流程独立实现，没有复制上游 logo、图片、静态资源或前端源码，也没有宣称或复用上游的文档上传、多轮聊天、知识库 CRUD、API Key 管理等本项目并不支持的能力。
+页面的信息层级受到 [RAG Web UI](https://github.com/rag-web-ui/rag-web-ui)（Apache-2.0）的视觉启发，但针对本项目的只读工程知识流程独立实现。仓库没有复制上游 logo、图片、静态资源或前端源码，也没有宣称或复用上游的文档上传、多轮聊天、知识库 CRUD、API Key 管理等本项目并不支持的能力。
 
 `ENGINEERING_GENERATION_PROVIDER` 有三种模式：
 
 | 模式 | `/answer` 行为 |
 | --- | --- |
-| `auto` | 有有效 `DEEPSEEK_API_KEY` 时使用 DeepSeek；未配置时自动使用确定性摘要。 |
+| `auto` | 有有效 `DEEPSEEK_API_KEY` 时使用 DeepSeek；未配置时只返回检索证据，不生成 AI 总结。 |
 | `deepseek` | 强制启用 DeepSeek；缺少有效密钥会把服务视为配置错误。 |
-| `deterministic`（默认） | 永不调用在线模型，只返回确定性证据摘要，适合离线运行和可复现测试。 |
+| `deterministic`（默认） | 永不调用在线模型；明确标记为 `evidence_only` 并只返回结构化检索证据，适合离线运行和可复现测试。 |
 
-`/retrieve` 在三种模式下都不会调用 DeepSeek。路由、实时核验、Evidence Guard 和拒答先确定性执行；只有证据充足的 `/answer` 才会把用户问题和本次选中的证据片段发送给 DeepSeek。模型超时、服务异常、空响应或返回无效引用时，系统会保留原检索结果并退回确定性摘要，响应中的 `generation_mode` 会标明 `model`、`deterministic`、`deterministic_fallback` 或 `refusal`。
+`/retrieve` 在三种模式下都不会调用 DeepSeek。路由、实时核验、Evidence Guard 和拒答先确定性执行；只有证据充足的 `/answer` 才会把用户问题和本次选中的证据片段发送给 DeepSeek。模型超时、鉴权失败、服务异常、空响应或返回无效引用时，系统会保留原检索结果，但不会把原文拼接伪装成 AI 总结。
 
-健康检查中的“DeepSeek 已配置”只表示已创建在线生成客户端，不会主动发送付费请求验证密钥。一次 `/answer` 返回 `generation_mode=model` 才代表本次调用和引用校验均成功；`deterministic_fallback` 表示检索成功但模型调用或输出校验失败。
+`/answer` 使用 `engineering-answer/v2` 契约分开描述三层证据：
+
+- `retrieved_evidence`：本次检索返回的完整 Top-K，顺序和 `[E#]` 编号不变；
+- `generation_context`：经过同页重叠去重、定义类问题的 prose/overview 优先和上下文预算后，被选为模型输入的证据条目子集；响应保留完整 chunk 便于审阅，构造提示词时仍会按单条与总字符预算截断正文；
+- `answer_citations`：模型回答文本中真正引用的证据子集。
+
+`generation` 同时返回 `model | evidence_only | fallback | refusal`、是否尝试/成功、provider/model、非敏感失败码以及召回/上下文数量。旧的 `generation_mode`、`generation_provider` 和 `citations` 字段暂时保留兼容。
+
+健康检查中的“DeepSeek 已配置”只表示已创建在线生成客户端，不会主动发送付费请求验证密钥。一次 `/answer` 返回 `generation.status=model`（兼容字段为 `generation_mode=model`）才代表本次模型调用和引用校验均成功；`generation.status=fallback` 表示检索成功，但模型调用或输出校验失败。
 
 这是明确的隐私边界：启用 `auto`/`deepseek` 后，发送内容可能包含 Mini-Nanobot 的源码、内部设计或历史片段。不要对无权发送给第三方的私有语料启用在线生成；这类场景使用 `deterministic`，或把 `DEEPSEEK_BASE_URL` 指向经过授权的兼容服务。密钥不得放入 URL、页面输入、命令历史、日志或版本库。
 
@@ -200,7 +215,7 @@ python main.py serve --host 127.0.0.1 --port 8000
 - `GET /`：本地工程知识检索页面；
 - `GET /health`：build freshness、分区和实时核验状态，不泄露本机绝对路径；
 - `POST /retrieve`：返回 `engineering-retrieval/v1`、路由、充分性、`refusal_reason`、引用和证据；
-- `POST /answer`：按 `auto | deepseek | deterministic` 配置生成带引用的回答；证据不足时在调用模型前拒答，模型失败时安全退回确定性摘要。
+- `POST /answer`：自动执行“Top-K 检索 → 证据门控 → 上下文去重 → 可选模型综合 → 引用校验”；证据不足时在调用模型前拒答，模型失败时保留证据并返回明确失败状态。
 
 内置 Uvicorn 入口只允许 loopback 绑定；远程访问必须在其前面配置带 TLS 与鉴权的反向代理。Mini-Nanobot 对任何非 loopback 地址都要求 HTTPS，并拒绝 30x 跳转，防止查询内容或 Authorization 泄漏。
 

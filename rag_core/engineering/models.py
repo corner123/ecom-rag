@@ -61,21 +61,7 @@ class RetrievalOutcome:
             "matched_rule": self.matched_rule,
             "citations": [citation.to_dict() for citation in self.citations],
             "results": [
-                {
-                    "content": result.content if include_content else "",
-                    "citation": _public_source(result),
-                    "source": _public_source(result),
-                    "score": result.score,
-                    "corpus": result.corpus,
-                    "authority": result.authority,
-                    "line_start": result.line_start,
-                    "line_end": result.line_end,
-                    "symbol": result.symbol,
-                    "retriever": result.retriever,
-                    "evidence_role": result.metadata.get("evidence_role", ""),
-                    "live_verified": bool(result.metadata.get("live_verification")),
-                    "metadata": _public_metadata(result.metadata),
-                }
+                _public_result(result, include_content=include_content)
                 for result in self.results
             ],
         }
@@ -132,6 +118,65 @@ def _public_source(result: EngineeringSearchResult) -> str:
     return result.source
 
 
+def _public_result(
+    result: EngineeringSearchResult, *, include_content: bool = True
+) -> dict[str, Any]:
+    return {
+        "content": result.content if include_content else "",
+        "citation": _public_source(result),
+        "source": _public_source(result),
+        "score": result.score,
+        "corpus": result.corpus,
+        "authority": result.authority,
+        "line_start": result.line_start,
+        "line_end": result.line_end,
+        "symbol": result.symbol,
+        "retriever": result.retriever,
+        "evidence_role": result.metadata.get("evidence_role", ""),
+        "live_verified": bool(result.metadata.get("live_verification")),
+        "metadata": _public_metadata(result.metadata),
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievedEvidence:
+    """One public evidence block with its stable retrieval citation.
+
+    ``retrieved_evidence`` contains the complete Top-K list, while
+    ``generation_context`` contains the evidence entries selected for
+    generation. Its public payload keeps each full chunk for review, while
+    prompt construction may truncate chunk text to the configured character
+    budget. Both lists retain the original retrieval ID so the prompt, answer
+    and public response agree on the meaning of ``[E#]``.
+    """
+
+    citation: EvidenceCitation
+    result: EngineeringSearchResult
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = _public_result(self.result)
+        payload["citation_id"] = self.citation.citation_id
+        payload["citation_detail"] = self.citation.to_dict()
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class GenerationStatus:
+    """Machine-readable answer-generation state without provider secrets."""
+
+    status: str
+    attempted: bool
+    succeeded: bool
+    provider: str
+    model: str | None = None
+    failure_code: str | None = None
+    retrieved_count: int = 0
+    context_count: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 @dataclass(slots=True)
 class AnswerOutcome:
     query: str
@@ -143,9 +188,32 @@ class AnswerOutcome:
     warnings: list[str] = field(default_factory=list)
     generation_mode: str = "deterministic"
     generation_provider: str = "deterministic"
+    generation_model: str | None = None
+    retrieved_evidence: list[RetrievedEvidence] = field(default_factory=list)
+    generation_context: list[RetrievedEvidence] = field(default_factory=list)
+    answer_citations: list[EvidenceCitation] = field(default_factory=list)
+    generation: GenerationStatus | None = None
 
     def to_dict(self) -> dict[str, Any]:
+        generation = self.generation or GenerationStatus(
+            status=(
+                "model"
+                if self.generation_mode == "model"
+                else "fallback"
+                if self.generation_mode == "deterministic_fallback"
+                else "refusal"
+                if self.generation_mode == "refusal"
+                else "evidence_only"
+            ),
+            attempted=self.generation_mode in {"model", "deterministic_fallback"},
+            succeeded=self.generation_mode == "model",
+            provider=self.generation_provider,
+            model=self.generation_model,
+            retrieved_count=len(self.retrieved_evidence),
+            context_count=len(self.generation_context),
+        )
         return {
+            "schema_version": "engineering-answer/v2",
             "query": self.query,
             "intent": self.intent.value,
             "answer": self.answer,
@@ -154,5 +222,19 @@ class AnswerOutcome:
             "warnings": list(self.warnings),
             "generation_mode": self.generation_mode,
             "generation_provider": self.generation_provider,
+            "generation_model": self.generation_model,
+            "generation": generation.to_dict(),
+            "retrieved_evidence": [
+                evidence.to_dict() for evidence in self.retrieved_evidence
+            ],
+            "generation_context": [
+                evidence.to_dict() for evidence in self.generation_context
+            ],
+            "answer_citations": [
+                citation.to_dict() for citation in self.answer_citations
+            ],
+            # ``citations`` is the v1 compatibility field.  It continues to
+            # describe all evidence returned with the answer; v2 consumers
+            # should use ``answer_citations`` for claims made by the model.
             "citations": [citation.to_dict() for citation in self.citations],
         }

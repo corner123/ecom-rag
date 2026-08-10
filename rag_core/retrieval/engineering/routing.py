@@ -26,6 +26,27 @@ class SourceRoute:
 class SourceIntentRouter:
     """Route with transparent rules and no model or network call."""
 
+    _controlled_query_aliases = (
+        (
+            re.compile(
+                r"(?<![A-Za-z0-9_])langchian(?![A-Za-z0-9_])",
+                re.IGNORECASE,
+            ),
+            "LangChain",
+            "query_normalized_langchian_to_langchain",
+        ),
+    )
+    _query_alias_context = re.compile(
+        r"(?:什么是|是什[么麼]|介绍|简介|概述|官方(?:文档|规范|说明)?|"
+        r"怎么(?:用|使用|配置)|如何(?:用|使用|配置)|what\s+is|"
+        r"overview|documentation|docs?|getting[-_ ]started)",
+        re.IGNORECASE,
+    )
+    _backticked_langchian = re.compile(
+        r"`[^`\r\n]*langchian[^`\r\n]*`",
+        re.IGNORECASE,
+    )
+
     _out_of_scope = re.compile(
         r"(?:天气|股票价格|股价|彩票|菜谱|航班|体育比分|"
         r"weather\s+forecast|stock\s+price|lottery|recipe|flight\s+status)",
@@ -138,8 +159,32 @@ class SourceIntentRouter:
         re.IGNORECASE,
     )
 
+    @classmethod
+    def normalize_query(cls, query: str) -> tuple[str, str | None]:
+        """Apply only curated, unambiguous topic aliases before retrieval.
+
+        The ASCII lookarounds intentionally allow Chinese text immediately
+        before or after a Latin product name while avoiding replacements
+        inside a longer identifier.  Unknown near-matches are never guessed.
+        """
+
+        if (
+            not cls._query_alias_context.search(query)
+            or cls._backticked_langchian.search(query)
+        ):
+            return query, None
+
+        normalized = query
+        warning: str | None = None
+        for pattern, replacement, warning_code in cls._controlled_query_aliases:
+            updated, count = pattern.subn(replacement, normalized)
+            if count:
+                normalized = updated
+                warning = warning_code
+        return normalized, warning
+
     def classify(self, query: str) -> SourceIntent:
-        text = query.strip()
+        text, _warning = self.normalize_query(query.strip())
         if not text or self._out_of_scope.search(text):
             return SourceIntent.OUT_OF_SCOPE
 

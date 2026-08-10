@@ -157,9 +157,10 @@ class EngineeringRAGService:
 
     def retrieve(self, query: str, *, top_k: int = 5) -> RetrievalOutcome:
         query = self._validate_query(query)
+        retrieval_query, normalization_warning = self.router.normalize_query(query)
         if not 1 <= top_k <= 50:
             raise ValueError("top_k must be between 1 and 50")
-        route = self.router.route(query)
+        route = self.router.route(retrieval_query)
         if route.intent is SourceIntent.OUT_OF_SCOPE:
             return RetrievalOutcome(
                 query=query,
@@ -168,12 +169,15 @@ class EngineeringRAGService:
                 citations=[],
                 sufficient_evidence=False,
                 refusal_reason=self.router.refusal_reason(query),
-                warnings=["query is outside the configured engineering knowledge scope"],
+                warnings=[
+                    *([normalization_warning] if normalization_warning else []),
+                    "query is outside the configured engineering knowledge scope",
+                ],
                 matched_rule=route.matched_rule,
             )
 
         indexed = self.retriever.search(
-            query,
+            retrieval_query,
             top_k=max(top_k, top_k * 2),
             corpora=route.corpora,
             authorities=route.authorities,
@@ -182,14 +186,14 @@ class EngineeringRAGService:
         supporting_candidates: list[EngineeringSearchResult] = []
         if route.intent is SourceIntent.DESIGN:
             supporting_candidates = self.retriever.search(
-                query,
+                retrieval_query,
                 top_k=max(2, top_k),
                 corpora=("internal",),
                 authorities=("code", "test"),
             )
         elif route.intent is SourceIntent.IMPLEMENTATION:
             supporting_candidates = self.retriever.search(
-                query,
+                retrieval_query,
                 top_k=max(2, top_k),
                 corpora=("internal",),
                 authorities=("design", "history"),
@@ -203,7 +207,7 @@ class EngineeringRAGService:
             # visible. Always retrieve the normative side explicitly; the
             # final evidence contract still requires live implementation too.
             official_candidates = self.retriever.search(
-                query,
+                retrieval_query,
                 top_k=max(2, top_k),
                 corpora=("official",),
                 authorities=("official",),
@@ -216,7 +220,7 @@ class EngineeringRAGService:
             )
         if self.reranker is not None and indexed:
             indexed = self.reranker.rerank(
-                query,
+                retrieval_query,
                 indexed,
                 top_k=max(top_k, top_k * 2),
             )
@@ -226,14 +230,14 @@ class EngineeringRAGService:
         terms: tuple[str, ...] = ()
         live_results: list[EngineeringSearchResult] = []
         if live_attempted and (self.live_code is not None or self.live_ast is not None):
-            terms = tuple(self._verification_terms(query, indexed))
+            terms = tuple(self._verification_terms(retrieval_query, indexed))
             live_results = self._search_live_terms(
                 terms,
                 top_k=max(top_k, 8),
                 revision=live_revision,
             )
         elif live_attempted:
-            terms = tuple(self._verification_terms(query, indexed))
+            terms = tuple(self._verification_terms(retrieval_query, indexed))
 
         if live_results:
             results = rrf_fusion(
@@ -259,9 +263,11 @@ class EngineeringRAGService:
         sufficient, warnings, refusal_reason = self._evidence_status(
             route.intent, results, live_attempted
         )
+        if normalization_warning:
+            warnings.insert(0, normalization_warning)
         if sufficient:
             guarded, guard_warnings, guard_reason = self.sufficiency_guard.check(
-                query, route.intent, results
+                retrieval_query, route.intent, results
             )
             sufficient = guarded
             warnings.extend(guard_warnings)

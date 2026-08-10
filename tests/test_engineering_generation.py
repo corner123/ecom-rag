@@ -103,7 +103,10 @@ def test_empty_model_output_uses_deterministic_fallback(generated):
     assert answer.refused is False
     assert answer.generation_mode == "deterministic_fallback"
     assert "model_generation_empty_fallback_used" in answer.warnings
-    assert "[E1]" in answer.answer
+    assert "[E1]" not in answer.answer
+    assert "不生成归纳答案" in answer.answer
+    assert answer.answer_citations == []
+    assert [item.citation.citation_id for item in answer.retrieved_evidence] == ["E1"]
 
 
 def test_model_exception_is_safely_degraded_without_secret(caplog):
@@ -116,6 +119,26 @@ def test_model_exception_is_safely_degraded_without_secret(caplog):
     assert "model_generation_failed_fallback_used" in answer.warnings
     serialized = f"{answer.to_dict()} {caplog.text}"
     assert "provider-sensitive-detail" not in serialized
+
+
+@pytest.mark.parametrize(
+    ("exception", "failure_code"),
+    [
+        (type("AuthenticationError", (Exception,), {})(), "provider_authentication_failed"),
+        (TimeoutError(), "provider_timeout"),
+        (RuntimeError(), "provider_error"),
+    ],
+)
+def test_provider_failure_is_exposed_only_as_safe_code(exception, failure_code):
+    def broken(_prompt: str) -> str:
+        raise exception
+
+    payload = GroundedAnswerer(broken, provider="deepseek").answer(_retrieval()).to_dict()
+
+    assert payload["generation"]["status"] == "fallback"
+    assert payload["generation"]["attempted"] is True
+    assert payload["generation"]["succeeded"] is False
+    assert payload["generation"]["failure_code"] == failure_code
 
 
 @pytest.mark.parametrize("generated", ["没有引用", "错误引用。[E99]"])
@@ -206,6 +229,116 @@ def test_repeated_citation_across_fact_units_remains_valid():
 
     assert answer.generation_mode == "model"
     assert answer.answer.count("[E1]") == 2
+
+
+def test_answer_v2_separates_retrieved_evidence_from_cited_subset():
+    first = _result("first current implementation fact")
+    second = _result(
+        "second supporting implementation fact",
+        role="indexed_implementation",
+        relative_path="mini_nanobot/core/other.py",
+    )
+    answer = GroundedAnswerer(
+        lambda _prompt: "只使用第一条事实。[E1]",
+        provider="deepseek",
+        model="deepseek-v4-flash",
+    ).answer(_retrieval(first, second))
+
+    payload = answer.to_dict()
+    assert payload["schema_version"] == "engineering-answer/v2"
+    assert [item["citation_id"] for item in payload["retrieved_evidence"]] == [
+        "E1",
+        "E2",
+    ]
+    assert [item["citation_id"] for item in payload["answer_citations"]] == ["E1"]
+    # The v1 field remains available for older clients and still carries the
+    # complete evidence set returned with the answer.
+    assert [item["citation_id"] for item in payload["citations"]] == ["E1", "E2"]
+    assert payload["generation"] == {
+        "status": "model",
+        "attempted": True,
+        "succeeded": True,
+        "provider": "deepseek",
+        "model": "deepseek-v4-flash",
+        "failure_code": None,
+        "retrieved_count": 2,
+        "context_count": 2,
+    }
+
+
+def test_generation_contract_distinguishes_evidence_only_fallback_and_refusal():
+    evidence_only = GroundedAnswerer().answer(_retrieval()).to_dict()
+    fallback = GroundedAnswerer(
+        lambda _prompt: "", provider="deepseek", model="deepseek-v4-flash"
+    ).answer(_retrieval()).to_dict()
+    refusal = GroundedAnswerer(
+        lambda _prompt: "must not run", provider="deepseek"
+    ).answer(_retrieval(sufficient=False)).to_dict()
+
+    assert evidence_only["generation"]["status"] == "evidence_only"
+    assert evidence_only["generation"]["attempted"] is False
+    assert evidence_only["answer_citations"] == []
+    assert fallback["generation"]["status"] == "fallback"
+    assert fallback["generation"]["failure_code"] == "empty_response"
+    assert fallback["answer_citations"] == []
+    assert refusal["generation"]["status"] == "refusal"
+    assert refusal["generation"]["failure_code"] == "insufficient_evidence"
+    assert refusal["retrieved_evidence"]
+
+
+def test_langchain_definition_context_prefers_overview_and_deduplicates_same_page():
+    source = "https://docs.langchain.com/oss/python/langchain/overview"
+    code = _result(
+        "```python\nfrom langchain.agents import create_agent\ncreate_agent(model='x')\n```",
+        role="external_normative",
+        source=source,
+        relative_path=source,
+    )
+    overview_text = (
+        "# LangChain overview\nLangChain is an open source framework with a prebuilt "
+        "agent architecture and integrations for models and tools. " * 3
+    )
+    overview = _result(
+        overview_text,
+        role="external_normative",
+        source=source,
+        relative_path=source,
+    )
+    overlap = _result(
+        overview_text + "Additional trailing navigation.",
+        role="external_normative",
+        source=source,
+        relative_path=source,
+    )
+    retrieval = _retrieval(code, overview, overlap, intent=SourceIntent.OFFICIAL)
+    retrieval.query = "LangChain是什么"
+    prompts: list[str] = []
+
+    def generator(prompt: str) -> str:
+        prompts.append(prompt)
+        return "LangChain 是一个开源框架。[E2]"
+
+    answerer = GroundedAnswerer(generator, provider="deepseek")
+
+    prepared = answerer.prepare_evidence(retrieval)
+    answer = answerer.answer(retrieval)
+    payload = answer.to_dict()
+
+    assert [item.citation.citation_id for item in prepared] == ["E2", "E1"]
+    assert [item["citation_id"] for item in payload["retrieved_evidence"]] == [
+        "E1",
+        "E2",
+        "E3",
+    ]
+    assert [item["citation_id"] for item in payload["generation_context"]] == [
+        "E2",
+        "E1",
+    ]
+    assert [item["citation_id"] for item in payload["answer_citations"]] == ["E2"]
+    assert payload["generation"]["retrieved_count"] == 3
+    assert payload["generation"]["context_count"] == 2
+    assert prompts[0].index("[E2]") < prompts[0].index("[E1]")
+    assert "[E3]" not in prompts[0]
 
 
 class _FakeCompletions:

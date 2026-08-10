@@ -27,13 +27,22 @@
   };
 
   const WARNING_LABELS = {
-    model_generation_failed_fallback_used: "DeepSeek 调用失败，已安全降级为确定性证据摘要。",
-    model_generation_empty_fallback_used: "DeepSeek 返回了空内容，已安全降级为确定性证据摘要。",
-    model_generation_invalid_citations_fallback_used: "DeepSeek 返回的引用不符合证据约束，已安全降级为确定性证据摘要。",
+    query_normalized_langchian_to_langchain: "已将 Langchian 按常见拼写错误纠正为 LangChain 后检索。",
+    model_generation_failed_fallback_used: "大模型调用失败；本次仅保留检索证据，没有生成 AI 回答。",
+    model_generation_empty_fallback_used: "大模型返回空内容；本次仅保留检索证据，没有生成 AI 回答。",
+    model_generation_invalid_citations_fallback_used: "大模型引用未通过证据校验；本次仅保留检索证据，没有生成 AI 回答。",
+  };
+
+  const GENERATION_FAILURE_LABELS = {
+    provider_authentication_failed: "DeepSeek 鉴权失败。请更新 DEEPSEEK_API_KEY 并重启服务。",
+    provider_timeout: "大模型请求超时。检索结果仍然可用，可稍后重试生成。",
+    provider_error: "大模型服务调用失败。检索结果仍然可用，请检查服务配置。",
+    invalid_citations: "模型回答的引用未通过校验，因此没有展示该回答。",
+    empty_response: "模型没有返回可展示的回答。",
   };
 
   const state = {
-    mode: "retrieve",
+    mode: "answer",
     requestController: null,
     lastRequest: null,
     disclosureTimers: new Map(),
@@ -93,6 +102,8 @@
     responseSummary: document.querySelector("#response-summary"),
     responseAlerts: document.querySelector("#response-alerts"),
     answerBlock: document.querySelector("#answer-block"),
+    answerModeLabel: document.querySelector("#answer-mode-label"),
+    answerModeCaption: document.querySelector("#answer-mode-caption"),
     answerText: document.querySelector("#answer-text"),
     evidenceLabel: document.querySelector("#evidence-label"),
     evidenceCount: document.querySelector("#evidence-count"),
@@ -622,11 +633,7 @@
     if (citation.live_verified === true) top.append(element("span", "live-chip", "LIVE VERIFIED"));
     title.append(top, sourceNode(citation.source || "unknown source"));
     const meta = element("div", "evidence-meta");
-    const fields = [];
-    if (citation.symbol) fields.push(`symbol: ${citation.symbol}`);
-    if (citation.line_start) {
-      fields.push(`lines: ${citation.line_start}${citation.line_end ? `-${citation.line_end}` : ""}`);
-    }
+    const fields = metadataText(citation);
     if (citation.revision) fields.push(`revision: ${shortHash(citation.revision)}`);
     fields.forEach((value) => meta.append(element("span", "", value)));
     title.append(meta);
@@ -645,6 +652,13 @@
       details.append(element("span", "", `来源版本：${citation.source_version}`));
     }
     card.append(details);
+    const rawContent = String(citation.content || "").trim();
+    if (rawContent) {
+      const content = rawContent.length > 12_000
+        ? `${rawContent.slice(0, 12_000)}\n\n[页面展示已截断]`
+        : rawContent;
+      card.append(element("pre", "evidence-content", content));
+    }
     return card;
   }
 
@@ -751,18 +765,46 @@
     });
   }
 
+  function generationDetails(payload) {
+    const generation = payload.generation && typeof payload.generation === "object"
+      ? payload.generation
+      : {};
+    return {
+      mode: generation.mode || generation.type || generation.status || payload.generation_mode || "evidence_only",
+      provider: generation.provider || payload.generation_provider || "deterministic",
+      model: generation.model || payload.generation_model || null,
+      attempted: generation.attempted === true,
+      succeeded: generation.succeeded === true,
+      failureCode: generation.failure_code || null,
+      retrievedCount: Number.isInteger(generation.retrieved_count) ? generation.retrieved_count : null,
+      contextCount: Number.isInteger(generation.context_count) ? generation.context_count : null,
+    };
+  }
+
+  function arrayField(payload, preferred, legacy) {
+    return Array.isArray(payload[preferred]) ? payload[preferred] : (payload[legacy] || []);
+  }
+
+  function renderGenerationStatus(title, caption, message) {
+    dom.answerModeLabel.textContent = title;
+    dom.answerModeCaption.textContent = caption;
+    dom.answerText.replaceChildren(element("p", "generation-status", message));
+  }
+
   function renderResponse(payload, mode, elapsedMs) {
     const isRetrieve = mode === "retrieve";
     const sufficient = isRetrieve ? payload.sufficient_evidence === true : payload.refused !== true;
     const intent = INTENT_LABELS[payload.intent] || payload.intent || "未知";
-    const liveAttempted = isRetrieve ? payload.live_verification_attempted === true : null;
-    const generationLabel = payload.generation_mode === "model"
-      ? (payload.generation_provider === "deepseek" ? "DeepSeek" : (payload.generation_provider || "模型"))
-      : payload.generation_mode === "deterministic_fallback"
-        ? "证据兜底"
-        : payload.generation_mode === "refusal"
+    const generation = generationDetails(payload);
+    const generationLabel = generation.mode === "model"
+      ? (generation.provider === "deepseek" ? "DeepSeek" : (generation.provider || "模型"))
+      : generation.mode === "deterministic_fallback" || generation.mode === "fallback"
+        ? "生成失败"
+        : generation.mode === "refusal"
           ? "拒答"
-          : "确定性摘要";
+          : isRetrieve
+            ? "未生成"
+            : "仅证据";
 
     dom.responseSummary.replaceChildren(
       summaryItem("路由", intent),
@@ -772,8 +814,8 @@
         sufficient ? "summary-good" : "summary-bad",
       ),
       summaryItem(
-        isRetrieve ? "实时核验" : "生成方式",
-        isRetrieve ? (liveAttempted ? "已执行" : "未触发") : generationLabel,
+        "生成方式",
+        isRetrieve ? "未生成（仅检索）" : generationLabel,
       ),
       summaryItem("请求耗时", `${elapsedMs.toFixed(0)} ms`),
     );
@@ -785,8 +827,15 @@
       addAlert("warning", "以下内容仅是候选线索，不能作为该问题的充分证明。 ");
     }
     (payload.warnings || []).forEach((warning) => {
+      if (generation.failureCode && String(warning).startsWith("model_generation_")) return;
       addAlert("warning", WARNING_LABELS[warning] || warning);
     });
+    if (!isRetrieve && generation.failureCode && GENERATION_FAILURE_LABELS[generation.failureCode]) {
+      addAlert(
+        generation.failureCode === "provider_authentication_failed" ? "error" : "warning",
+        GENERATION_FAILURE_LABELS[generation.failureCode],
+      );
+    }
     if (isRetrieve && payload.live_revision && payload.live_revision.dirty === true) {
       const revision = payload.live_revision;
       addAlert(
@@ -795,17 +844,50 @@
       );
     }
 
-    const items = isRetrieve ? payload.results || [] : payload.citations || [];
+    const retrievedEvidence = arrayField(payload, "retrieved_evidence", "results");
+    const generationContext = Array.isArray(payload.generation_context)
+      ? payload.generation_context
+      : retrievedEvidence;
+    const answerCitations = arrayField(payload, "answer_citations", "citations");
+    const items = isRetrieve
+      ? retrievedEvidence
+      : (retrievedEvidence.length ? retrievedEvidence : answerCitations);
     dom.answerBlock.hidden = isRetrieve;
     if (isRetrieve) {
       dom.answerText.replaceChildren();
     } else {
-      renderGroundedAnswer(payload.answer, items);
+      if (generation.mode === "model") {
+        dom.answerModeLabel.textContent = "大模型综合回答";
+        dom.answerModeCaption.textContent = `召回 ${retrievedEvidence.length} 条，筛选 ${generationContext.length} 条上下文，由 ${generationLabel} 综合`;
+        renderGroundedAnswer(payload.answer, answerCitations);
+      } else if (generation.mode === "deterministic_fallback" || generation.mode === "fallback") {
+        renderGenerationStatus(
+          "大模型生成暂不可用",
+          "已保留本次 Top-K 检索结果",
+          "系统没有把原始片段拼接成答案。请展开下方证据查看检索结果，或检查模型配置后重试。",
+        );
+      } else if (generation.mode === "refusal" || payload.refused === true) {
+        renderGenerationStatus(
+          "证据不足，已拒答",
+          "没有使用无关证据强行生成",
+          "当前知识库没有找到足以支持答案的证据。请换一种问法，或补充相应知识来源。",
+        );
+      } else {
+        renderGenerationStatus(
+          "仅完成证据检索",
+          "本次未调用大模型",
+          "Top-K 相关片段已经返回。请展开下方证据查看原文；如需自然语言综合回答，请启用模型生成。",
+        );
+      }
     }
     dom.evidenceCount.textContent = String(items.length);
-    dom.evidenceLabel.textContent = isRetrieve ? "证据列表" : "回答引用";
-    dom.evidenceCaption.textContent = isRetrieve ? "按综合排名展示" : "用于约束上方摘要";
-    dom.evidenceDrawer.open = isRetrieve;
+    dom.evidenceLabel.textContent = "检索到的 Top-K 证据";
+    dom.evidenceCaption.textContent = isRetrieve
+      ? "展开查看按综合排名返回的原始片段"
+      : generation.mode === "model"
+        ? `展开查看 ${retrievedEvidence.length} 条召回结果；其中 ${generationContext.length} 条送入模型`
+        : "展开查看本次召回的原始片段与引用来源";
+    dom.evidenceDrawer.open = false;
     dom.evidenceList.replaceChildren();
     if (!items.length) {
       dom.evidenceList.append(
@@ -815,7 +897,9 @@
       const usedCitationIds = new Set();
       items.forEach((item, index) => {
         dom.evidenceList.append(
-          isRetrieve ? renderEvidence(item, index) : renderCitation(item, index, usedCitationIds),
+          isRetrieve || !item.citation_id
+            ? renderEvidence(item, index)
+            : renderCitation(item, index, usedCitationIds),
         );
       });
     }
@@ -824,7 +908,7 @@
       ? `检索完成，共 ${items.length} 条证据。`
       : payload.refused === true
         ? "回答已安全拒绝，请查看拒答原因。"
-        : `回答完成，生成方式为 ${generationLabel}，包含 ${items.length} 条引用。`;
+        : `回答完成，生成方式为 ${generationLabel}，包含 ${items.length} 条检索证据。`;
     if (window.matchMedia("(max-width: 900px)").matches) {
       dom.resultHeadingTitle.scrollIntoView({
         block: "start",
@@ -1020,7 +1104,7 @@
   syncNavigationAccessibility();
   dom.toggleToken.setAttribute("aria-pressed", "false");
   dom.toggleToken.setAttribute("aria-label", "显示本地访问令牌");
-  setMode("retrieve");
+  setMode("answer");
   showState("empty");
   checkHealth({ focusOnAuth: false });
 })();

@@ -410,6 +410,14 @@ def test_sufficiency_guard_rejects_uncatalogued_or_ungrounded_topics(tmp_path: P
     assert unknown_framework.intent.value == "design"
     assert unknown_framework.sufficient_evidence is False
 
+    unknown_suffix = service.retrieve("someunknownframework是什么？")
+    assert unknown_suffix.intent.value == "design"
+    assert unknown_suffix.sufficient_evidence is False
+    assert unknown_suffix.refusal_reason in {
+        "missing_internal_design_evidence",
+        "unsupported_anchor",
+    }
+
     guarded, warnings, reason = EvidenceSufficiencyGuard().check(
         "什么是someunknownframework？",
         unknown_framework.intent,
@@ -427,8 +435,28 @@ def test_sufficiency_guard_rejects_uncatalogued_or_ungrounded_topics(tmp_path: P
     assert reason == "unsupported_anchor"
     assert any("someunknownframework" in warning for warning in warnings)
 
+    suffix_guarded, suffix_warnings, suffix_reason = EvidenceSufficiencyGuard().check(
+        "someunknownframework是什么？",
+        unknown_suffix.intent,
+        [
+            _result(
+                "选择 SQLite snapshot 是为了简单的本地恢复",
+                "docs/adr/0002.md",
+                corpus="internal",
+                authority="design",
+                metadata={"evidence_role": "internal_design"},
+            )
+        ],
+    )
+    assert suffix_guarded is False
+    assert suffix_reason == "unsupported_anchor"
+    assert any("someunknownframework" in warning for warning in suffix_warnings)
 
-@pytest.mark.parametrize("query", ["什么是langchain？", "什么是LangChain？"])
+
+@pytest.mark.parametrize(
+    "query",
+    ["什么是langchain？", "什么是LangChain？", "Langchian是什么"],
+)
 def test_langchain_queries_use_official_scope_and_refuse_without_source(
     tmp_path: Path, query: str
 ):
@@ -442,6 +470,9 @@ def test_langchain_queries_use_official_scope_and_refuse_without_source(
     assert retrieval.refusal_reason == "missing_official_evidence"
     assert answer.refused is True
     assert answer.citations == []
+    if "Langchian" in query:
+        assert retrieval.query == query
+        assert "query_normalized_langchian_to_langchain" in retrieval.warnings
 
 
 def test_fastapi_health_retrieve_answer_and_optional_token(tmp_path: Path):
@@ -483,9 +514,15 @@ def test_fastapi_health_retrieve_answer_and_optional_token(tmp_path: Path):
         headers={"X-RAG-Token": "secret-token"},
     )
     assert answered.status_code == 200
-    assert answered.json()["refused"] is False
-    assert answered.json()["generation_mode"] == "deterministic"
-    assert answered.json()["generation_provider"] == "deterministic"
+    answer_payload = answered.json()
+    assert answer_payload["refused"] is False
+    assert answer_payload["schema_version"] == "engineering-answer/v2"
+    assert answer_payload["generation_mode"] == "deterministic"
+    assert answer_payload["generation_provider"] == "deterministic"
+    assert answer_payload["generation"]["status"] == "evidence_only"
+    assert answer_payload["generation"]["attempted"] is False
+    assert answer_payload["retrieved_evidence"]
+    assert answer_payload["answer_citations"] == []
 
 
 def test_fastapi_retrieve_never_calls_model_and_answer_failure_stays_available(
@@ -518,6 +555,10 @@ def test_fastapi_retrieve_never_calls_model_and_answer_failure_stays_available(
     payload = answered.json()
     assert payload["generation_mode"] == "deterministic_fallback"
     assert payload["generation_provider"] == "deepseek"
+    assert payload["generation"]["status"] == "fallback"
+    assert payload["generation"]["failure_code"] == "provider_timeout"
+    assert payload["retrieved_evidence"]
+    assert payload["answer_citations"] == []
     assert "model_generation_failed_fallback_used" in payload["warnings"]
     assert "provider detail" not in str(payload)
 
@@ -557,18 +598,21 @@ def test_frontend_is_static_same_origin_and_does_not_load_service():
 
     page = client.get("/")
     assert page.status_code == 200
-    assert "工程知识检索台" in page.text
+    assert "先检索证据，再生成回答" in page.text
     assert "do-not-embed" not in page.text
     assert "http://" not in page.text
     assert "https://" not in page.text
-    assert "仅检索证据" in page.text
+    assert "仅检索" in page.text
     assert "检索并生成回答" in page.text
-    assert "会自动执行检索，无需先点" in page.text
+    assert "点击“检索并生成回答”即可一次完成检索和生成" in page.text
     assert 'id="metric-answer-provider"' in page.text
     assert 'id="status-popover"' in page.text
     assert 'id="about-popover"' in page.text
     assert 'id="token-settings"' in page.text
     assert 'id="evidence-drawer"' in page.text
+    assert 'id="evidence-drawer" class="evidence-drawer" open' not in page.text
+    assert 'id="answer-mode-label"' in page.text
+    assert 'id="answer-mode-caption"' in page.text
     assert 'class="answer-content"' in page.text
     assert 'id="app-sidebar"' in page.text
     assert 'id="nav-toggle"' in page.text
@@ -596,6 +640,12 @@ def test_frontend_is_static_same_origin_and_does_not_load_service():
         assert unsafe_dom_api not in script.text
     assert "citation-ref" in script.text
     assert "allowedCitationIds.has(citationId)" in script.text
+    assert 'dom.answerModeLabel.textContent = "大模型综合回答"' in script.text
+    assert '"大模型生成暂不可用"' in script.text
+    assert '"仅完成证据检索"' in script.text
+    assert 'arrayField(payload, "retrieved_evidence", "results")' in script.text
+    assert 'arrayField(payload, "answer_citations", "citations")' in script.text
+    assert 'dom.evidenceDrawer.open = false' in script.text
     assert 'requestJson(`/${activeRequest.mode}`' in script.text
     assert 'mode === "answer" ? "检索并生成回答" : "仅检索证据"' in script.text
     assert "会自动检索并生成回答，无需先点" in script.text

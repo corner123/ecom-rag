@@ -20,7 +20,15 @@ _TOPIC_ANCHOR_RE = re.compile(
     r"\s*[`\"'“”]?\s*([A-Za-z][A-Za-z0-9_.\-/]{2,})",
     re.IGNORECASE,
 )
-_LATIN_WORD_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9_-]{2,}\b")
+_TOPIC_SUFFIX_ANCHOR_RE = re.compile(
+    r"(?<![A-Za-z0-9_])([A-Za-z][A-Za-z0-9_.\-/]{2,})(?![A-Za-z0-9_])"
+    r"\s*[`\"'“”]?\s*(?:是什么|是什[么麼]|怎么(?:使用|配置)|如何(?:使用|配置)|"
+    r"what\s+is|definition)",
+    re.IGNORECASE,
+)
+_LATIN_WORD_RE = re.compile(
+    r"(?<![A-Za-z0-9_])[A-Za-z][A-Za-z0-9_-]{2,}(?![A-Za-z0-9_])"
+)
 _GENERIC_ANCHORS = {
     "api", "cli", "rag", "agent", "mini-nanobot", "python", "json", "http",
     "url", "cpu", "mcp", "langgraph", "docker", "queryengine", "agentstate",
@@ -192,7 +200,11 @@ def _missing_hard_anchors(
 
 def _hard_anchors(query: str) -> list[str]:
     anchors: list[str] = []
-    for match in _TOPIC_ANCHOR_RE.finditer(query):
+    topic_matches = (
+        *_TOPIC_ANCHOR_RE.finditer(query),
+        *_TOPIC_SUFFIX_ANCHOR_RE.finditer(query),
+    )
+    for match in topic_matches:
         value = match.group(1).strip()
         if value.casefold() not in _GENERIC_ANCHORS:
             anchors.append(value)
