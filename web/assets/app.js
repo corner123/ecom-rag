@@ -37,6 +37,7 @@
     requestController: null,
     lastRequest: null,
     disclosureTimers: new Map(),
+    navLastFocus: null,
   };
 
   const dom = {
@@ -52,6 +53,14 @@
     metricRevision: document.querySelector("#metric-revision"),
     metricAnswerProvider: document.querySelector("#metric-answer-provider"),
     metricAnswerModel: document.querySelector("#metric-answer-model"),
+    sidebar: document.querySelector("#app-sidebar"),
+    navToggle: document.querySelector("#nav-toggle"),
+    navClose: document.querySelector("#nav-close"),
+    navOverlay: document.querySelector("#nav-overlay"),
+    navLinks: [...document.querySelectorAll("[data-nav-section]")],
+    workspaceActions: [...document.querySelectorAll("[data-workspace-mode]")],
+    healthActions: [...document.querySelectorAll("[data-health-action]")],
+    popoverLinks: [...document.querySelectorAll(".topbar-popover a[href^='#']")],
     disclosureTriggers: [...document.querySelectorAll("[data-disclosure-target]")],
     modeButtons: [...document.querySelectorAll(".mode-button")],
     form: document.querySelector("#query-form"),
@@ -169,6 +178,9 @@
         } else {
           openDisclosure(trigger, true);
         }
+        if (mobileNavigationActive() && trigger.closest("#app-sidebar")) {
+          closeNavigation();
+        }
       });
       trigger.addEventListener("focus", () => {
         if (trigger.dataset.suppressFocusOpen !== "true") openDisclosure(trigger);
@@ -209,6 +221,83 @@
     });
   }
 
+  function mobileNavigationActive() {
+    return window.matchMedia("(max-width: 900px)").matches;
+  }
+
+  function syncNavigationAccessibility() {
+    const hidden = mobileNavigationActive() && !document.body.classList.contains("nav-open");
+    dom.sidebar.toggleAttribute("inert", hidden);
+    if (hidden) dom.sidebar.setAttribute("aria-hidden", "true");
+    else dom.sidebar.removeAttribute("aria-hidden");
+  }
+
+  function openNavigation() {
+    if (!mobileNavigationActive()) return;
+    state.navLastFocus = document.activeElement;
+    document.body.classList.add("nav-open");
+    dom.navOverlay.hidden = false;
+    dom.navToggle.setAttribute("aria-expanded", "true");
+    dom.navToggle.setAttribute("aria-label", "关闭导航");
+    syncNavigationAccessibility();
+    dom.navClose.focus();
+  }
+
+  function closeNavigation({ restoreFocus = false } = {}) {
+    const wasOpen = document.body.classList.contains("nav-open");
+    const focusWasInside = dom.sidebar.contains(document.activeElement);
+    if (wasOpen && mobileNavigationActive() && (restoreFocus || focusWasInside)) {
+      const previous = state.navLastFocus;
+      const target = previous instanceof HTMLElement
+        && previous.isConnected
+        && !dom.sidebar.contains(previous)
+        ? previous
+        : dom.navToggle;
+      target.focus();
+    }
+    document.body.classList.remove("nav-open");
+    dom.navOverlay.hidden = true;
+    dom.navToggle.setAttribute("aria-expanded", "false");
+    dom.navToggle.setAttribute("aria-label", "打开导航");
+    syncNavigationAccessibility();
+    state.navLastFocus = null;
+  }
+
+  function trapNavigationFocus(event) {
+    if (event.key !== "Tab" || !document.body.classList.contains("nav-open")) return;
+    const focusable = [...dom.sidebar.querySelectorAll("a[href], button:not(:disabled)")]
+      .filter((node) => !node.hidden && node.getClientRects().length > 0);
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
+  function activateNavigationLink(link) {
+    dom.navLinks.forEach((item) => {
+      const active = item === link;
+      item.classList.toggle("is-active", active);
+      if (active) item.setAttribute("aria-current", "page");
+      else item.removeAttribute("aria-current");
+    });
+  }
+
+  function focusWorkspace(mode) {
+    setMode(mode);
+    const workspace = document.querySelector("#query-workspace");
+    workspace.scrollIntoView({
+      block: "start",
+      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+    });
+    window.setTimeout(() => dom.queryInput.focus({ preventScroll: true }), 280);
+  }
+
   function token() {
     return dom.tokenInput.value.trim();
   }
@@ -221,7 +310,11 @@
 
   async function requestJson(path, options = {}) {
     const controller = options.controller || new AbortController();
-    const timeout = window.setTimeout(() => controller.abort("timeout"), 120_000);
+    const timeout = window.setTimeout(() => {
+      if (!controller.signal.aborted) {
+        controller.abort(new DOMException("请求超时", "TimeoutError"));
+      }
+    }, 120_000);
     const headers = { Accept: "application/json" };
     const suppliedToken = token();
     if (suppliedToken) headers.Authorization = `Bearer ${suppliedToken}`;
@@ -397,7 +490,10 @@
       }
       return [`服务返回 ${error.status}`, redacted(error.message)];
     }
-    if (error && error.name === "AbortError") {
+    if ((error && error.name === "TimeoutError") || error === "timeout") {
+      return ["请求超时", "服务在 120 秒内未返回结果，请稍后重试。"];
+    }
+    if ((error && error.name === "AbortError") || error === "user") {
       return ["请求已取消", "没有产生新的检索结果。"];
     }
     return ["无法连接知识服务", redacted(error && error.message ? error.message : "请确认服务已启动。")];
@@ -730,7 +826,10 @@
         ? "回答已安全拒绝，请查看拒答原因。"
         : `回答完成，生成方式为 ${generationLabel}，包含 ${items.length} 条引用。`;
     if (window.matchMedia("(max-width: 900px)").matches) {
-      dom.resultHeadingTitle.scrollIntoView({ block: "start", behavior: "smooth" });
+      dom.resultHeadingTitle.scrollIntoView({
+        block: "start",
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+      });
     }
   }
 
@@ -842,7 +941,9 @@
   });
 
   dom.cancelButton.addEventListener("click", () => {
-    if (state.requestController) state.requestController.abort("user");
+    if (state.requestController && !state.requestController.signal.aborted) {
+      state.requestController.abort(new DOMException("请求已取消", "AbortError"));
+    }
   });
 
   dom.retryButton.addEventListener("click", () => {
@@ -854,7 +955,69 @@
 
   dom.healthButton.addEventListener("click", () => checkHealth({ focusOnAuth: true }));
 
+  dom.navToggle.addEventListener("click", () => {
+    if (document.body.classList.contains("nav-open")) {
+      closeNavigation({ restoreFocus: true });
+    } else {
+      openNavigation();
+    }
+  });
+  dom.navClose.addEventListener("click", () => closeNavigation({ restoreFocus: true }));
+  dom.navOverlay.addEventListener("click", () => closeNavigation({ restoreFocus: true }));
+
+  dom.navLinks.forEach((link) => {
+    link.addEventListener("click", () => {
+      activateNavigationLink(link);
+      closeNavigation();
+    });
+  });
+
+  dom.workspaceActions.forEach((button) => {
+    button.addEventListener("click", () => focusWorkspace(button.dataset.workspaceMode));
+  });
+
+  dom.healthActions.forEach((button) => {
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      try {
+        await checkHealth({ focusOnAuth: false });
+        document.querySelector("#knowledge-overview").scrollIntoView({
+          block: "start",
+          behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+        });
+      } finally {
+        button.disabled = false;
+      }
+    });
+  });
+
+  dom.popoverLinks.forEach((link) => {
+    link.addEventListener("click", () => {
+      const panel = link.closest(".topbar-popover");
+      const trigger = dom.disclosureTriggers.find(
+        (item) => item.getAttribute("aria-controls") === panel?.id,
+      );
+      if (trigger) closeDisclosure(trigger);
+      closeNavigation();
+    });
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && document.body.classList.contains("nav-open")) {
+      event.preventDefault();
+      closeNavigation({ restoreFocus: true });
+      return;
+    }
+    trapNavigationFocus(event);
+  });
+
+  window.addEventListener("resize", () => {
+    if (!mobileNavigationActive()) closeNavigation();
+    else syncNavigationAccessibility();
+  });
+
   setupDisclosures();
+  syncNavigationAccessibility();
   dom.toggleToken.setAttribute("aria-pressed", "false");
   dom.toggleToken.setAttribute("aria-label", "显示本地访问令牌");
   setMode("retrieve");

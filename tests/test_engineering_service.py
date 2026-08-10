@@ -570,6 +570,11 @@ def test_frontend_is_static_same_origin_and_does_not_load_service():
     assert 'id="token-settings"' in page.text
     assert 'id="evidence-drawer"' in page.text
     assert 'class="answer-content"' in page.text
+    assert 'id="app-sidebar"' in page.text
+    assert 'id="nav-toggle"' in page.text
+    assert 'id="nav-overlay"' in page.text
+    assert 'data-workspace-mode="answer"' in page.text
+    assert 'data-workspace-mode="retrieve"' in page.text
     assert "default-src 'self'" in page.headers["content-security-policy"]
     assert page.headers["x-frame-options"] == "DENY"
 
@@ -594,6 +599,15 @@ def test_frontend_is_static_same_origin_and_does_not_load_service():
     assert 'requestJson(`/${activeRequest.mode}`' in script.text
     assert 'mode === "answer" ? "检索并生成回答" : "仅检索证据"' in script.text
     assert "会自动检索并生成回答，无需先点" in script.text
+    assert 'toggleAttribute("inert", hidden)' in script.text
+    assert 'setAttribute("aria-hidden", "true")' in script.text
+    assert 'setAttribute("aria-current", "page")' in script.text
+    assert 'new DOMException("请求超时", "TimeoutError")' in script.text
+    assert 'new DOMException("请求已取消", "AbortError")' in script.text
+    assert "prefers-reduced-motion: reduce" in script.text
+    assert "body.nav-open .app-sidebar" in stylesheet.text
+    assert "@media (max-width: 900px)" in stylesheet.text
+    assert "@media (prefers-reduced-motion: reduce)" in stylesheet.text
     assert calls == 0
 
 
