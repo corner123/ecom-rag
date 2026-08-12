@@ -606,6 +606,8 @@ def test_frontend_is_static_same_origin_and_does_not_load_service():
     assert "检索并生成回答" in page.text
     assert "点击“检索并生成回答”即可一次完成检索和生成" in page.text
     assert 'id="metric-answer-provider"' in page.text
+    assert 'id="metric-vector-backend"' in page.text
+    assert 'id="metric-vector-detail"' in page.text
     assert 'id="status-popover"' in page.text
     assert 'id="about-popover"' in page.text
     assert 'id="token-settings"' in page.text
@@ -623,13 +625,35 @@ def test_frontend_is_static_same_origin_and_does_not_load_service():
     assert page.headers["x-frame-options"] == "DENY"
 
     stylesheet = client.get("/assets/app.css")
+    dm_sans = client.get("/assets/fonts/DMSans-Variable.ttf")
+    dm_sans_license = client.get("/assets/fonts/OFL-DMSans.txt")
     script = client.get("/assets/app.js")
     favicon = client.get("/assets/favicon.svg")
     assert stylesheet.status_code == 200
+    assert dm_sans.status_code == 200
+    assert dm_sans_license.status_code == 200
     assert script.status_code == 200
     assert favicon.status_code == 200
+    assert '@font-face' in stylesheet.text
+    assert 'font-family: "DM Sans"' in stylesheet.text
+    assert 'url("/assets/fonts/DMSans-Variable.ttf")' in stylesheet.text
+    assert '--font-mono: "SFMono-Regular", Consolas' in stylesheet.text
+    assert "font-weight: 750" not in stylesheet.text
+    assert "font-weight: 850" not in stylesheet.text
+    for forbidden_font_source in (
+        "fonts.googleapis.com",
+        "fonts.gstatic.com",
+        "Gilroy",
+        "Sofia Pro",
+        "Douyin Sans",
+        "DouyinSans",
+    ):
+        assert forbidden_font_source not in stylesheet.text
+    assert "SIL OPEN FONT LICENSE Version 1.1" in dm_sans_license.text
     assert "localStorage" not in script.text
     assert "sessionStorage" not in script.text
+    assert 'payload.schema_version !== "engineering-retrieval/v1"' in script.text
+    assert 'payload.schema_version !== "engineering-answer/v2"' in script.text
     for unsafe_dom_api in (
         "innerHTML",
         "outerHTML",

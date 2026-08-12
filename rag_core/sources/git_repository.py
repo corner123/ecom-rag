@@ -6,25 +6,21 @@ import ast
 from dataclasses import dataclass
 import fnmatch
 import os
+import platform
 from pathlib import Path, PurePosixPath
+import re
 import subprocess
-from typing import Any, Iterable
+import tempfile
+from typing import Any, Callable, Iterable, Mapping
 from urllib.parse import urlsplit, urlunsplit
 
 from .base import CollectedSource
+from .document_loader import (
+    DocumentLoaderRouter,
+    UnsupportedDocumentType,
+    is_safe_source_path,
+)
 from .schema import DocumentRecord, SourceRecord, canonical_hash, content_hash, utc_now
-
-
-_MEDIA_TYPES = {
-    ".md": ("text/markdown", "markdown"),
-    ".markdown": ("text/markdown", "markdown"),
-    ".py": ("text/x-python", "python"),
-    ".json": ("application/json", "json"),
-    ".toml": ("application/toml", "toml"),
-    ".yaml": ("application/yaml", "yaml"),
-    ".yml": ("application/yaml", "yaml"),
-    ".txt": ("text/plain", "text"),
-}
 
 
 class GitRepositoryError(RuntimeError):
@@ -60,9 +56,12 @@ class GitRepositorySource:
         include_python_symbols: bool = False,
         git_history_limit: int = 0,
         max_file_size_bytes: int = 2_000_000,
+        file_types: Mapping[str, str] | None = None,
+        mime_types: Mapping[str, str] | None = None,
         version: str | None = None,
         license: str = "unknown",
         metadata: dict[str, Any] | None = None,
+        loader: DocumentLoaderRouter | None = None,
     ) -> None:
         self.source_id = source_id
         self.repository_path = Path(repository_path).expanduser().resolve()
@@ -75,9 +74,12 @@ class GitRepositorySource:
         if max_file_size_bytes <= 0:
             raise ValueError("max_file_size_bytes must be positive")
         self.max_file_size_bytes = int(max_file_size_bytes)
+        self.file_types = dict(file_types or {})
+        self.mime_types = dict(mime_types or {})
         self.version = version
         self.license = license
         self.metadata = dict(metadata or {})
+        self.loader = loader or DocumentLoaderRouter()
 
     def collect(self) -> CollectedSource:
         if not self.repository_path.is_dir():
@@ -88,66 +90,82 @@ class GitRepositorySource:
             "status", "--porcelain", "--untracked-files=normal"
         )
         dirty = bool(status_snapshot.strip())
-        remote = _sanitize_repository_uri(
-            self._git_optional("config", "--get", "remote.origin.url")
-            or str(self.repository_path)
+        remote_value = self._git_optional("config", "--get", "remote.origin.url")
+        remote = (
+            _sanitize_repository_uri(remote_value)
+            if remote_value
+            else f"git+local://{_safe_uri_component(self.source_id)}"
         )
         documents: list[DocumentRecord] = []
 
-        for relative_path in self._candidate_files():
-            if not self._selected(relative_path):
-                continue
-            absolute_path = self.repository_path / Path(relative_path)
-            # ``git ls-files --cached`` also reports tracked paths deleted in a
-            # dirty worktree. Their absence is represented by the next
-            # manifest diff, not by a failed collection.
-            if not absolute_path.is_file():
-                continue
-            try:
-                resolved_path = absolute_path.resolve()
-                resolved_path.relative_to(self.repository_path)
-                if absolute_path.is_symlink():
+        with tempfile.TemporaryDirectory(prefix="rag-git-snapshot-") as temporary:
+            snapshot_root = Path(temporary)
+            for file_ordinal, relative_path in enumerate(self._candidate_files(), start=1):
+                if not self._selected(relative_path) or not is_safe_source_path(relative_path):
                     continue
-                if resolved_path.stat().st_size > self.max_file_size_bytes:
+                absolute_path = self.repository_path / Path(relative_path)
+                # ``git ls-files --cached`` also reports tracked paths deleted
+                # in a dirty worktree. Their absence is represented by the next
+                # manifest diff, not by a failed collection.
+                if not absolute_path.is_file():
                     continue
-            except (OSError, ValueError):
-                continue
-            text = self._read_text(resolved_path)
-            if text is None:
-                continue
-            file_hash = content_hash(text)
-            media_type, language = _media_and_language(absolute_path)
-            common_metadata = {
-                "record_kind": "file",
-                "repository_path": str(self.repository_path),
-                "repository_uri": remote,
-                "commit_sha": commit_sha,
-                "dirty": dirty,
-                "file_hash": file_hash,
-                "file_size": resolved_path.stat().st_size,
-            }
-            documents.append(
-                DocumentRecord(
+                try:
+                    resolved_path = absolute_path.resolve()
+                    resolved_path.relative_to(self.repository_path)
+                    if absolute_path.is_symlink():
+                        continue
+                except (OSError, ValueError):
+                    continue
+                explicit_type = _matching_override(relative_path, self.file_types)
+                explicit_mime = _matching_override(relative_path, self.mime_types)
+                try:
+                    self.loader.resolve_file_type(
+                        resolved_path,
+                        file_type=explicit_type,
+                        mime_type=explicit_mime,
+                    )
+                except UnsupportedDocumentType:
+                    continue
+                snapshot_bytes = _read_stable_file(
+                    resolved_path,
+                    logical_path=relative_path,
+                    max_bytes=self.max_file_size_bytes,
+                )
+                if snapshot_bytes is None:
+                    continue
+                file_hash = content_hash(snapshot_bytes)
+                snapshot_directory = snapshot_root / f"{file_ordinal:08d}"
+                snapshot_directory.mkdir()
+                snapshot_path = snapshot_directory / resolved_path.name
+                snapshot_path.write_bytes(snapshot_bytes)
+                common_metadata = {
+                    "record_kind": "file",
+                    "repository_uri": remote,
+                    "commit_sha": commit_sha,
+                    "dirty": dirty,
+                    "file_hash": file_hash,
+                    "file_size": len(snapshot_bytes),
+                }
+                file_documents = self.loader.load(
+                    snapshot_path,
                     source_id=self.source_id,
                     relative_path=relative_path,
-                    content=text,
-                    content_hash=file_hash,
-                    media_type=media_type,
-                    language=language,
-                    title=_document_title(relative_path, text),
-                    metadata=common_metadata,
+                    file_type=explicit_type,
+                    mime_type=explicit_mime,
+                    base_metadata=common_metadata,
                 )
-            )
-            if self.include_python_symbols and absolute_path.suffix.lower() == ".py":
-                documents.extend(
-                    self._python_symbol_documents(
-                        relative_path,
-                        text,
-                        commit_sha=commit_sha,
-                        dirty=dirty,
-                        repository_uri=remote,
+                documents.extend(file_documents)
+                if self.include_python_symbols and absolute_path.suffix.lower() == ".py":
+                    text = file_documents[0].content
+                    documents.extend(
+                        self._python_symbol_documents(
+                            relative_path,
+                            text,
+                            commit_sha=commit_sha,
+                            dirty=dirty,
+                            repository_uri=remote,
+                        )
                     )
-                )
 
         if self.git_history_limit:
             documents.extend(self._git_history_documents(self.git_history_limit))
@@ -165,13 +183,14 @@ class GitRepositorySource:
         )
         record_metadata = {
             **self.metadata,
-            "repository_path": str(self.repository_path),
             "repository_uri": remote,
             "include": list(self.include),
             "exclude": list(self.exclude),
             "python_symbol_cards": self.include_python_symbols,
             "git_history_limit": self.git_history_limit,
             "max_file_size_bytes": self.max_file_size_bytes,
+            "file_types": self.file_types,
+            "mime_types": self.mime_types,
             "document_count": len(documents),
         }
         record = SourceRecord(
@@ -207,20 +226,25 @@ class GitRepositorySource:
             parts = line.split("\t", 2)
             if len(parts) != 3:
                 continue
-            sha, authored_at, subject = parts
+            sha, authored_at, raw_subject = parts
+            subject = _redact_sensitive_text(raw_subject)
             changed_paths = [
-                value.strip().replace("\\", "/")
+                value.replace("\\", "/")
                 for value in self._git(
                     "diff-tree",
                     "--root",
                     "--no-commit-id",
                     "--name-only",
                     "-r",
+                    "-z",
                     sha,
-                ).splitlines()
-                if value.strip()
+                ).split("\0")
+                if _is_safe_history_path(value, selected=self._selected)
             ]
-            path_lines = "\n".join(f"- `{path}`" for path in changed_paths) or "- (no paths)"
+            path_lines = (
+                "\n".join("- `" + path.replace("`", "\\`") + "`" for path in changed_paths)
+                or "- (no paths)"
+            )
             content = (
                 f"# Git commit {sha[:12]}\n\n"
                 f"- Subject: {subject}\n"
@@ -243,6 +267,10 @@ class GitRepositorySource:
                         "authored_at": authored_at,
                         "commit_subject": subject,
                         "changed_paths": changed_paths,
+                        "file_type": "markdown",
+                        "content_format": "markdown",
+                        "parser_backend": "git-log",
+                        "parser_version": "unknown",
                     },
                 )
             )
@@ -288,16 +316,6 @@ class GitRepositorySource:
             return None
         return value or None
 
-    @staticmethod
-    def _read_text(path: Path) -> str | None:
-        data = path.read_bytes()
-        if b"\x00" in data:
-            return None
-        try:
-            return data.decode("utf-8")
-        except UnicodeDecodeError:
-            return data.decode("utf-8", errors="replace")
-
     def _python_symbol_documents(
         self,
         relative_path: str,
@@ -340,10 +358,13 @@ class GitRepositorySource:
                         "symbol_kind": symbol.kind,
                         "line_start": symbol.line_start,
                         "line_end": symbol.line_end,
-                        "repository_path": str(self.repository_path),
                         "repository_uri": repository_uri,
                         "commit_sha": commit_sha,
                         "dirty": dirty,
+                        "file_type": "code",
+                        "content_format": "markdown-code-card",
+                        "parser_backend": "python-ast",
+                        "parser_version": platform.python_version(),
                     },
                 )
             )
@@ -360,12 +381,106 @@ def _matches_any(relative_path: str, patterns: Iterable[str]) -> bool:
     )
 
 
+def _matching_override(relative_path: str, values: Mapping[str, str]) -> str | None:
+    for pattern, value in values.items():
+        if _matches_any(relative_path, (pattern,)):
+            return value
+    return None
+
+
+def _read_stable_file(
+    path: Path,
+    *,
+    logical_path: str,
+    max_bytes: int,
+) -> bytes | None:
+    """Read one self-consistent worktree snapshot without a hash/content race."""
+
+    def signature(stat: os.stat_result) -> tuple[int, int, int, int]:
+        return (stat.st_size, stat.st_mtime_ns, stat.st_dev, stat.st_ino)
+
+    try:
+        before = path.stat()
+        if before.st_size > max_bytes:
+            return None
+        with path.open("rb") as handle:
+            opened_before = os.fstat(handle.fileno())
+            data = handle.read(max_bytes + 1)
+            opened_after = os.fstat(handle.fileno())
+        after = path.stat()
+    except OSError as exc:
+        raise GitRepositoryError(
+            f"unable to capture stable file snapshot for {logical_path}; retry"
+        ) from exc
+    if len(data) > max_bytes:
+        return None
+    if not (
+        signature(before)
+        == signature(opened_before)
+        == signature(opened_after)
+        == signature(after)
+    ):
+        raise GitRepositoryError(
+            f"file changed while collecting {logical_path}; retry the source snapshot"
+        )
+    return data
+
+
+def _is_safe_history_path(
+    value: str,
+    *,
+    selected: Callable[[str], bool],
+) -> bool:
+    if not value or len(value) > 1_000:
+        return False
+    normalized = value.replace("\\", "/")
+    if any(ord(char) < 32 or ord(char) == 127 for char in normalized):
+        return False
+    candidate = PurePosixPath(normalized)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        return False
+    if re.search(
+        r"(?i)(?:api[_-]?key|access[_-]?token|token|secret|password|passwd)\s*[:=]",
+        normalized,
+    ):
+        return False
+    return is_safe_source_path(normalized) and bool(selected(normalized))
+
+
+def _redact_sensitive_text(value: str) -> str:
+    text = " ".join(value.replace("\x00", "").split())
+    text = re.sub(
+        r"(?i)\b(api[_-]?key|access[_-]?token|token|secret|password|passwd|authorization)"
+        r"\s*[:=]\s*[^\s,;]+",
+        r"\1=<redacted>",
+        text,
+    )
+    text = re.sub(r"(?i)\bbearer\s+[^\s,;]+", "Bearer <redacted>", text)
+    text = re.sub(r"\b(?:sk|gh[pousr])[-_][A-Za-z0-9_-]{8,}\b", "<redacted-token>", text)
+    text = re.sub(
+        r"(?i)\b[A-Z]:[\\/]Users[\\/][^\\/\s]+(?:[\\/][^\s]*)?",
+        "<private-path>",
+        text,
+    )
+    text = re.sub(r"(?<!\w)/(?:home|Users)/[^/\s]+(?:/[^\s]*)?", "<private-path>", text)
+    return (text[:300] or "<empty commit subject>").replace("`", "\\`")
+
+
+def _safe_uri_component(value: str) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip()).strip("-.")
+    return normalized[:80] or f"source-{canonical_hash(value)[:12]}"
+
+
 def _sanitize_repository_uri(value: str) -> str:
     """Strip credentials and query fragments before persisting a Git remote."""
 
     text = value.strip()
+    if re.match(r"^[A-Za-z]:[\\/]", text) or text.startswith(("/", "\\")):
+        return "git+local://redacted"
     if "://" in text:
         parsed = urlsplit(text)
+        if parsed.scheme.lower() == "file":
+            return "git+local://redacted"
         host = parsed.hostname or ""
         if ":" in host and not host.startswith("["):
             host = f"[{host}]"
@@ -381,20 +496,6 @@ def _sanitize_repository_uri(value: str) -> str:
     if "@" in text and ":" in text.split("@", 1)[1]:
         return text.split("@", 1)[1]
     return text
-
-
-def _media_and_language(path: Path) -> tuple[str, str]:
-    if path.name.lower().startswith("dockerfile"):
-        return "text/x-dockerfile", "dockerfile"
-    return _MEDIA_TYPES.get(path.suffix.lower(), ("text/plain", path.suffix.lower().lstrip(".")))
-
-
-def _document_title(relative_path: str, text: str) -> str:
-    if relative_path.lower().endswith((".md", ".markdown")):
-        for line in text.splitlines():
-            if line.startswith("# "):
-                return line[2:].strip()
-    return PurePosixPath(relative_path).name
 
 
 def _extract_python_symbols(source: str) -> list[_Symbol]:

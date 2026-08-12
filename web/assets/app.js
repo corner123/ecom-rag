@@ -62,6 +62,8 @@
     metricRevision: document.querySelector("#metric-revision"),
     metricAnswerProvider: document.querySelector("#metric-answer-provider"),
     metricAnswerModel: document.querySelector("#metric-answer-model"),
+    metricVectorBackend: document.querySelector("#metric-vector-backend"),
+    metricVectorDetail: document.querySelector("#metric-vector-detail"),
     sidebar: document.querySelector("#app-sidebar"),
     navToggle: document.querySelector("#nav-toggle"),
     navClose: document.querySelector("#nav-close"),
@@ -402,6 +404,15 @@
       ? "DeepSeek 已配置"
       : "确定性";
     dom.metricAnswerModel.textContent = payload.answer_model || "本地证据摘要";
+    const vector = index.vector_backend || {};
+    const requested = String(vector.requested_mode || vector.configured_backend || "faiss");
+    const active = String(vector.active_backend || "faiss");
+    dom.metricVectorBackend.textContent = active.toUpperCase();
+    if (vector.fallback_used === true) {
+      dom.metricVectorDetail.textContent = `请求 ${requested} · 已降级 · ${vector.reason_code || "availability"}`;
+    } else {
+      dom.metricVectorDetail.textContent = `请求 ${requested} · 未降级`;
+    }
   }
 
   function resetHealthMetrics(message) {
@@ -414,6 +425,8 @@
     dom.metricRevision.textContent = "等待工作区信息";
     dom.metricAnswerProvider.textContent = "—";
     dom.metricAnswerModel.textContent = "等待服务配置";
+    dom.metricVectorBackend.textContent = "—";
+    dom.metricVectorDetail.textContent = "等待索引后端信息";
   }
 
   async function checkHealth(options = {}) {
@@ -948,6 +961,9 @@
       });
       if (activeRequest.mode === "retrieve" && payload.schema_version !== "engineering-retrieval/v1") {
         throw new ApiError(502, "检索响应版本不受支持");
+      }
+      if (activeRequest.mode === "answer" && payload.schema_version !== "engineering-answer/v2") {
+        throw new ApiError(502, "回答响应版本不受支持");
       }
       renderResponse(payload, activeRequest.mode, performance.now() - started);
       setServiceStatus("ok", "服务在线");

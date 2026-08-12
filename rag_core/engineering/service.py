@@ -77,6 +77,9 @@ class EngineeringRAGService:
         manifest_path: str | Path | None = None,
         embedding_manager=None,
         answerer: GroundedAnswerer | None = None,
+        runtime_backend: str | None = None,
+        milvus_settings=None,
+        milvus_client_factory=None,
     ) -> "EngineeringRAGService":
         if answerer is None:
             from .deepseek_generation import build_grounded_answerer_from_env
@@ -85,6 +88,9 @@ class EngineeringRAGService:
         engineering_index = EngineeringIndex.load(
             index_root,
             embedding_manager=embedding_manager,
+            runtime_backend=runtime_backend,
+            milvus_settings=milvus_settings,
+            milvus_client_factory=milvus_client_factory,
         )
         repo = mini_nanobot_repo or os.getenv("MINI_NANOBOT_REPO")
         live = (

@@ -164,7 +164,13 @@ def create_predictors(
 ) -> Mapping[str, EngineeringPredictor]:
     """Create fair BM25/dense/hybrid predictors from one loaded build."""
 
-    index = EngineeringIndex.load(index_root, embedding_manager=embedding_manager)
+    # Formal comparisons are frozen to the portable FAISS artifact. Runtime
+    # ENGINEERING_VECTOR_BACKEND must never alter published benchmark metrics.
+    index = EngineeringIndex.load(
+        index_root,
+        embedding_manager=embedding_manager,
+        runtime_backend="faiss",
+    )
     repo = Path(mini_nanobot_repo).expanduser() if mini_nanobot_repo else None
     live = (
         LiveCodeRetriever(
@@ -220,7 +226,11 @@ def create_index_ablation_predictors(
     index_root: str | Path,
     embedding_manager=None,
 ) -> Mapping[str, EngineeringPredictor]:
-    index = EngineeringIndex.load(index_root, embedding_manager=embedding_manager)
+    index = EngineeringIndex.load(
+        index_root,
+        embedding_manager=embedding_manager,
+        runtime_backend="faiss",
+    )
     _assert_current_build(index)
     metadata = {
         **_public_index_metadata(index),
@@ -250,7 +260,11 @@ def create_e2e_predictors(
     mini_nanobot_repo: str | Path,
     embedding_manager=None,
 ) -> Mapping[str, EngineeringPredictor]:
-    index = EngineeringIndex.load(index_root, embedding_manager=embedding_manager)
+    index = EngineeringIndex.load(
+        index_root,
+        embedding_manager=embedding_manager,
+        runtime_backend="faiss",
+    )
     manifest = _assert_current_build(index)
     repo = Path(mini_nanobot_repo).expanduser().resolve()
     _assert_live_repo_matches_manifest(repo, manifest)

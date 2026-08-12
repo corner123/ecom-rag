@@ -10,6 +10,7 @@ from typing import Any, Iterable, Mapping
 
 from .base import SourceAdapter
 from .git_repository import GitRepositorySource
+from .local_directory import LocalDirectorySource
 from .official_web import Fetcher, OfficialWebSource
 
 
@@ -85,6 +86,25 @@ class SourceCatalog:
                     GitRepositorySource(
                         entry.source_id,
                         repository_path,
+                        **options,
+                    )
+                )
+            elif source_type in {"directory", "local", "local_directory"}:
+                raw_path = options.pop(
+                    "path",
+                    options.pop("directory_path", options.pop("root", None)),
+                )
+                if raw_path is None:
+                    raise ValueError(
+                        f"local directory source '{entry.source_id}' requires path"
+                    )
+                directory_path = Path(str(raw_path)).expanduser()
+                if not directory_path.is_absolute():
+                    directory_path = self.base_dir / directory_path
+                adapters.append(
+                    LocalDirectorySource(
+                        entry.source_id,
+                        directory_path,
                         **options,
                     )
                 )

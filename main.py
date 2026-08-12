@@ -53,6 +53,14 @@ def build_parser() -> argparse.ArgumentParser:
     sync.add_argument("--manifest", default=DEFAULT_MANIFEST)
     sync.add_argument("--chunk-size", type=int, default=1200)
     sync.add_argument("--chunk-overlap", type=int, default=120)
+    sync.add_argument(
+        "--full-rebuild",
+        action="store_true",
+        help=(
+            "ignore an existing manifest and publish a fresh current-schema "
+            "snapshot; required when intentionally migrating an older schema"
+        ),
+    )
 
     index = subparsers.add_parser(
         "engineering-build", help="从 manifest 构建 internal/official 分区索引"
@@ -60,6 +68,12 @@ def build_parser() -> argparse.ArgumentParser:
     index.add_argument("--manifest", default=DEFAULT_MANIFEST)
     index.add_argument("--index-dir", default=DEFAULT_INDEX)
     index.add_argument("--batch-size", type=int, default=128)
+    index.add_argument(
+        "--backend",
+        choices=("faiss", "milvus", "both"),
+        default=None,
+        help="build portable FAISS only, or require a Milvus mirror as well",
+    )
 
     engineering_query = subparsers.add_parser(
         "engineering-query", help="查询工程知识并返回结构化引用"
@@ -69,6 +83,27 @@ def build_parser() -> argparse.ArgumentParser:
     engineering_query.add_argument("--answer", action="store_true")
     engineering_query.add_argument("--index-dir", default=DEFAULT_INDEX)
     engineering_query.add_argument("--mini-repo")
+    engineering_query.add_argument(
+        "--backend",
+        choices=("faiss", "milvus", "auto"),
+        default=None,
+        help="select the runtime dense-vector backend",
+    )
+
+    cleanup = subparsers.add_parser(
+        "engineering-milvus-cleanup",
+        help="list stale build-scoped Milvus collections; deletion is explicit",
+    )
+    cleanup.add_argument("--index-dir", default=DEFAULT_INDEX)
+    cleanup.add_argument(
+        "--execute",
+        action="store_true",
+        help="delete the dry-run candidates after old readers have drained",
+    )
+    cleanup.add_argument(
+        "--namespace",
+        help="explicitly confirm the active Milvus owner namespace when deleting",
+    )
 
     engineering_eval = subparsers.add_parser(
         "engineering-eval", help="运行 BM25/dense/hybrid 消融评测"
@@ -141,6 +176,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.manifest,
             chunk_size=args.chunk_size,
             chunk_overlap=args.chunk_overlap,
+            full_rebuild=args.full_rebuild,
         )
         _json(
             {
@@ -171,6 +207,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.manifest,
             args.index_dir,
             batch_size=args.batch_size,
+            backend=args.backend,
         )
         _json(index.stats())
         return 0
@@ -178,7 +215,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         from rag_core.engineering import load_engineering_service
 
         service = load_engineering_service(
-            args.index_dir, mini_nanobot_repo=args.mini_repo
+            args.index_dir,
+            mini_nanobot_repo=args.mini_repo,
+            runtime_backend=args.backend,
         )
         outcome = (
             service.answer(args.question, top_k=args.top_k)
@@ -186,6 +225,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             else service.retrieve(args.question, top_k=args.top_k)
         )
         _json(outcome.to_dict())
+        return 0
+    if args.command == "engineering-milvus-cleanup":
+        from rag_core.engineering import cleanup_engineering_milvus
+
+        _json(
+            cleanup_engineering_milvus(
+                args.index_dir,
+                execute=args.execute,
+                namespace=args.namespace,
+            )
+        )
         return 0
     if args.command == "engineering-eval":
         from rag_core.evaluation.engineering import main as evaluation_main

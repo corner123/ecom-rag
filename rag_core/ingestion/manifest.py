@@ -79,11 +79,25 @@ class BuildManifest:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "BuildManifest":
+        raw_schema_version = value.get("schema_version")
+        if raw_schema_version is None:
+            raise ValueError(
+                "build manifest has no schema_version; rebuild it with the current ingestion pipeline"
+            )
+        schema_version = str(raw_schema_version)
+        _validate_read_schema_version(schema_version)
+        metadata = dict(value.get("metadata") or {})
+        pipeline_version = metadata.get("pipeline_version")
+        if pipeline_version is not None and str(pipeline_version) != SCHEMA_VERSION:
+            raise ValueError(
+                "build manifest pipeline_version is incompatible with its "
+                f"{SCHEMA_VERSION} schema; rebuild it"
+            )
         return cls(
-            schema_version=str(value.get("schema_version", SCHEMA_VERSION)),
+            schema_version=schema_version,
             build_id=str(value["build_id"]),
             created_at=str(value["created_at"]),
-            metadata=dict(value.get("metadata") or {}),
+            metadata=metadata,
             sources=[SourceRecord.from_dict(item) for item in value.get("sources", [])],
             documents=[DocumentRecord.from_dict(item) for item in value.get("documents", [])],
             chunks=[ChunkRecord.from_dict(item) for item in value.get("chunks", [])],
@@ -117,3 +131,22 @@ class BuildManifest:
 def _ensure_unique(label: str, values: list[str]) -> None:
     if len(values) != len(set(values)):
         raise ValueError(f"manifest contains duplicate {label} values")
+
+
+def _validate_read_schema_version(value: str) -> None:
+    def parse(version: str) -> tuple[int, ...]:
+        parts = version.split(".")
+        if not parts or any(not part.isdigit() for part in parts):
+            raise ValueError(f"invalid build manifest schema_version: {version!r}")
+        return tuple(int(part) for part in parts)
+
+    incoming = parse(value)
+    current = parse(SCHEMA_VERSION)
+    if incoming > current:
+        raise ValueError(
+            f"build manifest schema {value} is newer than supported {SCHEMA_VERSION}; upgrade this application"
+        )
+    if incoming < current:
+        raise ValueError(
+            f"build manifest schema {value} is older than supported {SCHEMA_VERSION}; rebuild it instead of implicitly upgrading metadata"
+        )

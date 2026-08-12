@@ -1,3 +1,11 @@
+@font-face {
+  font-family: "DM Sans";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("/assets/fonts/DMSans-Variable.ttf") format("truetype");
+}
+
 :root {
   --sidebar-width: 216px;
   --blue: #315ee8;
@@ -15,8 +23,10 @@
   --red: #bc4050;
   --violet: #7651c7;
   --shadow: 0 14px 42px rgba(30, 47, 80, 0.08);
+  --font-sans: "DM Sans", Arial, "Helvetica Neue", Helvetica, "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   color-scheme: light;
-  font-family: Inter, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-family: var(--font-sans);
 }
 
 * {
@@ -128,7 +138,7 @@ a:focus-visible {
   color: #fff;
   background: var(--blue);
   font-size: 12px;
-  font-weight: 850;
+  font-weight: 800;
   box-shadow: 0 8px 18px rgba(49, 94, 232, 0.22);
 }
 
@@ -164,7 +174,7 @@ a:focus-visible {
   margin: 20px 10px 3px;
   color: #9aa4b4;
   font-size: 11px;
-  font-weight: 750;
+  font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
@@ -344,7 +354,7 @@ a:focus-visible {
   margin: 0;
   color: var(--blue);
   font-size: 10px;
-  font-weight: 850;
+  font-weight: 800;
   letter-spacing: 0.14em;
   text-transform: uppercase;
 }
@@ -408,7 +418,7 @@ a:focus-visible {
   border-radius: 7px;
   color: #8a95a7;
   background: #fafbfe;
-  font-family: "SFMono-Regular", Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 10px;
 }
 
@@ -430,7 +440,7 @@ a:focus-visible {
   color: #738096;
   background: transparent;
   font-size: 12px;
-  font-weight: 750;
+  font-weight: 700;
   cursor: pointer;
 }
 
@@ -493,7 +503,7 @@ a:focus-visible {
   border: 1px solid transparent;
   border-radius: 9px;
   font-size: 13px;
-  font-weight: 750;
+  font-weight: 700;
   text-decoration: none;
   cursor: pointer;
   transition: background 150ms ease, border-color 150ms ease, transform 150ms ease;
@@ -653,7 +663,7 @@ a:focus-visible {
   color: var(--blue);
   background: var(--blue-soft);
   font-size: 20px;
-  font-weight: 850;
+  font-weight: 800;
 }
 
 .empty-state h3,
@@ -700,7 +710,7 @@ a:focus-visible {
 
 @keyframes shimmer { from { transform: translateX(-130%); } to { transform: translateX(250%); } }
 
-.error-code { color: var(--red); font-family: Consolas, monospace; font-size: 10px; font-weight: 800; letter-spacing: 0.12em; }
+.error-code { color: var(--red); font-family: var(--font-mono); font-size: 10px; font-weight: 800; letter-spacing: 0.12em; }
 .error-state .button { margin-top: 17px; }
 
 .response-summary {
@@ -755,7 +765,7 @@ a:focus-visible {
 .answer-heading > span {
   color: var(--blue);
   font-size: 12px;
-  font-weight: 850;
+  font-weight: 800;
   letter-spacing: 0.07em;
 }
 
@@ -793,7 +803,7 @@ a:focus-visible {
   border-radius: 999px;
   color: #fff;
   background: var(--blue);
-  font-family: Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 10px;
   font-weight: 800;
   line-height: 1;
@@ -839,7 +849,7 @@ a:focus-visible {
 
 .role-chip,
 .live-chip,
-.citation-id-chip { display: inline-flex; min-height: 18px; align-items: center; padding: 1px 6px; border: 1px solid transparent; border-radius: 999px; font-size: 10px; font-weight: 850; letter-spacing: 0.03em; }
+.citation-id-chip { display: inline-flex; min-height: 18px; align-items: center; padding: 1px 6px; border: 1px solid transparent; border-radius: 999px; font-size: 10px; font-weight: 800; letter-spacing: 0.03em; }
 .role-current_implementation,
 .live-chip { color: #08745c; border-color: #a7e1d1; background: #effbf7; }
 .role-indexed_implementation { color: #315e9e; border-color: #c5d6f0; background: #f2f7ff; }
@@ -850,13 +860,13 @@ a:focus-visible {
 .citation-id-chip { color: #fff; background: var(--blue); }
 
 .evidence-source,
-.evidence-source-link { display: block; overflow: hidden; color: #29384f; font-family: Consolas, monospace; font-size: 11px; font-weight: 700; line-height: 1.45; text-decoration: none; text-overflow: ellipsis; white-space: nowrap; }
+.evidence-source-link { display: block; overflow: hidden; color: #29384f; font-family: var(--font-mono); font-size: 11px; font-weight: 700; line-height: 1.45; text-decoration: none; text-overflow: ellipsis; white-space: nowrap; }
 .evidence-source-link:hover { color: var(--blue); text-decoration: underline; }
 .evidence-meta span,
-.citation-details span { color: #8b96a8; font-family: Consolas, monospace; font-size: 10px; }
+.citation-details span { color: #8b96a8; font-family: var(--font-mono); font-size: 10px; }
 .expand-symbol { display: grid; width: 24px; height: 24px; place-items: center; border: 1px solid var(--line); border-radius: 50%; color: #909bad; font-size: 12px; transition: transform 150ms ease; }
 .evidence-card[open] .expand-symbol { transform: rotate(45deg); }
-.evidence-content { max-height: 400px; margin: 0; overflow: auto; padding: 12px 13px; border-top: 1px solid var(--line); color: #344156; background: #f8fafc; font-family: Consolas, monospace; font-size: 12px; line-height: 1.65; tab-size: 2; white-space: pre-wrap; overflow-wrap: anywhere; }
+.evidence-content { max-height: 400px; margin: 0; overflow: auto; padding: 12px 13px; border-top: 1px solid var(--line); color: #344156; background: #f8fafc; font-family: var(--font-mono); font-size: 12px; line-height: 1.65; tab-size: 2; white-space: pre-wrap; overflow-wrap: anywhere; }
 .citation-details { padding: 0 12px 11px; }
 .citation-target { border-color: var(--blue) !important; box-shadow: 0 0 0 3px rgba(49, 94, 232, 0.12) !important; }
 .no-evidence { padding: 20px; border: 1px dashed var(--line-strong); border-radius: 8px; color: var(--muted); background: #fafbfe; font-size: 12px; text-align: center; }

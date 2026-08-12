@@ -110,6 +110,10 @@ class OfficialWebSource:
                         "etag": response.etag,
                         "last_modified": response.last_modified,
                         "response_headers": response.headers,
+                        "file_type": "markdown" if output_media_type == "text/markdown" else "text",
+                        "content_format": "markdown" if output_media_type == "text/markdown" else "text",
+                        "parser_backend": "stdlib-html-cleaner" if language == "html" else "stdlib-text",
+                        "parser_version": "1.0",
                     },
                 )
             )

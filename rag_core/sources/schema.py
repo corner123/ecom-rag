@@ -16,7 +16,29 @@ from pathlib import Path
 from typing import Any, Mapping
 
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
+DOCUMENT_METADATA_SCHEMA_VERSION = "1.1"
+DOCUMENT_METADATA_FIELDS = frozenset(
+    {
+        "identity",
+        "file_type",
+        "content_format",
+        "parser_backend",
+        "parser_version",
+        "page_number",
+        "sheet_name",
+        "table_id",
+        "block_id",
+        "parse_warnings",
+        "parse_degraded",
+        # Compatibility aliases used by older consumers.
+        "page",
+        "sheet",
+        "table",
+        "warnings",
+        "degraded",
+    }
+)
 
 
 def utc_now() -> str:
@@ -90,7 +112,14 @@ class SourceRecord:
 
 @dataclass(slots=True)
 class DocumentRecord:
-    """A normalized source document before or after stable ID assignment."""
+    """A normalized source document before or after stable ID assignment.
+
+    File adapters put parser provenance in ``metadata``.  The stable contract
+    uses ``file_type``, ``content_format``, ``parser_backend``,
+    ``parser_version``, ``parse_warnings`` and ``parse_degraded`` for every
+    routed file; ``page_number``, ``sheet_name``, ``table_id`` and ``block_id``
+    are populated when the source format provides those coordinates.
+    """
 
     source_id: str
     relative_path: str
@@ -110,7 +139,42 @@ class DocumentRecord:
         if not self.content_hash:
             self.content_hash = content_hash(self.content)
         self.relative_path = self.relative_path.replace("\\", "/")
-        self.metadata = _json_safe(self.metadata)
+        metadata = dict(_json_safe(self.metadata))
+        page_number = metadata.get("page_number", metadata.get("page"))
+        sheet_name = metadata.get("sheet_name", metadata.get("sheet"))
+        table_id = metadata.get("table_id", metadata.get("table"))
+        warnings = metadata.get("parse_warnings", metadata.get("warnings", []))
+        if isinstance(warnings, str):
+            warnings = [warnings] if warnings else []
+        elif not isinstance(warnings, list):
+            warnings = [str(warnings)] if warnings is not None else []
+        degraded = bool(
+            metadata.get("parse_degraded", metadata.get("degraded", False))
+        )
+        metadata.update(
+            {
+                "document_metadata_schema_version": DOCUMENT_METADATA_SCHEMA_VERSION,
+                "file_type": metadata.get("file_type")
+                or _infer_file_type(self.relative_path, self.media_type, self.language),
+                "content_format": metadata.get("content_format")
+                or _infer_content_format(self.media_type),
+                "parser_backend": metadata.get("parser_backend") or "source-adapter",
+                "parser_version": metadata.get("parser_version") or "unknown",
+                "page_number": page_number,
+                "sheet_name": sheet_name,
+                "table_id": table_id,
+                "block_id": metadata.get("block_id"),
+                "parse_warnings": warnings,
+                "parse_degraded": degraded,
+                # Compatibility aliases retained for current consumers.
+                "page": page_number,
+                "sheet": sheet_name,
+                "table": table_id,
+                "warnings": warnings,
+                "degraded": degraded,
+            }
+        )
+        self.metadata = _json_safe(metadata)
 
     @property
     def identity(self) -> str:
@@ -153,3 +217,39 @@ class ChunkRecord:
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "ChunkRecord":
         return cls(**dict(value))
+
+
+def _infer_file_type(relative_path: str, media_type: str, language: str) -> str:
+    lowered_media = media_type.lower()
+    suffix = Path(relative_path.split("#", 1)[0]).suffix.lower()
+    if lowered_media == "application/pdf" or suffix == ".pdf":
+        return "pdf"
+    if lowered_media == "text/csv" or suffix == ".csv":
+        return "csv"
+    if "spreadsheetml" in lowered_media or suffix == ".xlsx":
+        return "xlsx"
+    if "markdown" in lowered_media or suffix in {".md", ".markdown"}:
+        return "markdown"
+    if lowered_media == "application/json" or suffix == ".json":
+        return "json"
+    if language.lower() in {
+        "python", "javascript", "typescript", "java", "go", "rust", "c",
+        "cpp", "shell", "powershell", "sql", "dockerfile", "makefile",
+    }:
+        return "code"
+    if suffix in {".yaml", ".yml"}:
+        return "yaml"
+    if suffix == ".toml":
+        return "toml"
+    return "text"
+
+
+def _infer_content_format(media_type: str) -> str:
+    lowered = media_type.lower()
+    if "markdown" in lowered:
+        return "markdown"
+    if lowered == "application/json":
+        return "json"
+    if lowered == "application/pdf":
+        return "pdf-text"
+    return "text"

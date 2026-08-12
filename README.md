@@ -36,17 +36,19 @@ Mini-Nanobot 和本仓库始终是两个独立项目。Mini-Nanobot 负责 Agent
 
 ## 已实现链路
 
-1. YAML source catalog 声明本地 Git 仓库与官方 URL allowlist；
+1. YAML source catalog 声明本地 Git 仓库、可选本地文档目录与官方 URL allowlist；
 2. 只读采集器记录 commit、dirty 状态、内容 SHA-256、抓取时间和来源版本；
-3. Markdown 结构化分块、Python AST symbol card、测试、Dockerfile 与 Git history 统一进入 build manifest；
+3. 文件路由器按“显式 `file_type` → MIME → 后缀/特殊文件名”识别 Markdown、文本、代码、JSON/YAML/TOML、CSV、XLSX 与 PDF，并统一输出带解析器溯源的 `DocumentRecord`；Python 仍可额外生成 AST symbol card，Git history 作为独立记录进入 build manifest；
 4. 内容物理分为 `internal/code`、`internal/test`、`internal/design`、`internal/history`、`official/official`；
-5. 每个分区同时建立 BGE-small-zh-v1.5 FAISS 稠密索引和 BM25 索引，使用 RRF 融合；
+5. 每个分区始终建立可移植的本地 FAISS 稠密索引和 BM25 索引；构建时可严格要求同时写入 build-scoped Milvus HNSW/COSINE collection，查询时可显式选择 FAISS、Milvus 或受限自动降级，再使用 RRF 融合稠密与 BM25 结果；
 6. 确定性路由、官方 topic scope、hard-anchor 与经验数据缺失检查共同决定回答或拒答；
 7. 返回结构化引用、证据角色、源码行号、symbol、commit/dirty 和官方内容 hash；
 8. 提供纯索引消融与完整检索策略两套独立评测，数据集、manifest 和索引 build 强绑定；
 9. `/answer` 可在证据充分性检查通过后调用 DeepSeek，把选中的 Top-K 证据归纳为带 `[E#]` 引用的结构化回答；模型未启用或调用失败时明确返回“仅证据/生成失败”状态，原始证据仍可单独展开，但不会伪装成 AI 总结。
 
-可选的 Cross-Encoder reranker 已封装但默认关闭；只有在真实下载模型并完成同配置实验后才应把其结果写进简历。检索、路由、实时核验、证据充分性、拒答和正式评测不依赖在线 LLM；DeepSeek 只作为 `/answer` 的可选证据归纳层。本项目的工程主链路不依赖 Milvus、RAGAS 或 Gradio。
+可选的 Cross-Encoder reranker 已封装但默认关闭；只有在真实下载模型并完成同配置实验后才应把其结果写进简历。检索、路由、实时核验、证据充分性、拒答和正式评测不依赖在线 LLM；DeepSeek 只作为 `/answer` 的可选证据归纳层。
+
+正式工程索引已实现 FAISS/Milvus 双后端，但默认仍是无需外部服务的 FAISS。当前代码和状态化 fake-client 测试验证了 Milvus 建库、契约校验、查询、受限故障切换和显式清理；当前开发机没有可连接的真实 Milvus 服务，因此不能把这描述为“本机已完成分布式部署、性能压测或生产验证”。真实服务 round-trip 必须通过后文的 opt-in 集成测试单独证明。RAGAS 与 Gradio 不在正式主链路中。
 
 ## 快速开始
 
@@ -75,7 +77,7 @@ conda env update -n all-in-rag -f environment.yml --prune
 conda activate all-in-rag
 ```
 
-新克隆的仓库不包含原始网页快照、manifest 或本地 FAISS 索引，必须先完成“构建最终快照”，再启动 Web。密钥只放在未跟踪的 `.env` 或进程环境变量中；`.env.example` 只包含占位符。DeepSeek 仅用于可选的在线答案归纳，基础检索可以完全离线运行。
+新克隆的仓库不包含原始网页快照、manifest、本地 FAISS 索引或远端 Milvus collection，必须先完成“构建最终快照”，再启动 Web。密钥只放在未跟踪的 `.env` 或进程环境变量中；`.env.example` 只包含占位符。DeepSeek 仅用于可选的在线答案归纳，FAISS 基础检索可以完全离线运行。
 
 模型已经缓存时可设置 `$env:HF_HUB_OFFLINE = "1"` 做可复现的本地 Embedding 运行。该变量只影响 Hugging Face，**不会**阻止 `/answer` 访问 DeepSeek API；完全离线时还必须设置 `$env:ENGINEERING_GENERATION_PROVIDER = "deterministic"`。
 
@@ -86,6 +88,11 @@ conda activate all-in-rag
 | `MINI_NANOBOT_REPO` | 构建与实时核验必需 | Mini-Nanobot 本地仓库；示例按同级目录配置 |
 | `ENGINEERING_INDEX_DIR` | 推荐 | `data/indexes/engineering` |
 | `ENGINEERING_MANIFEST_PATH` | 推荐 | `data/manifests/builds/current.json` |
+| `ENGINEERING_INDEX_BUILD_BACKEND` | 可选 | `faiss`；也可在 CLI 用 `--backend` 覆盖。`milvus` 与 `both` 都表示“保留 FAISS 并严格要求 Milvus 镜像成功” |
+| `ENGINEERING_VECTOR_BACKEND` | 可选 | 查询后端：`faiss`（默认）、`milvus`（严格）或 `auto`（仅可用性故障时退回 FAISS） |
+| `ENGINEERING_MILVUS_URI` / `ENGINEERING_MILVUS_DATABASE` | Milvus 模式必需 | Milvus 服务地址和 database；token 只放在未跟踪环境中 |
+| `ENGINEERING_MILVUS_NAMESPACE` | Milvus 构建必需 | 当前部署稳定且唯一的所有者标识，例如 `corner_dev_laptop`；写入 artifact 描述与 catalog，防止清理共享 database 中其他部署的 collection |
+| `MINERU_EXECUTABLE` | 可选 | MinerU CLI 名称或路径，默认 `mineru`；不可用时 PDF 显式降级到 PyMuPDF |
 | `ENGINEERING_GENERATION_PROVIDER` | 可选 | 默认 `deterministic`；确认外部传输边界后可选 `deepseek` 或 `auto` |
 | `DEEPSEEK_API_KEY` | 仅在线回答必需 | 只供 `/answer` 使用，不得提交到 Git |
 | `DEEPSEEK_BASE_URL` / `DEEPSEEK_MODEL` | 可选 | DeepSeek 兼容端点与模型名 |
@@ -100,29 +107,46 @@ python main.py sources-sync `
   --catalog data/sources/catalog.yaml `
   --manifest data/manifests/builds/current.json
 
-# 2. 从同一 manifest 构建带校验和的分区索引
+# 2a. 默认：从同一 manifest 构建带校验和的本地 FAISS/BM25 分区索引
 python main.py engineering-build `
   --manifest data/manifests/builds/current.json `
-  --index-dir data/indexes/engineering
+  --index-dir data/indexes/engineering `
+  --backend faiss
+
+# 2b. 可选：Milvus 服务已准备好时，严格构建 FAISS + Milvus 两套稠密产物。
+# `milvus` 是 `both` 的兼容别名；任一远端分区失败时不会发布新 catalog。
+$env:ENGINEERING_MILVUS_NAMESPACE = "corner_dev_laptop"
+python main.py engineering-build `
+  --manifest data/manifests/builds/current.json `
+  --index-dir data/indexes/engineering `
+  --backend both
 
 # 3. 将题集 hash、Mini commit/worktree hash 与 build ID 固化
 python -m scripts.freeze_engineering_eval
 ```
 
+如果命令明确提示现有 manifest schema 早于当前版本，不要手改 JSON 或让程序隐式混写元数据。迁移时执行一次相同命令并增加 `--full-rebuild`；它忽略旧 snapshot、从受控来源重新采集并原子发布当前 1.1 schema。之后恢复不带该开关的常规同步，才能继续计算与上一次同版本 manifest 的增量 diff。
+
 `data/sources/catalog.yaml` 是工程 RAG 实际使用的受控来源清单，其中 LangChain 仅采集 `docs.langchain.com` 的官方 Python overview。`data/raw/docs/` 下的历史下载文件不会自动进入工程索引。修改 catalog 后必须依次重新执行 `sources-sync` 和 `engineering-build`；只重启 `app.py` 不会更新语料。
+
+`git_repository` 与新的 `local_directory` source 都使用同一文件路由器。普通文本和结构化文本直接解析；CSV 与 XLSX 转成不截断行列的 Markdown table；PDF 优先运行可选 MinerU CLI，并把其 Markdown/JSON 产物适配为统一 `DocumentRecord`。若 MinerU 未安装、超时或返回可恢复的解析失败，系统使用 PyMuPDF 提取页面文本和表格，同时写入 `parse_degraded=true` 与 `parse_warnings`，不会悄悄冒充 MinerU 成功。扫描件没有可提取文字/表格时明确失败并提示需要 OCR/MinerU。
+
+所有 routed document 均保留 `file_type`、`content_format`、`parser_backend`、`parser_version`、`page_number`、`sheet_name`、`table_id`、`block_id`、`parse_warnings` 与 `parse_degraded`。`data/sources/catalog.example.yaml` 提供本地目录示例；目录扫描仍会拒绝 `.env`、credential、key/certificate、缓存、依赖目录和符号链接。
 
 ### 离线建库与在线提问不是同一步
 
 1. `sources-sync` 读取受控来源、解析文档并切分 chunk，结果写入 manifest；它不处理用户问题。
-2. `engineering-build` 对这些 chunk 批量计算 Embedding，并把向量索引、BM25 文本索引和来源元数据持久化到 `data/indexes/engineering/`。首次建库或语料变更后执行一次即可，不需要每次提问前重建。
-3. `app.py` 启动时只加载已经落盘的索引。每次提问只计算“问题本身”的一个查询向量，再结合 BM25、RRF、Evidence Guard，以及实现类问题需要的 `rg` / AST / Git 实时核验来选出证据。
+2. `engineering-build` 对这些 chunk 批量计算 Embedding，并始终把 FAISS、BM25 和来源元数据持久化到 `data/indexes/engineering/`；`--backend both`/`milvus` 还严格写入远端 Milvus。首次建库或语料变更后执行一次即可，不需要每次提问前重建。
+3. `app.py` 启动时根据 `ENGINEERING_VECTOR_BACKEND` 选择 v4/v3 catalog 中实际可用的后端。每次提问只计算“问题本身”的一个查询向量，再结合 BM25、RRF、Evidence Guard，以及实现类问题需要的 `rg` / AST / Git 实时核验来选出证据。
 4. 页面中的“仅检索证据”调用 `/retrieve`，适合观察召回内容，不调用 DeepSeek；“检索并生成回答”直接调用 `/answer`，后端会自动先执行同一套检索和证据检查，再在证据充分时生成回答，因此不需要先点一次“仅检索证据”。
 
 也就是说，正常使用顺序是“语料更新后离线建库一次 → 启动服务 → 可以连续提问”；不是“每问一句就重新向量化全部文档”。
 
 索引使用跨进程 OS 文件锁、staging 校验、备份回滚和每个分区文件的 SHA-256；空 manifest、重复 chunk、来源错配或损坏文件会拒绝发布。锁文件路径保持稳定，进程退出时由操作系统释放锁，避免 PID 探测和空锁文件竞态。
 
-当前本地索引发布不提供无停机并发读取保证：目录替换期间，并发读者可能短暂看不到索引根目录。构建和发布最终快照时应暂停 API 读流量；若需要无停机部署，应在服务外使用不可变版本目录与原子版本指针，不能把当前备份回滚机制描述成生产级热切换。
+工程索引 catalog v4 记录 embedding dimension、可用后端及每个 Milvus collection 的 owner/build/model/dimension 契约；旧的 v3 FAISS catalog 仍可读取，但它没有 Milvus artifact，若要使用 Milvus 必须从 manifest 重建 v4。运行模式的边界是：`faiss` 始终使用本地快照；`milvus` 严格要求每个远端 artifact 存在且通过校验，服务不可达也不降级；`auto` 优先 Milvus，仅在连接拒绝、超时等明确可用性错误或 catalog 根本没有 Milvus artifact 时使用 FAISS。鉴权、权限、schema、维度、行数、build/model/owner 不匹配和未知错误均失败关闭，避免用本地结果掩盖配置或数据损坏。
+
+当前本地索引发布不提供无停机并发读取保证：目录替换期间，并发读者可能短暂看不到索引根目录。Milvus collection 按 build 与分区创建且不在发布时自动删除，因为旧服务进程可能仍在读取旧 collection；应先 dry-run，待旧 reader 退出后再显式清理。若需要生产级无停机部署，仍应在服务外设计不可变版本目录、原子版本指针和 reader-drain 机制，不能把当前备份回滚/显式清理描述成生产热切换。
 
 ## 启动 Web 页面、查询与只读 API
 
@@ -136,6 +160,8 @@ $env:PYTHONIOENCODING = "utf-8"
 $env:MINI_NANOBOT_REPO = (Resolve-Path ..\Mini-Nanobot).Path
 $env:ENGINEERING_INDEX_DIR = "data/indexes/engineering"
 $env:ENGINEERING_MANIFEST_PATH = "data/manifests/builds/current.json"
+# 本地默认；使用 v4 双后端 catalog 时也可选择 milvus 或 auto。
+$env:ENGINEERING_VECTOR_BACKEND = "faiss"
 # 完整 RAG 演示：检索后调用 DeepSeek 归纳证据。
 # 需要在未跟踪的 .env 或 Conda 环境中配置有效 DEEPSEEK_API_KEY。
 $env:ENGINEERING_GENERATION_PROVIDER = "deepseek"
@@ -170,6 +196,8 @@ $env:ENGINEERING_GENERATION_PROVIDER = "deterministic"
 
 页面的信息层级受到 [RAG Web UI](https://github.com/rag-web-ui/rag-web-ui)（Apache-2.0）的视觉启发，但针对本项目的只读工程知识流程独立实现。仓库没有复制上游 logo、图片、静态资源或前端源码，也没有宣称或复用上游的文档上传、多轮聊天、知识库 CRUD、API Key 管理等本项目并不支持的能力。
 
+拉丁字符使用仓库内自托管的 DM Sans variable font，并在 `web/assets/fonts/OFL-DMSans.txt` 保留原始 SIL Open Font License；中文按系统字体回退到 `PingFang SC`、`Microsoft YaHei UI`/`Microsoft YaHei` 等可用字体。页面不依赖外部 font CDN，也没有复制字节跳动的专有字体资产；这里的“接近字节跳动官网的字体观感”指排版栈与字重取向，而不是品牌字体授权。
+
 `ENGINEERING_GENERATION_PROVIDER` 有三种模式：
 
 | 模式 | `/answer` 行为 |
@@ -199,8 +227,11 @@ python main.py engineering-query `
   "Mini-Nanobot 为什么使用 SQLite snapshot checkpoint？" `
   --index-dir data/indexes/engineering `
   --mini-repo $env:MINI_NANOBOT_REPO `
+  --backend faiss `
   --top-k 5
 ```
+
+`--backend milvus` 是严格远端模式；`--backend auto` 只有在 v4 catalog 含 Milvus artifact 时才会优先尝试远端，并在明确的可用性故障时退回 FAISS。`GET /health` 的 `index.vector_backend` 会报告 requested/primary/active backend、是否降级及稳定 reason code，但不会返回 Milvus URI 或 token。
 
 也可以直接使用 CLI 启动同一个页面和 API：
 
@@ -299,7 +330,7 @@ python main.py engineering-eval `
 
 holdout 已在设计冻结后运行一次并原样保留报告，随后连同题目公开用于审计，因此不能再作为未来迭代的未见测试集。后续不再据其失败调参；需要最终评测时应先建立新的私有 holdout。当前指标是 source-level Primary Hit/Recall、Supporting Recall、MRR、graded nDCG、精确 symbol recall、路由 macro-F1、拒答 precision/recall/F1、拒答原因和预热后 P50/P95。它们不能冒充 passage entailment、答案正确率、RAGAS faithfulness 或生产 SLA。
 
-正式 `engineering-eval` 不调用 DeepSeek：纯索引 suite 关闭 Answerer，E2E suite 使用确定性 Answerer 评估路由、检索、实时核验和拒答。页面中更流畅的模型回答不属于上述冻结指标，也不能据此声称答案正确率或忠实度得到量化提升。
+正式 `engineering-eval` 不调用 DeepSeek，并显式固定使用 FAISS，不受进程中的 `ENGINEERING_VECTOR_BACKEND` 影响：纯索引 suite 关闭 Answerer，E2E suite 使用确定性 Answerer 评估路由、检索、实时核验和拒答。因此已发布的冻结报告仍是同一 FAISS 基线，不会因新增 Milvus 后端被静默改写；页面中更流畅的模型回答也不属于上述冻结指标，不能据此声称答案正确率或忠实度得到量化提升。
 
 ## 测试
 
@@ -308,6 +339,39 @@ RAG 仓库测试：
 ```powershell
 python -m pytest -q
 ```
+
+Milvus 合约与故障分类默认使用状态化 fake client 离线回归；真实服务 round-trip 必须显式提供隔离的测试连接。测试会创建随机 `test_engineering_rag_*` collection 并在 `finally` 中删除，绝不能把生产 collection 或生产凭据写入仓库：
+
+```powershell
+$env:MILVUS_TEST_URI = "http://127.0.0.1:19530"
+# 仅在测试服务要求鉴权时，临时设置 MILVUS_TEST_TOKEN / MILVUS_TEST_DATABASE。
+python -m pytest -q -m milvus tests/test_engineering_vector_backends.py
+```
+
+未设置 `MILVUS_TEST_URI` 时该测试会 skip；这不是“真实 Milvus 已验证”的成功记录。普通测试可排除 opt-in 项：
+
+```powershell
+python -m pytest -q -m "not milvus"
+```
+
+双后端重建后，先只列出当前 catalog 不再引用的 build-scoped collection：
+
+```powershell
+python main.py engineering-milvus-cleanup `
+  --index-dir data/indexes/engineering `
+  --namespace corner_dev_laptop
+```
+
+确认旧服务 reader 已退出、dry-run 候选无误后才执行删除：
+
+```powershell
+python main.py engineering-milvus-cleanup `
+  --index-dir data/indexes/engineering `
+  --namespace corner_dev_laptop `
+  --execute
+```
+
+`--namespace` 必须与当前 v4 catalog 中记录的 owner 完全一致。命令还会在共享索引运维锁内重新校验 catalog、collection 描述与 owner，删除前再次确认 catalog 没有变化。这里的示例名必须替换成你为该部署选择的唯一值；不要让两套部署共用示例值，也不要仅凭 collection 名称前缀删除。
 
 真实 loopback API、token、严格请求 schema、Mini registry/executor、离线降级、重定向防泄漏与冻结产物不变性 smoke：
 
@@ -335,10 +399,10 @@ RAG 测试覆盖 source allowlist、秘密过滤、Git snapshot 一致性、路�
 ```text
 data/sources/                     来源目录与白名单
 data/manifests/builds/            可复现采集快照（本地运行产物）
-data/indexes/engineering/         分区 FAISS/BM25 索引（本地运行产物）
+data/indexes/engineering/         v4 分区 catalog、FAISS/BM25 产物与 Milvus artifact 引用（本地运行产物）
 data/eval/                        v2 开发集、holdout 与 snapshot
 web/                              同源只读前端（HTML/CSS/JS，无构建步骤）
-rag_core/sources/                 Git/official source adapters
+rag_core/sources/                 Git/local-directory/official adapters 与文件路由器
 rag_core/ingestion/               manifest 与分块流水线
 rag_core/engineering/             分区索引、服务、引用、充分性和回答边界
 rag_core/retrieval/engineering/   路由、BM25、RRF、rerank、rg/AST/Git
@@ -357,6 +421,7 @@ tests/                            离线回归测试
 
 - “海量网络爬虫”：外部资料是少量、白名单、版本化的官方规范；
 - “RAG 替代代码搜索”：当前实现事实最终依赖实时 `rg`、AST 与 Git；
-- “Milvus、ColBERT、RAGAS 已用于最终结果”：除非对应实验真实运行并保存报告；
+- “Milvus 已完成生产部署或带来检索指标提升”：当前只实现并离线验证后端契约；本机没有真实服务 round-trip 或性能报告，冻结正式评测仍固定 FAISS；
+- “ColBERT、RAGAS 已用于最终结果”：除非对应实验真实运行并保存报告；
 - “自动指标证明答案完全正确”：当前正式自动指标主要是来源、符号、路由和拒答；
 - “达到生产 SLA 或通过安全认证”：本项目是可复现实验系统，不是生产部署证明。

@@ -19,7 +19,7 @@ from rag_core.sources.schema import (
 from .manifest import BuildManifest, ManifestDiff, RecordChanges
 
 
-PIPELINE_VERSION = "1.0"
+PIPELINE_VERSION = "1.1"
 CHUNKER_VERSION = "character-boundary-v1"
 _VOLATILE_METADATA_KEYS = {
     "fetched_at",

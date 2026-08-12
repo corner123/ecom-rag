@@ -7,7 +7,8 @@ langchain-huggingface>=0.1.0
 openai>=1.0.0,<2.0.0
 
 # Vector stores and embeddings
-# Legacy demo backend; the engineering RAG uses the FAISS dependency below.
+# Engineering RAG supports a distributed Milvus backend and a local FAISS
+# backend.  The default remains FAISS so a new clone works without a server.
 pymilvus>=2.5.0
 faiss-cpu>=1.8.0
 sentence-transformers>=3.0.0
@@ -16,6 +17,8 @@ torch>=2.0.0
 
 # Document and source ingestion
 pypdf>=4.0.0
+pymupdf>=1.24.0
+openpyxl>=3.1.0
 unstructured>=0.15.0
 markdown>=3.5
 PyYAML>=6.0

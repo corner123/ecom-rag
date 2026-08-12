@@ -6,8 +6,10 @@ import subprocess
 
 import pytest
 
+from rag_core.engineering.workflows import sync_engineering_sources
 from rag_core.ingestion import BuildManifest, IngestionPipeline
 from rag_core.sources import (
+    DocumentLoaderRouter,
     FetchResponse,
     GitRepositorySource,
     OfficialWebSource,
@@ -127,6 +129,76 @@ def test_git_repository_source_strips_credentials_from_remote(tmp_path: Path) ->
     assert snapshot.record.uri == "https://example.test/org/repo.git"
     assert "super-secret" not in serialized
     assert "also-secret" not in serialized
+
+
+def test_git_snapshot_hash_and_content_use_same_bytes_and_hide_local_path(
+    tmp_path: Path,
+) -> None:
+    repository = _create_repository(tmp_path / "private-workspace")
+    original = repository / "README.md"
+    captured_text = "# Dirty but stable\n\nWorking tree content.\n"
+    original.write_text(captured_text, encoding="utf-8")
+
+    class MutatingLoader(DocumentLoaderRouter):
+        def load(self, path, **kwargs):
+            # Mutation occurs after the source captured its private temporary
+            # byte snapshot but before parsing that snapshot.
+            original.write_text("# Changed concurrently\n", encoding="utf-8")
+            try:
+                return super().load(path, **kwargs)
+            finally:
+                original.write_text(captured_text, encoding="utf-8")
+
+    snapshot = GitRepositorySource(
+        "mini_nanobot",
+        repository,
+        include=["README.md"],
+        loader=MutatingLoader(prefer_mineru=False),
+    ).collect()
+
+    document = snapshot.documents[0]
+    assert snapshot.record.dirty is True
+    assert "Working tree content" in document.content
+    assert "Changed concurrently" not in document.content
+    assert document.metadata["file_hash"] == document.content_hash
+    serialized = json.dumps(
+        {
+            "source": snapshot.record.to_dict(),
+            "documents": [item.to_dict() for item in snapshot.documents],
+        },
+        ensure_ascii=False,
+    )
+    assert str(repository) not in serialized
+    assert snapshot.record.uri == "git+local://mini_nanobot"
+
+
+def test_git_history_filters_sensitive_paths_and_redacts_secret_subjects(
+    tmp_path: Path,
+) -> None:
+    repository = _create_repository(tmp_path / "mini")
+    (repository / ".env.production").write_text(
+        "TOKEN=never-store", encoding="utf-8"
+    )
+    (repository / "README.md").write_text("# Safe\n", encoding="utf-8")
+    _git(repository, "add", "README.md", ".env.production")
+    _git(repository, "commit", "-m", "rotate API_KEY=super-secret-value")
+
+    snapshot = GitRepositorySource(
+        "mini_nanobot",
+        repository,
+        include=["README.md", ".env.production"],
+        git_history_limit=2,
+    ).collect()
+    history = [
+        document
+        for document in snapshot.documents
+        if document.metadata.get("record_kind") == "git_commit"
+    ]
+    serialized = json.dumps([item.to_dict() for item in history], ensure_ascii=False)
+
+    assert "super-secret-value" not in serialized
+    assert "API_KEY=<redacted>" in serialized
+    assert ".env.production" not in serialized
 
 
 def test_official_web_source_is_offline_whitelisted_and_cleans_main_content() -> None:
@@ -346,3 +418,89 @@ def test_ingestion_pipeline_stable_ids_full_manifest_and_incremental_diff(tmp_pa
     assert first_by_path["notes.md"].doc_id in second.diff.documents.deleted
     assert second.diff.chunks.changed
     assert second.manifest.build_id != first.manifest.build_id
+
+
+@pytest.mark.parametrize(
+    ("schema_version", "message"),
+    [
+        (None, "no schema_version"),
+        ("1.0", "older than supported"),
+        ("99.0", "newer than supported"),
+        ("future", "invalid"),
+    ],
+)
+def test_build_manifest_read_rejects_missing_old_and_future_schema_versions(
+    tmp_path: Path,
+    schema_version: str | None,
+    message: str,
+) -> None:
+    repository = _create_repository(tmp_path / "mini")
+    manifest = IngestionPipeline().build(
+        [GitRepositorySource("mini", repository, include=["README.md"])]
+    ).manifest.to_dict()
+    if schema_version is None:
+        manifest.pop("schema_version")
+    else:
+        manifest["schema_version"] = schema_version
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        BuildManifest.read(path)
+
+
+def test_build_manifest_rejects_pipeline_metadata_version_mismatch(tmp_path: Path) -> None:
+    repository = _create_repository(tmp_path / "mini")
+    manifest = IngestionPipeline().build(
+        [GitRepositorySource("mini", repository, include=["README.md"])]
+    ).manifest.to_dict()
+    manifest["metadata"]["pipeline_version"] = "1.0"
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="pipeline_version"):
+        BuildManifest.read(path)
+
+
+def test_sources_sync_requires_explicit_full_rebuild_for_old_manifest(tmp_path: Path) -> None:
+    repository = _create_repository(tmp_path / "mini")
+    catalog_path = tmp_path / "catalog.json"
+    catalog_path.write_text(
+        json.dumps(
+            {
+                "sources": [
+                    {
+                        "id": "mini",
+                        "type": "git_repository",
+                        "path": str(repository),
+                        "include": ["README.md"],
+                        "git_history_limit": 0,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest_path = tmp_path / "current.json"
+    old_payload = IngestionPipeline().build(
+        [GitRepositorySource("mini", repository, include=["README.md"])]
+    ).manifest.to_dict()
+    old_payload["schema_version"] = "1.0"
+    old_payload["metadata"]["pipeline_version"] = "1.0"
+    manifest_path.write_text(json.dumps(old_payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="older than supported"):
+        sync_engineering_sources(catalog_path, manifest_path)
+
+    rebuilt = sync_engineering_sources(
+        catalog_path,
+        manifest_path,
+        full_rebuild=True,
+    )
+    loaded = BuildManifest.read(manifest_path)
+    assert loaded.to_dict() == rebuilt.manifest.to_dict()
+    assert loaded.schema_version == "1.1"
+    assert loaded.metadata["pipeline_version"] == "1.1"
+    assert rebuilt.diff.documents.added
+    assert not rebuilt.diff.documents.modified
+    assert not rebuilt.diff.documents.deleted

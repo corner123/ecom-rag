@@ -36,6 +36,50 @@ sources:
       corpus: "internal"
       authority: "project"
 
+  # Optional heterogeneous document source. Set ENGINEERING_DOCS_DIR before
+  # running sources-sync, or remove this entry. Files are read in place; raw
+  # documents and parser artifacts are not copied into Git.
+  - id: engineering_documents
+    type: local_directory
+    path: "${ENGINEERING_DOCS_DIR}"
+    version: "curated-local-snapshot"
+    license: "local-authorized-material"
+    max_file_size_bytes: 20000000
+    include:
+      - "**/*.md"
+      - "**/*.txt"
+      - "**/*.pdf"
+      - "**/*.csv"
+      - "**/*.xlsx"
+      - "**/*.json"
+      - "**/*.yaml"
+      - "**/*.yml"
+      - "**/*.toml"
+    exclude:
+      - ".git/**"
+      - ".venv/**"
+      - "venv/**"
+      - "node_modules/**"
+      - "**/__pycache__/**"
+      - "**/.env*"
+      - "**/*secret*"
+      - "**/*credential*"
+      - "**/*.key"
+      - "**/*.pem"
+      - "**/*.p12"
+      - "**/*.log"
+      - "**/*.sqlite*"
+    # Explicit file_type overrides win over MIME detection and suffix routing.
+    # They are useful for extensionless or mislabeled authorized files.
+    file_types:
+      "**/Dockerfile*": "code"
+    mime_types:
+      "**/*.md": "text/markdown"
+    metadata:
+      corpus: "internal"
+      authority: "project"
+      content_role: "engineering-documentation"
+
   - id: mcp_specification
     type: official_web
     version: "2025-06-18"
