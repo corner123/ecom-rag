@@ -1,0 +1,48 @@
+{
+  "schema_version": "response-eval-metadata/v1",
+  "dataset": "response_development_v3.jsonl",
+  "label_version": "response-eval/v3",
+  "dataset_role": "development_response",
+  "source_revision": "manifest=build_2b26e83243ccb25024e0;commit=2905d42a01774dbcc6e4c439937c44d218f4f91d;worktree_sha256=d3fd1393fe9251673b23560558b3f57432f4cc592f914b694d594df0b6f03316;dirty=true",
+  "question_count": 16,
+  "answerable_count": 12,
+  "boundary_count": 4,
+  "answerable_route_counts": {
+    "design": 3,
+    "implementation": 3,
+    "official": 3,
+    "comparison": 3
+  },
+  "expected_route_counts": {
+    "design": 5,
+    "implementation": 3,
+    "official": 3,
+    "comparison": 3,
+    "out_of_scope": 2
+  },
+  "boundary_route_counts": {
+    "design": 2,
+    "out_of_scope": 2
+  },
+  "query_variant_counts": {
+    "canonical": 3,
+    "paraphrase": 3,
+    "typo": 1,
+    "multi_hop": 5,
+    "boundary": 4
+  },
+  "review": {
+    "status": "independent_agent_reviewed",
+    "method": "Each atomic claim was checked against the current manifest, the exactly matching live Mini-Nanobot worktree, and current primary official documentation where applicable.",
+    "limitations": [
+      "Independent agent review is not human review.",
+      "Official web pages are mutable; the manifest freezes the indexed page bytes, while live primary-page checks were performed on 2026-08-13.",
+      "The Mini-Nanobot source is a dirty local worktree snapshot; exact cross-machine reproducibility is not established until those changes exist in Mini-Nanobot remote history."
+    ]
+  },
+  "sha256": {
+    "dataset_file": "ab250244bb6701f23b13b067aa3a64c5c2f68c69c101d30071123a4f3e438b9c",
+    "dataset_canonical": "b253845e001cd52a60cb882f3f5a08d9f4ae98356e6248511173ac649c97d0b3",
+    "current_manifest_file": "5433c0887dc80cba4e108dc43c46d027d8356f129e4384e616567d0684a635b2"
+  }
+}

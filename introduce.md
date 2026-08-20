@@ -36,6 +36,8 @@
 
 上述冻结数字来自 FAISS，并且正式 `engineering-eval` 继续显式固定 FAISS；新增 Milvus 后端不会静默改写历史报告。当前开发机没有可连接的真实 Milvus 服务或 Docker 运行时，Milvus 部分目前有状态化 fake-client 合约测试和一个由 `MILVUS_TEST_URI` 门控、自动清理随机测试 collection 的 opt-in round-trip。因而可以说明“双后端与故障边界已实现”，但不能说明“本机已完成真实分布式部署、性能压测或检索指标提升”。
 
+独立 response-eval/v3 已真实运行 DeepSeek 生成与 RAGAS：16 题开发集基线 Faithfulness 0.920、Answer Relevancy 0.703、Context Precision/Recall 0.837/0.697。候选通过 query-aware 支持证据和实时 AST 父类展开，将 Required-claim Recall@5 从 0.854 提升到 0.910、误拒答率从 8.33% 降为 0%，但 paired Faithfulness 下降 0.042，且一个 Judge 指标连接失败，因此候选没有通过预注册门槛，也没有进入私有 holdout。这个结果应表述为“建立了真实评估和失败关闭流程”，不能表述为“RAGAS 四项都获得提升”。
+
 ## 面试时应强调的判断
 
 1. RAG 不替代代码搜索。函数定义、调用点和未提交改动由实时工具核验。
@@ -58,6 +60,6 @@
 - Milvus 主从、高可用部署、HNSW 参数调优或性能/召回提升；当前没有真实服务报告；
 - “MinerU OCR 已在当前环境运行”：当前实现了可选 CLI 适配与 fallback，但没有在本机安装/验证完整 MinerU 模型栈；
 - ColBERT 已带来提升；
-- RAGAS faithfulness 已达到某数值；
+- “RAGAS 四项均提升”或“候选已通过最终盲测”；当前只有基线完整，候选因 Faithfulness 退化且 Judge 覆盖不完整而被拒绝；
 - 海量网页爬取、生产并发、SLA 或安全认证；
 - “最优策略”或没有对照实验支持的提升比例。

@@ -48,7 +48,7 @@ Mini-Nanobot 和本仓库始终是两个独立项目。Mini-Nanobot 负责 Agent
 
 可选的 Cross-Encoder reranker 已封装但默认关闭；只有在真实下载模型并完成同配置实验后才应把其结果写进简历。检索、路由、实时核验、证据充分性、拒答和正式评测不依赖在线 LLM；DeepSeek 只作为 `/answer` 的可选证据归纳层。
 
-正式工程索引已实现 FAISS/Milvus 双后端，但默认仍是无需外部服务的 FAISS。当前代码和状态化 fake-client 测试验证了 Milvus 建库、契约校验、查询、受限故障切换和显式清理；当前开发机没有可连接的真实 Milvus 服务，因此不能把这描述为“本机已完成分布式部署、性能压测或生产验证”。真实服务 round-trip 必须通过后文的 opt-in 集成测试单独证明。RAGAS 与 Gradio 不在正式主链路中。
+正式工程索引已实现 FAISS/Milvus 双后端，但默认仍是无需外部服务的 FAISS。当前代码和状态化 fake-client 测试验证了 Milvus 建库、契约校验、查询、受限故障切换和显式清理；当前开发机没有可连接的真实 Milvus 服务，因此不能把这描述为“本机已完成分布式部署、性能压测或生产验证”。真实服务 round-trip 必须通过后文的 opt-in 集成测试单独证明。RAGAS 不在在线问答主链路中，而是用于独立、冻结、可审计的 response-eval/v3；Gradio 不在正式主链路中。
 
 ## 快速开始
 
@@ -331,6 +331,12 @@ python main.py engineering-eval `
 holdout 已在设计冻结后运行一次并原样保留报告，随后连同题目公开用于审计，因此不能再作为未来迭代的未见测试集。后续不再据其失败调参；需要最终评测时应先建立新的私有 holdout。当前指标是 source-level Primary Hit/Recall、Supporting Recall、MRR、graded nDCG、精确 symbol recall、路由 macro-F1、拒答 precision/recall/F1、拒答原因和预热后 P50/P95。它们不能冒充 passage entailment、答案正确率、RAGAS faithfulness 或生产 SLA。
 
 正式 `engineering-eval` 不调用 DeepSeek，并显式固定使用 FAISS，不受进程中的 `ENGINEERING_VECTOR_BACKEND` 影响：纯索引 suite 关闭 Answerer，E2E suite 使用确定性 Answerer 评估路由、检索、实时核验和拒答。因此已发布的冻结报告仍是同一 FAISS 基线，不会因新增 Milvus 后端被静默改写；页面中更流畅的模型回答也不属于上述冻结指标，不能据此声称答案正确率或忠实度得到量化提升。
+
+### 独立响应评测的真实结果
+
+新 `response-eval/v3` 在当前 `build_2b26e83243ccb25024e0` 上冻结 16 条开发题，真实调用 `deepseek-v4-flash` 生成，并用 `deepseek-v4-pro` + 本地 BGE 运行 RAGAS。基线的 Context Precision/Recall 为 0.837/0.697，Faithfulness 0.920，Answer Relevancy 0.703；Hit@5 1.000、MRR 0.903、Required-claim Recall@5 0.854。
+
+query-aware 支持证据 + AST 父类展开候选把 Required-claim Recall@5 提到 0.910、误拒答率从 8.33% 降至 0%，但 paired Faithfulness 下降 0.042，超过预注册容忍值 0.020；另有一个 Judge 指标因连接失败缺失，覆盖率 91.7%。因此候选未通过、默认策略未切换、私有 holdout 未使用。公开报告故意标记 `publishable=false`：[response development comparison](data/eval/reports_public/response_development_support_parent_incomplete_build_2b26e83243ccb25024e0.md)。完整指标定义、恢复规则和失败候选见 [工程评测说明](docs/engineering_evaluation.md)。
 
 ## 测试
 

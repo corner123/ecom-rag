@@ -97,12 +97,32 @@ class DeepSeekGroundedGenerator:
                 max_retries=settings.max_retries,
             )
         self._client = client
+        self._last_usage: dict[str, int] = {}
 
     @property
     def model(self) -> str:
         return self.settings.model
 
+    @property
+    def last_usage(self) -> dict[str, int]:
+        """Return public token counters from the most recent successful call."""
+
+        return dict(self._last_usage)
+
+    def clear_last_usage(self) -> None:
+        """Forget counters from the previous call before a new logical answer.
+
+        ``GroundedAnswerer`` can return a structured refusal before invoking
+        this generator.  Experiment runners therefore call this method at the
+        start of every question so such a refusal cannot inherit the previous
+        question's counters.
+        """
+
+        self._last_usage = {}
+
     def __call__(self, prompt: str) -> str:
+        # Never let a failed call inherit counters from an earlier answer.
+        self.clear_last_usage()
         response = self._client.chat.completions.create(
             model=self.settings.model,
             messages=[
@@ -118,6 +138,18 @@ class DeepSeekGroundedGenerator:
                 }
             },
         )
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            for name in (
+                "prompt_tokens",
+                "completion_tokens",
+                "total_tokens",
+                "prompt_cache_hit_tokens",
+                "prompt_cache_miss_tokens",
+            ):
+                value = getattr(usage, name, None)
+                if type(value) is int and value >= 0:
+                    self._last_usage[name] = value
         choices = getattr(response, "choices", None) or []
         if not choices:
             return ""

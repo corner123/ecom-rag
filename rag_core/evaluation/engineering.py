@@ -639,6 +639,10 @@ def evaluate_strategy(
         "mean_latency_ms": average_present("latency_ms"),
         "p50_latency_ms": _percentile(latencies, 0.50),
         "p95_latency_ms": _percentile(latencies, 0.95),
+        # P99 is retained for exploratory engineering diagnostics.  Small
+        # offline question sets do not provide enough tail samples to treat
+        # it as a production SLA estimate; the report states that boundary.
+        "p99_latency_ms": _percentile(latencies, 0.99),
         "question_count": len(details),
         "routing_eligible_questions": sum(
             row["routing_correct"] is not None for row in details
@@ -875,15 +879,15 @@ def render_markdown(report: Mapping[str, Any]) -> str:
         f"- Baseline: `{report['baseline']}`",
         f"- Suite: `{report.get('suite', 'e2e')}`",
         "",
-        "| Strategy | Route acc. | Route macro-F1 | Primary Hit@K | Primary Recall@K | nDCG@K | Symbol Recall@K | MRR | Refusal F1 | False refusal | P50 ms | P95 ms |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Strategy | Route acc. | Route macro-F1 | Primary Hit@K | Primary Recall@K | nDCG@K | Symbol Recall@K | MRR | Refusal F1 | False refusal | P50 ms | P95 ms | P99 ms* |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for name, result in report["strategies"].items():
         metrics = result["metrics"]
         lines.append(
             "| {name} | {routing} | {route_f1} | {hit} | {primary} | "
             "{ndcg} | {symbol} | {mrr} | {refusal} | "
-            "{false_refusal} | {p50} | {p95} |".format(
+            "{false_refusal} | {p50} | {p95} | {p99} |".format(
                 name=name,
                 routing=_format_metric(metrics["routing_accuracy"]),
                 route_f1=_format_metric(metrics["routing_macro_f1"]),
@@ -896,6 +900,7 @@ def render_markdown(report: Mapping[str, Any]) -> str:
                 false_refusal=_format_metric(metrics["answerable_refusal_rate"]),
                 p50=_format_metric(metrics["p50_latency_ms"], digits=2),
                 p95=_format_metric(metrics["p95_latency_ms"], digits=2),
+                p99=_format_metric(metrics["p99_latency_ms"], digits=2),
             )
         )
     lines.extend(
@@ -910,6 +915,7 @@ def render_markdown(report: Mapping[str, Any]) -> str:
             "- Refusal is an explicit predictor decision. An empty retrieval result is not silently counted as a safe refusal.",
             "- File/citation metrics are source-level, not passage entailment or answer correctness metrics.",
             "- Latency is measured after one discarded warm-up call per strategy; model/index loading and report serialization are excluded.",
+            "- `P99 ms*` is exploratory for these small offline datasets; it is not a statistically stable production tail-latency SLA.",
             "",
         ]
     )

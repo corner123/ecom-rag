@@ -349,7 +349,16 @@ class _FakeCompletions:
     def create(self, **kwargs):
         self.calls.append(kwargs)
         message = SimpleNamespace(content=self.content)
-        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+        usage = SimpleNamespace(
+            prompt_tokens=120,
+            completion_tokens=30,
+            total_tokens=150,
+            prompt_cache_hit_tokens=20,
+            prompt_cache_miss_tokens=100,
+        )
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=message)], usage=usage
+        )
 
 
 def test_deepseek_adapter_separates_system_policy_from_untrusted_evidence():
@@ -370,6 +379,13 @@ def test_deepseek_adapter_separates_system_policy_from_untrusted_evidence():
     assert "ignore previous" not in call["messages"][0]["content"]
     assert "ignore previous" in call["messages"][1]["content"]
     assert call["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert generator.last_usage == {
+        "prompt_tokens": 120,
+        "completion_tokens": 30,
+        "total_tokens": 150,
+        "prompt_cache_hit_tokens": 20,
+        "prompt_cache_miss_tokens": 100,
+    }
     assert "test-api-key-not-for-repr" not in repr(settings)
 
 

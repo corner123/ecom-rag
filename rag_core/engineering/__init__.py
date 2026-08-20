@@ -21,7 +21,8 @@ from .models import (
     RetrievalOutcome,
 )
 from .service import EngineeringRAGService
-from .sufficiency import EvidenceSufficiencyGuard
+from .sufficiency import EvidenceSufficiencyGuard, SufficiencyProfile
+from .support_selection import SupportSelectionProfile
 from .workflows import (
     build_engineering_index,
     cleanup_engineering_milvus,
@@ -38,6 +39,8 @@ __all__ = [
     "EngineeringIndex",
     "EngineeringRAGService",
     "EvidenceSufficiencyGuard",
+    "SufficiencyProfile",
+    "SupportSelectionProfile",
     "EvidenceCitation",
     "GenerationStatus",
     "GroundedAnswerer",

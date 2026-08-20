@@ -25,6 +25,10 @@ from .grounding import GroundedAnswerer
 from .index import EngineeringIndex
 from .models import AnswerOutcome, EvidenceCitation, RetrievalOutcome
 from .sufficiency import EvidenceSufficiencyGuard
+from .support_selection import (
+    SupportSelectionProfile,
+    ensure_internal_support,
+)
 
 
 _BACKTICK_RE = re.compile(r"`([^`\r\n]{1,128})`")
@@ -56,6 +60,9 @@ class EngineeringRAGService:
         index_stats: dict | None = None,
         manifest_path: str | Path | None = None,
         sufficiency_guard: EvidenceSufficiencyGuard | None = None,
+        support_selection_profile: SupportSelectionProfile | str = (
+            SupportSelectionProfile.LEGACY_FIRST
+        ),
     ) -> None:
         self.retriever = retriever
         self.router = router or SourceIntentRouter()
@@ -67,6 +74,9 @@ class EngineeringRAGService:
         self.index_stats = dict(index_stats or {})
         self.manifest_path = Path(manifest_path).resolve() if manifest_path else None
         self.sufficiency_guard = sufficiency_guard or EvidenceSufficiencyGuard()
+        self.support_selection_profile = SupportSelectionProfile(
+            support_selection_profile
+        )
 
     @classmethod
     def from_index(
@@ -80,6 +90,9 @@ class EngineeringRAGService:
         runtime_backend: str | None = None,
         milvus_settings=None,
         milvus_client_factory=None,
+        support_selection_profile: SupportSelectionProfile | str = (
+            SupportSelectionProfile.LEGACY_FIRST
+        ),
     ) -> "EngineeringRAGService":
         if answerer is None:
             from .deepseek_generation import build_grounded_answerer_from_env
@@ -129,6 +142,7 @@ class EngineeringRAGService:
             answerer=answerer,
             index_stats=index_stats,
             manifest_path=manifest_path,
+            support_selection_profile=support_selection_profile,
         )
 
     def health(self) -> dict:
@@ -191,9 +205,15 @@ class EngineeringRAGService:
         indexed = [self._stamp_evidence_role(result) for result in indexed]
         supporting_candidates: list[EngineeringSearchResult] = []
         if route.intent is SourceIntent.DESIGN:
+            support_candidate_limit = (
+                max(2, top_k * 2)
+                if self.support_selection_profile
+                is SupportSelectionProfile.QUERY_AWARE_DIVERSE
+                else max(2, top_k)
+            )
             supporting_candidates = self.retriever.search(
                 retrieval_query,
-                top_k=max(2, top_k),
+                top_k=support_candidate_limit,
                 corpora=("internal",),
                 authorities=("code", "test"),
             )
@@ -262,9 +282,19 @@ class EngineeringRAGService:
         if route.intent is SourceIntent.COMPARISON:
             results = self._ensure_comparison_sides(results, live_results, indexed, top_k)
         elif supporting_candidates:
-            results = self._ensure_internal_support(
-                results, supporting_candidates, top_k
+            results = ensure_internal_support(
+                query=retrieval_query,
+                results=results,
+                supporting_candidates=supporting_candidates,
+                top_k=top_k,
+                profile=self.support_selection_profile,
             )
+            if (
+                self.support_selection_profile
+                is SupportSelectionProfile.QUERY_AWARE_DIVERSE
+                and route.intent is SourceIntent.DESIGN
+            ):
+                results = self._expand_selected_support_parent(results)
 
         sufficient, warnings, refusal_reason = self._evidence_status(
             route.intent, results, live_attempted
@@ -309,6 +339,39 @@ class EngineeringRAGService:
 
     def answer(self, query: str, *, top_k: int = 5) -> AnswerOutcome:
         return self.answerer.answer(self.retrieve(query, top_k=top_k))
+
+    def _expand_selected_support_parent(
+        self,
+        results: list[EngineeringSearchResult],
+    ) -> list[EngineeringSearchResult]:
+        """Replace a selected method card with its live enclosing class.
+
+        The query-aware selector is intentionally allowed to discover a
+        relevant ``Class.method`` card from the frozen index.  A two-line
+        method is often too narrow for a design explanation, so the current
+        workspace AST supplies the enclosing class as parent-document
+        context.  This is a read-only expansion and remains disabled for the
+        legacy profile.
+        """
+
+        if not results or self.live_ast is None:
+            return results
+        selected = results[-1]
+        symbol = str(selected.symbol or "")
+        if "." not in symbol:
+            return results
+        parent = symbol.split(".", 1)[0]
+        if not parent:
+            return results
+        matches = self.live_ast.search(parent, top_k=8)
+        expanded = next((item for item in matches if item.symbol == parent), None)
+        if expanded is None:
+            return results
+        metadata = dict(expanded.metadata)
+        metadata["support_parent_expanded_from"] = symbol
+        metadata["current_revision"] = self._live_revision()
+        expanded = self._stamp_evidence_role(expanded.updated(metadata=metadata))
+        return [*results[:-1], expanded]
 
     @staticmethod
     def _validate_query(query: str) -> str:
@@ -492,31 +555,6 @@ class EngineeringRAGService:
         elif self.live_ast is not None:
             root = self.live_ast.repo_root
         return _git_revision(root) if root is not None else {}
-
-    @staticmethod
-    def _ensure_internal_support(
-        results: list[EngineeringSearchResult],
-        supporting: list[EngineeringSearchResult],
-        top_k: int,
-    ) -> list[EngineeringSearchResult]:
-        selected = list(results[:top_k])
-        if top_k < 2 or not supporting:
-            return selected
-        candidate = next(
-            (
-                item
-                for item in supporting
-                if all(item.result_id != existing.result_id for existing in selected)
-            ),
-            None,
-        )
-        if candidate is None:
-            return selected
-        roles = {str(item.metadata.get("evidence_role")) for item in selected}
-        candidate_role = str(candidate.metadata.get("evidence_role"))
-        if candidate_role in roles:
-            return selected
-        return [*selected[: top_k - 1], candidate]
 
     @staticmethod
     def _ensure_comparison_sides(

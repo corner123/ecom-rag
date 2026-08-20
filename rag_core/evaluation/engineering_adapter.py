@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 from pathlib import Path
-from typing import Mapping
+from typing import Iterable, Mapping
 
 from rag_core.engineering import EngineeringIndex, EngineeringRAGService
 from rag_core.engineering.index import HybridPartitionRetriever
@@ -24,6 +24,10 @@ from .engineering import (
     EvaluationSample,
     EngineeringPredictor,
     expected_route,
+)
+from .retrieval_profiles import (
+    RetrievalExperimentProfile,
+    validate_unique_profiles,
 )
 
 
@@ -60,6 +64,15 @@ class OracleIndexPredictor:
 
     retriever: FederatedRetriever
     evaluation_metadata: dict
+    prediction_metadata: dict | None = None
+    candidate_budget_multiplier: int = 3
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.candidate_budget_multiplier) is not int
+            or self.candidate_budget_multiplier < 1
+        ):
+            raise ValueError("candidate_budget_multiplier must be a positive integer")
 
     def __call__(self, sample: EvaluationSample, top_k: int) -> EvaluationPrediction:
         route = expected_route(sample)
@@ -75,7 +88,7 @@ class OracleIndexPredictor:
         corpora, authorities = filters[route]
         results = self.retriever.search(
             sample.question,
-            top_k=max(top_k, top_k * 3),
+            top_k=max(top_k, top_k * self.candidate_budget_multiplier),
             corpora=corpora,
             authorities=authorities,
         )
@@ -97,7 +110,11 @@ class OracleIndexPredictor:
             predicted_intent=route,
             results=tuple(results),
             refused=False,
-            metadata={"oracle_route": True, "live_verification": False},
+            metadata={
+                "oracle_route": True,
+                "live_verification": False,
+                **dict(self.prediction_metadata or {}),
+            },
         )
 
 
@@ -106,34 +123,62 @@ def _retriever_view(
     mode: str,
     *,
     candidate_multiplier: int | None = None,
+    profile: RetrievalExperimentProfile | None = None,
 ) -> FederatedRetriever:
     """Reuse one loaded index while replacing only the per-partition retriever."""
 
     if mode not in {"bm25", "dense", "hybrid"}:
         raise ValueError(f"unsupported ablation mode: {mode}")
+    if profile is not None and mode != "hybrid":
+        raise ValueError("retrieval profiles are only valid for hybrid mode")
+    if profile is not None and candidate_multiplier is not None:
+        raise ValueError(
+            "candidate_multiplier and retrieval profile cannot be supplied together"
+        )
     source = index.federated
-    federated = FederatedRetriever(
-        rrf_k=source.rrf_k,
-        candidate_multiplier=(
+    federated_multiplier = (
+        profile.federated_candidate_multiplier
+        if profile is not None
+        else (
             source.candidate_multiplier
             if candidate_multiplier is None
             else candidate_multiplier
+        )
+    )
+    federated = FederatedRetriever(
+        rrf_k=source.rrf_k,
+        candidate_multiplier=federated_multiplier,
+        fail_open=(
+            False
+            if candidate_multiplier is not None or profile is not None
+            else source.fail_open
         ),
-        fail_open=False if candidate_multiplier is not None else source.fail_open,
     )
     for partition in source.partitions:
         hybrid = partition.retriever
         if mode == "hybrid":
             retriever = (
                 hybrid
-                if candidate_multiplier is None
+                if candidate_multiplier is None and profile is None
                 else HybridPartitionRetriever(
                     hybrid.dense,
                     hybrid.bm25,
                     rrf_k=hybrid.rrf_k,
-                    candidate_multiplier=candidate_multiplier,
-                    dense_weight=hybrid.dense_weight,
-                    bm25_weight=hybrid.bm25_weight,
+                    candidate_multiplier=(
+                        profile.partition_candidate_multiplier
+                        if profile is not None
+                        else candidate_multiplier
+                    ),
+                    dense_weight=(
+                        profile.dense_weight
+                        if profile is not None
+                        else hybrid.dense_weight
+                    ),
+                    bm25_weight=(
+                        profile.bm25_weight
+                        if profile is not None
+                        else hybrid.bm25_weight
+                    ),
                     fail_open=False,
                 )
             )
@@ -151,6 +196,59 @@ def _retriever_view(
             weight=partition.weight,
         )
     return federated
+
+
+def create_retrieval_profile_predictors(
+    *,
+    index_root: str | Path,
+    profiles: Iterable[RetrievalExperimentProfile],
+    embedding_manager=None,
+    candidate_budget_multiplier: int = 1,
+) -> Mapping[str, EngineeringPredictor]:
+    """Create a development-only hybrid grid against one frozen FAISS build.
+
+    Varying candidate multipliers changes both computation and latency.  This
+    factory records those budgets but intentionally does not call the formal
+    equal-budget suite contract.  A selected candidate must later be compared
+    with the baseline under an explicitly declared common budget, or its budget
+    difference must be reported as an engineering trade-off.
+    """
+
+    if (
+        type(candidate_budget_multiplier) is not int
+        or candidate_budget_multiplier < 1
+    ):
+        raise ValueError("candidate_budget_multiplier must be a positive integer")
+    selected_profiles = validate_unique_profiles(profiles)
+    index = EngineeringIndex.load(
+        index_root,
+        embedding_manager=embedding_manager,
+        runtime_backend="faiss",
+    )
+    _assert_current_build(index)
+    common_metadata = {
+        **_public_index_metadata(index),
+        "oracle_route": True,
+        "live_verification": False,
+        "answer_generation": False,
+        "development_grid": True,
+        "fail_closed": True,
+        "candidate_budget_multiplier": candidate_budget_multiplier,
+    }
+    predictors: dict[str, EngineeringPredictor] = {}
+    for profile in selected_profiles:
+        profile_metadata = profile.as_metadata()
+        predictors[profile.name] = OracleIndexPredictor(
+            _retriever_view(index, "hybrid", profile=profile),
+            evaluation_metadata={
+                **common_metadata,
+                **profile_metadata,
+                "retrieval_strategy": profile.name,
+            },
+            prediction_metadata=profile_metadata,
+            candidate_budget_multiplier=candidate_budget_multiplier,
+        )
+    return predictors
 
 
 def create_predictors(

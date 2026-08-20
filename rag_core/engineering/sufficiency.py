@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from enum import Enum
 import re
 from typing import Iterable
 
@@ -29,6 +30,13 @@ _TOPIC_SUFFIX_ANCHOR_RE = re.compile(
 _LATIN_WORD_RE = re.compile(
     r"(?<![A-Za-z0-9_])[A-Za-z][A-Za-z0-9_-]{2,}(?![A-Za-z0-9_])"
 )
+_SLASH_CONCEPT_RE = re.compile(
+    r"[A-Za-z][A-Za-z0-9-]{2,}(?:/[A-Za-z][A-Za-z0-9-]{2,})+"
+)
+_PATH_ROOTS = {
+    "app", "bin", "config", "data", "docs", "examples", "include", "lib",
+    "packages", "rag_core", "scripts", "src", "static", "templates", "tests",
+}
 _GENERIC_ANCHORS = {
     "api", "cli", "rag", "agent", "mini-nanobot", "python", "json", "http",
     "url", "cpu", "mcp", "langgraph", "docker", "queryengine", "agentstate",
@@ -51,6 +59,19 @@ _MISSING_INDEPENDENT_VERIFICATION = re.compile(
 )
 
 
+class SufficiencyProfile(str, Enum):
+    """Versioned evidence-sufficiency behaviours used by production and evals.
+
+    The legacy profile deliberately treats every slash-bearing hard anchor as
+    one exact identifier.  The split profile changes only conservative,
+    unquoted natural-language forms such as ``context/checkpoint``; quoted
+    identifiers and path-like values remain exact in both profiles.
+    """
+
+    LEGACY_EXACT_SLASH = "legacy_exact_slash"
+    SPLIT_NATURAL_SLASH_CONCEPTS = "split_natural_slash_concepts"
+
+
 class EvidenceSufficiencyGuard:
     """Reject out-of-catalog topics and ungrounded hard identifiers.
 
@@ -58,6 +79,12 @@ class EvidenceSufficiencyGuard:
     neighbour, so neither is a safe answerability threshold. This guard uses
     the explicitly curated source scope plus lexical hard-anchor presence.
     """
+
+    def __init__(
+        self,
+        profile: SufficiencyProfile | str = SufficiencyProfile.LEGACY_EXACT_SLASH,
+    ) -> None:
+        self.profile = SufficiencyProfile(profile)
 
     def check(
         self,
@@ -109,7 +136,9 @@ class EvidenceSufficiencyGuard:
                 if item.metadata.get("evidence_role")
                 in {"internal_design", "internal_history"}
             ]
-            missing = _missing_hard_anchors(query, design)
+            missing = _missing_hard_anchors(
+                query, design, profile=self.profile
+            )
             if missing:
                 warnings.append(
                     "internal design evidence does not contain required anchors: "
@@ -123,7 +152,9 @@ class EvidenceSufficiencyGuard:
                 for item in evidence
                 if item.metadata.get("evidence_role") == "current_implementation"
             ]
-            missing = _missing_hard_anchors(query, live)
+            missing = _missing_hard_anchors(
+                query, live, profile=self.profile
+            )
             if missing:
                 warnings.append(
                     "live implementation evidence does not contain required anchors: "
@@ -137,7 +168,7 @@ class EvidenceSufficiencyGuard:
                 for item in evidence
                 if item.metadata.get("evidence_role") == "current_implementation"
             ]
-            anchors = _hard_anchors(query)
+            anchors = _hard_anchors(query, profile=self.profile)
             if not anchors or all(
                 anchor.casefold()
                 not in "\n".join(
@@ -176,7 +207,11 @@ class EvidenceSufficiencyGuard:
             return False, "official source is outside the curated catalog scope"
         if not topic_matched:
             return False, "requested official subtopic is not present in the curated snapshot"
-        missing = _missing_hard_anchors(query, results) if check_anchors else []
+        missing = (
+            _missing_hard_anchors(query, results, profile=self.profile)
+            if check_anchors
+            else []
+        )
         if missing:
             return (
                 False,
@@ -187,9 +222,12 @@ class EvidenceSufficiencyGuard:
 
 
 def _missing_hard_anchors(
-    query: str, results: Iterable[EngineeringSearchResult]
+    query: str,
+    results: Iterable[EngineeringSearchResult],
+    *,
+    profile: SufficiencyProfile | str = SufficiencyProfile.LEGACY_EXACT_SLASH,
 ) -> list[str]:
-    anchors = _hard_anchors(query)
+    anchors = _hard_anchors(query, profile=profile)
     if not anchors:
         return []
     haystack = "\n".join(
@@ -198,7 +236,12 @@ def _missing_hard_anchors(
     return [anchor for anchor in anchors if anchor.casefold() not in haystack]
 
 
-def _hard_anchors(query: str) -> list[str]:
+def _hard_anchors(
+    query: str,
+    *,
+    profile: SufficiencyProfile | str = SufficiencyProfile.LEGACY_EXACT_SLASH,
+) -> list[str]:
+    selected_profile = SufficiencyProfile(profile)
     anchors: list[str] = []
     topic_matches = (
         *_TOPIC_ANCHOR_RE.finditer(query),
@@ -210,6 +253,19 @@ def _hard_anchors(query: str) -> list[str]:
             anchors.append(value)
     for match in _ANCHOR_RE.finditer(query):
         value = (match.group(1) or match.group(0)).strip()
+        if (
+            selected_profile
+            is SufficiencyProfile.SPLIT_NATURAL_SLASH_CONCEPTS
+            and match.group(1) is None
+            and _is_unquoted_slash_concept(value)
+        ):
+            for concept in value.split("/"):
+                folded_concept = concept.casefold()
+                if folded_concept not in _GENERIC_ANCHORS and folded_concept not in {
+                    item.casefold() for item in anchors
+                }:
+                    anchors.append(concept)
+            continue
         folded = value.casefold()
         if folded in _GENERIC_ANCHORS or folded in {item.casefold() for item in anchors}:
             continue
@@ -230,6 +286,26 @@ def _hard_anchors(query: str) -> list[str]:
     if not anchors and len({item.casefold() for item in distinctive}) == 1:
         anchors.append(distinctive[0])
     return anchors
+
+
+def _is_unquoted_slash_concept(value: str) -> bool:
+    """Return whether a bare slash token denotes concepts rather than a path.
+
+    Natural-language technical prose sometimes uses ``context/checkpoint`` as
+    shorthand for two related concepts.  Requiring that exact compound in the
+    evidence causes a false refusal even when both concepts are grounded.  We
+    only split a conservative bare form: no dot or underscore (both are strong
+    code/path signals), no absolute/relative path marker, and no conventional
+    repository root.  Backtick-delimited values never reach this helper and
+    remain exact hard anchors.
+    """
+
+    if not _SLASH_CONCEPT_RE.fullmatch(value):
+        return False
+    if "." in value or "_" in value or value.startswith(("/", "./", "../")):
+        return False
+    first = value.split("/", 1)[0].casefold()
+    return first not in _PATH_ROOTS
 
 
 def _string_list(value: object) -> list[str]:

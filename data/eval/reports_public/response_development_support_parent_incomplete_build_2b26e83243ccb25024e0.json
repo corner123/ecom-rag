@@ -1,0 +1,403 @@
+{
+  "schema_version": "engineering-response-comparison/v1",
+  "generated_at": "2026-08-20T06:10:00.790353+00:00",
+  "baseline": "baseline-equal-legacy",
+  "candidate": "candidate-split-query-aware-parent",
+  "metadata": {
+    "comparison_inputs": {
+      "dataset_file_sha256": "ab250244bb6701f23b13b067aa3a64c5c2f68c69c101d30071123a4f3e438b9c",
+      "dataset_canonical_sha256": "b253845e001cd52a60cb882f3f5a08d9f4ae98356e6248511173ac649c97d0b3",
+      "manifest_build_id": "build_2b26e83243ccb25024e0",
+      "index_catalog_sha256": "fa0ae84427fcabf618d9f2361c8caf75f412173a0e9eb23531e07943b768c4c4",
+      "top_k": 5,
+      "question_count": 16,
+      "baseline_artifact_sha256": "52d4c1564383b11a1f752326a47002cec5b315a6309d83b326f7a16b6d95fb25",
+      "candidate_artifact_sha256": "922ca086cd4fda9af4037025683b725a478a05a27f07297b6287b05e9c892d6d"
+    },
+    "user": {
+      "suite": "development_response",
+      "comparison_boundary": "Same frozen dataset, build, Top-K, generator, judge and equal RRF weights. Candidate changes the explicit sufficiency profile and query-aware parent-document support selection. One candidate Judge metric is missing and must remain non-publishable."
+    }
+  },
+  "systems": {
+    "baseline-equal-legacy": {
+      "question_count": 16,
+      "answerable_count": 12,
+      "unanswerable_count": 4,
+      "generation_success_rate": 0.9166666666666666,
+      "answerable_response_coverage": 0.9166666666666666,
+      "answerable_refusal_rate": 0.08333333333333333,
+      "refusal_precision": 0.8,
+      "refusal_recall": 1.0,
+      "refusal_f1": 0.888888888888889,
+      "judge_coverage": 1.0,
+      "judge_score_coverage": 1.0,
+      "judge_execution_coverage": 1.0,
+      "run_execution_coverage": 1.0,
+      "artifact_complete": true,
+      "response_metrics_publishable": true,
+      "deterministic_retrieval_coverage": 1.0,
+      "minimum_judge_coverage": 0.95,
+      "minimum_deterministic_retrieval_coverage": 1.0,
+      "publishable": true,
+      "metrics": {
+        "context_precision": {
+          "mean": 0.8368686868218771,
+          "count": 11,
+          "eligible": 11,
+          "coverage": 1.0
+        },
+        "context_recall": {
+          "mean": 0.696969696969697,
+          "count": 11,
+          "eligible": 11,
+          "coverage": 1.0
+        },
+        "faithfulness": {
+          "mean": 0.9200207254985843,
+          "count": 11,
+          "eligible": 11,
+          "coverage": 1.0
+        },
+        "answer_relevancy": {
+          "mean": 0.7029143237227456,
+          "count": 11,
+          "eligible": 11,
+          "coverage": 1.0
+        },
+        "answer_correctness": {
+          "mean": 0.4773218108740644,
+          "count": 11,
+          "eligible": 11,
+          "coverage": 1.0
+        }
+      },
+      "deterministic_retrieval_metrics": {
+        "hit_at_k": {
+          "mean": 1.0,
+          "count": 12,
+          "eligible": 12,
+          "coverage": 1.0
+        },
+        "required_claim_recall_at_k": {
+          "mean": 0.8541666666666666,
+          "count": 12,
+          "eligible": 12,
+          "coverage": 1.0
+        },
+        "mrr": {
+          "mean": 0.9027777777777778,
+          "count": 12,
+          "eligible": 12,
+          "coverage": 1.0
+        },
+        "source_precision_at_k": {
+          "mean": 0.6055555555555555,
+          "count": 12,
+          "eligible": 12,
+          "coverage": 1.0
+        },
+        "source_option_recall": {
+          "mean": 0.6930555555555555,
+          "count": 12,
+          "eligible": 12,
+          "coverage": 1.0
+        }
+      },
+      "latency": {
+        "retrieval_latency_ms": {
+          "mean": 2621.7365625,
+          "p50": 94.963,
+          "p95": 9833.503,
+          "p99_exploratory": 30167.81019999999,
+          "count": 16
+        },
+        "generation_latency_ms": {
+          "mean": 4065.9973125,
+          "p50": 5081.597,
+          "p95": 7379.3935,
+          "p99_exploratory": 7463.8243,
+          "count": 16
+        },
+        "total_latency_ms": {
+          "mean": 6687.8279999999995,
+          "p50": 5871.9825,
+          "p95": 16384.32625,
+          "p99_exploratory": 34684.511649999986,
+          "count": 16
+        }
+      },
+      "generation_usage": {
+        "attempted_call_count": 11,
+        "reported_usage_count": 11,
+        "coverage": 1.0,
+        "tokens": {
+          "prompt_tokens": {
+            "total": 20356,
+            "mean_per_reported_call": 1850.5454545454545,
+            "count": 11
+          },
+          "completion_tokens": {
+            "total": 7974,
+            "mean_per_reported_call": 724.9090909090909,
+            "count": 11
+          },
+          "total_tokens": {
+            "total": 28330,
+            "mean_per_reported_call": 2575.4545454545455,
+            "count": 11
+          },
+          "prompt_cache_hit_tokens": {
+            "total": 4864,
+            "mean_per_reported_call": 442.1818181818182,
+            "count": 11
+          },
+          "prompt_cache_miss_tokens": {
+            "total": 15492,
+            "mean_per_reported_call": 1408.3636363636363,
+            "count": 11
+          }
+        }
+      },
+      "metric_failure_codes": {},
+      "deterministic_retrieval_metric_failure_codes": {},
+      "infrastructure_failure_codes": {}
+    },
+    "candidate-split-query-aware-parent": {
+      "question_count": 16,
+      "answerable_count": 12,
+      "unanswerable_count": 4,
+      "generation_success_rate": 1.0,
+      "answerable_response_coverage": 1.0,
+      "answerable_refusal_rate": 0.0,
+      "refusal_precision": 1.0,
+      "refusal_recall": 1.0,
+      "refusal_f1": 1.0,
+      "judge_coverage": 0.9166666666666666,
+      "judge_score_coverage": 0.9166666666666666,
+      "judge_execution_coverage": 1.0,
+      "run_execution_coverage": 1.0,
+      "artifact_complete": true,
+      "response_metrics_publishable": false,
+      "deterministic_retrieval_coverage": 1.0,
+      "minimum_judge_coverage": 0.95,
+      "minimum_deterministic_retrieval_coverage": 1.0,
+      "publishable": false,
+      "metrics": {
+        "context_precision": {
+          "mean": 0.7819444444097916,
+          "count": 12,
+          "eligible": 12,
+          "coverage": 1.0
+        },
+        "context_recall": {
+          "mean": 0.7222222222222222,
+          "count": 12,
+          "eligible": 12,
+          "coverage": 1.0
+        },
+        "faithfulness": {
+          "mean": 0.8584977907948291,
+          "count": 12,
+          "eligible": 12,
+          "coverage": 1.0
+        },
+        "answer_relevancy": {
+          "mean": 0.8535726022843488,
+          "count": 11,
+          "eligible": 12,
+          "coverage": 0.9166666666666666
+        },
+        "answer_correctness": {
+          "mean": 0.5059015345120779,
+          "count": 12,
+          "eligible": 12,
+          "coverage": 1.0
+        }
+      },
+      "deterministic_retrieval_metrics": {
+        "hit_at_k": {
+          "mean": 1.0,
+          "count": 12,
+          "eligible": 12,
+          "coverage": 1.0
+        },
+        "required_claim_recall_at_k": {
+          "mean": 0.9097222222222222,
+          "count": 12,
+          "eligible": 12,
+          "coverage": 1.0
+        },
+        "mrr": {
+          "mean": 0.9027777777777778,
+          "count": 12,
+          "eligible": 12,
+          "coverage": 1.0
+        },
+        "source_precision_at_k": {
+          "mean": 0.6222222222222222,
+          "count": 12,
+          "eligible": 12,
+          "coverage": 1.0
+        },
+        "source_option_recall": {
+          "mean": 0.7138888888888889,
+          "count": 12,
+          "eligible": 12,
+          "coverage": 1.0
+        }
+      },
+      "latency": {
+        "retrieval_latency_ms": {
+          "mean": 1895.9161875,
+          "p50": 457.84549999999996,
+          "p95": 6527.54825,
+          "p99_exploratory": 18079.207249999992,
+          "count": 16
+        },
+        "generation_latency_ms": {
+          "mean": 4857.4735,
+          "p50": 5614.619000000001,
+          "p95": 8650.05075,
+          "p99_exploratory": 8758.11255,
+          "count": 16
+        },
+        "total_latency_ms": {
+          "mean": 6753.5071875,
+          "p50": 6076.1355,
+          "p95": 14433.08625,
+          "p99_exploratory": 24305.573249999994,
+          "count": 16
+        }
+      },
+      "generation_usage": {
+        "attempted_call_count": 12,
+        "reported_usage_count": 12,
+        "coverage": 1.0,
+        "tokens": {
+          "prompt_tokens": {
+            "total": 23782,
+            "mean_per_reported_call": 1981.8333333333333,
+            "count": 12
+          },
+          "completion_tokens": {
+            "total": 9753,
+            "mean_per_reported_call": 812.75,
+            "count": 12
+          },
+          "total_tokens": {
+            "total": 33535,
+            "mean_per_reported_call": 2794.5833333333335,
+            "count": 12
+          },
+          "prompt_cache_hit_tokens": {
+            "total": 2688,
+            "mean_per_reported_call": 224,
+            "count": 12
+          },
+          "prompt_cache_miss_tokens": {
+            "total": 21094,
+            "mean_per_reported_call": 1757.8333333333333,
+            "count": 12
+          }
+        }
+      },
+      "metric_failure_codes": {
+        "ragas_metric_error": 1
+      },
+      "deterministic_retrieval_metric_failure_codes": {},
+      "infrastructure_failure_codes": {}
+    }
+  },
+  "paired_deltas": {
+    "context_precision": {
+      "mean_delta": -0.02727272726227273,
+      "ci95_low": -0.08181818180045455,
+      "ci95_high": 1.3636364764641423e-11,
+      "paired_count": 11
+    },
+    "context_recall": {
+      "mean_delta": 0.0,
+      "ci95_low": 0.0,
+      "ci95_high": 0.0,
+      "paired_count": 11
+    },
+    "faithfulness": {
+      "mean_delta": -0.04159988665832351,
+      "ci95_low": -0.12728445553976453,
+      "ci95_high": 0.027016331619877983,
+      "paired_count": 11
+    },
+    "answer_relevancy": {
+      "mean_delta": 0.16983698924375631,
+      "ci95_low": 0.029044723033637115,
+      "ci95_high": 0.37019738477498076,
+      "paired_count": 10
+    },
+    "answer_correctness": {
+      "mean_delta": 0.016329939430623077,
+      "ci95_low": -0.07828768395686968,
+      "ci95_high": 0.12100124401834583,
+      "paired_count": 11
+    },
+    "hit_at_k": {
+      "mean_delta": 0.0,
+      "ci95_low": 0.0,
+      "ci95_high": 0.0,
+      "paired_count": 12
+    },
+    "required_claim_recall_at_k": {
+      "mean_delta": 0.05555555555555556,
+      "ci95_low": 0.0,
+      "ci95_high": 0.16666666666666669,
+      "paired_count": 12
+    },
+    "mrr": {
+      "mean_delta": 0.0,
+      "ci95_low": 0.0,
+      "ci95_high": 0.0,
+      "paired_count": 12
+    },
+    "source_precision_at_k": {
+      "mean_delta": 0.016666666666666666,
+      "ci95_low": 0.0,
+      "ci95_high": 0.05,
+      "paired_count": 12
+    },
+    "source_option_recall": {
+      "mean_delta": 0.020833333333333332,
+      "ci95_low": 0.0,
+      "ci95_high": 0.0625,
+      "paired_count": 12
+    },
+    "retrieval_latency_ms": {
+      "mean_delta": -725.8203750000002,
+      "ci95_low": -2578.1391546875006,
+      "ci95_high": 260.8570203124999,
+      "paired_count": 16
+    },
+    "generation_latency_ms": {
+      "mean_delta": 791.4761874999999,
+      "ci95_low": 76.10764999999998,
+      "ci95_high": 1800.3242437499996,
+      "paired_count": 16
+    },
+    "total_latency_ms": {
+      "mean_delta": 65.67918750000008,
+      "ci95_low": -2000.6660718749995,
+      "ci95_high": 1756.7079203124997,
+      "paired_count": 16
+    }
+  },
+  "artifact_complete": true,
+  "response_metrics_publishable": false,
+  "publishable": false,
+  "interpretation_boundaries": [
+    "Deterministic retrieval metrics use reviewed evidence sources and include answerable questions only.",
+    "source_option_recall is diagnostic coverage of alternative acceptable locators; required_claim_recall_at_k is the primary completeness metric.",
+    "RAGAS scores are model-judged estimates, not absolute ground truth.",
+    "Using a DeepSeek-family judge for DeepSeek-family answers can introduce self-evaluation bias.",
+    "P99 is exploratory on small offline samples and is not a production SLA.",
+    "A private holdout may be used only once after the candidate is frozen."
+  ]
+}

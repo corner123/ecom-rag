@@ -19,7 +19,30 @@
 
 suite 与 predictor contract 会强校验：index predictor 必须声明 oracle、无 live、无 answer、fail closed；E2E predictor 必须声明真实路由、live 与 answer。标错 suite 会直接终止。
 
-这里的 `answer=true` 表示执行 Evidence Guard 后的确定性 answer/refusal 契约，不表示调用在线模型。Web/API 中可选的 DeepSeek 归纳层只改善人工阅读体验，不进入冻结开发集或 holdout 的正式指标；若未来评测模型回答，需要单独冻结模型版本、生成参数、prompt、成本与人工/自动评分协议，不能与当前检索报告混写。
+这里的 `answer=true` 表示执行 Evidence Guard 后的确定性 answer/refusal 契约，不表示调用在线模型。Web/API 中可选的 DeepSeek 归纳层不进入上述 v2 检索报告。模型回答使用下述独立的 response-eval/v3 协议评测，两个报告体系不能混写。
+
+### 响应评测（response-eval/v3）
+
+响应评测单独冻结问题、人工复核的 reference answer、原子 reference claims、每项 claim 的可接受证据来源、索引 build、Mini-Nanobot live revision、Top-K、检索 profile、Evidence Guard profile、支持证据选择 profile、生成模型、生成 prompt、Judge 模型、RAGAS 版本与本地评测 Embedding。参考答案和 claim 不会进入检索或生成 prompt，只在 Judge 阶段加入。
+
+指标分三组：
+
+| 层级 | 指标 | 口径 |
+| --- | --- | --- |
+| 检索 | Hit@K、MRR | 至少一个 required claim 的可接受来源是否命中，以及第一个命中来源的倒数排名 |
+| 检索 | Required-claim Recall@K | 每个必需 claim 的任一可接受来源命中即算该 claim 命中 |
+| 检索 | logical-source Precision@K | 去掉 symbol/line fragment 后，Top-K 逻辑来源中相关来源的比例 |
+| 检索 | source-option recall | 所有备选来源的诊断性覆盖率；不是主完整性指标 |
+| RAGAS 上下文 | LLM Context Precision、LLM Context Recall | 评估实际送入模型的 `generation_context`，不是整个候选池 |
+| RAGAS 回答 | Faithfulness、Response Relevancy | 回答是否能由上下文支持、是否直接回应问题 |
+| 补充回答 | Answer Correctness | 与冻结 reference answer 的语义/事实一致性；不属于本项目宣称的“四核心指标” |
+| 安全 | refusal P/R/F1、false-refusal | 不可回答题是否拒答，以及可回答题是否被错误拒答 |
+| 工程 | retrieval/generation/total P50/P95 | 冷启动单列；小样本 P99 仅 exploratory，不是 SLA |
+| 成本 | prompt/completion/cache token | 只统计 `generation_status.attempted=true` 的真实模型调用 |
+
+RAGAS 使用 `ragas==0.2.15` 的 `Faithfulness`、`ResponseRelevancy`、`LLMContextPrecisionWithReference` 与 `LLMContextRecall`；Judge 显式注入 DeepSeek chat wrapper，Response Relevancy 显式注入本地 `BAAI/bge-small-zh-v1.5` embedding wrapper，不隐式回退 OpenAI。单指标失败记录为 `null + error`，绝不写成 0。Judge 恢复会校验模型、prompt hash、RAGAS、Embedding、timeout/retry 和代码身份，只补失败指标并保留历史错误。
+
+response-eval/v3 开发集有 16 题（12 可回答、4 边界/不可回答），私有 holdout 有 24 题且保持 Git 忽略。只有候选通过预注册开发集门槛后才允许消耗一次私有 holdout；失败候选不能用私有集继续调参。
 
 ## v2 数据契约
 
@@ -105,5 +128,64 @@ python main.py engineering-eval `
   --snapshot data/eval/evaluation_snapshot.json `
   --output data/eval/reports/e2e_holdout_first_run
 ```
+
+响应基线/候选使用独立命令；以下是开发集示例，真实运行需要 `.env` 中可用的 DeepSeek 凭据：
+
+```powershell
+python main.py engineering-response-eval `
+  --dataset data/eval/response_development_v3.jsonl `
+  --snapshot data/eval/response_development_v3.snapshot.json `
+  --manifest data/manifests/builds/current.json `
+  --index-dir data/indexes/engineering `
+  --mini-repo ..\Mini-Nanobot `
+  --output data/eval/reports/response_dev_candidate.json `
+  --profile-name candidate `
+  --sufficiency-profile split_natural_slash_concepts `
+  --support-selection-profile query_aware_diverse
+```
+
+若 Judge 只有部分指标失败，保留原产物并写入新文件：
+
+```powershell
+python main.py engineering-response-eval `
+  --dataset data/eval/response_development_v3.jsonl `
+  --snapshot data/eval/response_development_v3.snapshot.json `
+  --output data/eval/reports/response_dev_candidate_recovered.json `
+  --profile-name candidate `
+  --judge-only `
+  --retry-from data/eval/reports/response_dev_candidate.json
+```
+
+恢复时仍需传入与原实验相同的 index、manifest、Mini repo、Top-K 和两个 profile；任何 Judge 或代码身份差异都会失败关闭。
+
+## 2026-08-14 实际响应实验
+
+当前 build 为 `build_2b26e83243ccb25024e0`。生成模型为 `deepseek-v4-flash`，Judge 为 `deepseek-v4-pro`，两者同属 DeepSeek 系列，因此报告明确保留同家族自评偏差；响应评测 Embedding 为本地 `BAAI/bge-small-zh-v1.5`。
+
+完整基线（equal RRF + legacy Guard/support）结果：
+
+| 指标 | 基线 |
+| --- | ---: |
+| Hit@5 / MRR | 1.000 / 0.903 |
+| Required-claim Recall@5 | 0.854 |
+| logical-source Precision@5 | 0.606 |
+| Context Precision / Recall | 0.837 / 0.697 |
+| Faithfulness / Answer Relevancy | 0.920 / 0.703 |
+| Answer Correctness | 0.477 |
+| False-refusal / Refusal F1 | 8.33% / 0.889 |
+
+第一次全局 BM25 加权候选导致另一道实现题被错误拒答，提前终止。第二次仅放宽自然语言 slash anchor 的候选恢复了误拒答，但目标题证据只覆盖 1/3，Faithfulness 0.649，未过开发门槛。第三次加入 query-aware 支持证据和实时 AST 父类展开：
+
+| 指标 | 基线 | 候选 | 差异 |
+| --- | ---: | ---: | ---: |
+| Required-claim Recall@5 | 0.854 | 0.910 | +0.056 |
+| logical-source Precision@5 | 0.606 | 0.622 | +0.017 |
+| False-refusal | 8.33% | 0% | -8.33 pp |
+| Context Precision | 0.837 | 0.782 | paired -0.027 |
+| Faithfulness | 0.920 | 0.858 | paired -0.042 |
+| Answer Relevancy | 0.703 | 0.854 | paired +0.170（仅 10 个共同有效样本） |
+| Answer Correctness | 0.477 | 0.506 | paired +0.016 |
+
+候选有一个 Answer Relevancy Judge 连接失败，Judge score coverage 为 11/12，因此公开聚合报告明确 `publishable=false`。即使忽略该缺失项，Faithfulness 下降仍超过预注册允许的 0.02，候选判定失败，生产默认未切换，私有 holdout 未使用。后续按相同代码重跑时 DeepSeek Judge 返回 HTTP 402 `Insufficient Balance`，因此没有伪造或用 0 补齐分数。脱敏失败报告见 [response development comparison](../data/eval/reports_public/response_development_support_parent_incomplete_build_2b26e83243ccb25024e0.md)。
 
 JSON 报告保留逐题结果、每策略 contract、build/model、dataset hash 和 snapshot；Markdown 只用于快速浏览。冷启动应单独测量，不能混入稳态 P50/P95。正式 runner 本身已经使用确定性 Answerer，上述环境变量是额外的操作防线，避免同一终端随后启动 Web/API 时意外发送评测问题与证据。

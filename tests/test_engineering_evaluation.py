@@ -104,6 +104,9 @@ def test_engineering_metrics_cover_route_file_symbol_mrr_and_refusal():
     assert metrics["mrr"] == pytest.approx(0.75)
     assert metrics["unanswerable_refusal_rate"] == 1.0
     assert metrics["answerable_refusal_rate"] == 0.0
+    assert metrics["p50_latency_ms"] == pytest.approx(2.0)
+    assert metrics["p95_latency_ms"] == pytest.approx(2.9)
+    assert metrics["p99_latency_ms"] == pytest.approx(2.98)
     assert metrics["file_eligible_questions"] == 2
     assert metrics["symbol_eligible_questions"] == 1
 
@@ -122,6 +125,8 @@ def test_ablation_writes_machine_and_human_readable_reports(tmp_path: Path):
     assert "| bm25 |" in markdown
     assert "| dense |" in markdown
     assert "| hybrid |" in markdown
+    assert "P99 ms*" in markdown
+    assert "not a statistically stable production" in markdown
     assert render_markdown(report) == markdown
 
 

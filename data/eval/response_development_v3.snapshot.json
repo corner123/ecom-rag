@@ -1,0 +1,18 @@
+{
+  "created_at": "2026-08-13T14:37:36.610311+00:00",
+  "dataset": {
+    "canonical_sha256": "b253845e001cd52a60cb882f3f5a08d9f4ae98356e6248511173ac649c97d0b3",
+    "dataset_roles": [
+      "development_response"
+    ],
+    "file_sha256": "ab250244bb6701f23b13b067aa3a64c5c2f68c69c101d30071123a4f3e438b9c",
+    "question_count": 16,
+    "source_revisions": [
+      "manifest=build_2b26e83243ccb25024e0;commit=2905d42a01774dbcc6e4c439937c44d218f4f91d;worktree_sha256=d3fd1393fe9251673b23560558b3f57432f4cc592f914b694d594df0b6f03316;dirty=true"
+    ]
+  },
+  "index_catalog_sha256": "fa0ae84427fcabf618d9f2361c8caf75f412173a0e9eb23531e07943b768c4c4",
+  "manifest_build_id": "build_2b26e83243ccb25024e0",
+  "manifest_sha256": "5433c0887dc80cba4e108dc43c46d027d8356f129e4384e616567d0684a635b2",
+  "schema_version": "engineering-response-snapshot/v1"
+}
