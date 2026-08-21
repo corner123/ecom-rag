@@ -1,4 +1,4 @@
-"""FastAPI boundary consumed by Mini-Nanobot's read-only knowledge tool."""
+"""FastAPI boundary consumed by a read-only engineering knowledge client."""
 
 from __future__ import annotations
 
@@ -45,13 +45,14 @@ class _LazyService:
 
 def _default_service() -> EngineeringRAGService:
     index_root = Path(
-        os.getenv("ENGINEERING_INDEX_DIR", "data/indexes/engineering")
+        os.getenv("ENGINEERING_INDEX_DIR", "data/indexes/ecommerce_demo")
     )
     return EngineeringRAGService.from_index(
         index_root,
+        target_repo=os.getenv("KNOWLEDGE_TARGET_REPO"),
         mini_nanobot_repo=os.getenv("MINI_NANOBOT_REPO"),
         manifest_path=os.getenv(
-            "ENGINEERING_MANIFEST_PATH", "data/manifests/builds/current.json"
+            "ENGINEERING_MANIFEST_PATH", "data/manifests/builds/ecommerce_demo.json"
         ),
     )
 
@@ -93,9 +94,9 @@ def create_app(
             )
 
     app = FastAPI(
-        title="Engineering Knowledge RAG",
+        title="E-commerce Engineering Knowledge RAG",
         version="1.0.0",
-        description="Read-only retrieval over internal project knowledge and official specifications.",
+        description="Read-only retrieval over a synthetic commerce engineering corpus.",
     )
 
     @app.middleware("http")

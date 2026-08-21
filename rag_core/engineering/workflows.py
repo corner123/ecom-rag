@@ -17,11 +17,12 @@ from rag_core.index.engineering_milvus_store import (
 
 from .index import EngineeringIndex, engineering_index_maintenance_lock
 from .service import EngineeringRAGService
+from .target import resolve_target_repository
 
 
-DEFAULT_CATALOG = Path("data/sources/catalog.yaml")
-DEFAULT_MANIFEST = Path("data/manifests/builds/current.json")
-DEFAULT_INDEX = Path("data/indexes/engineering")
+DEFAULT_CATALOG = Path("data/sources/ecommerce_demo.yaml")
+DEFAULT_MANIFEST = Path("data/manifests/builds/ecommerce_demo.json")
+DEFAULT_INDEX = Path("data/indexes/ecommerce_demo")
 
 
 def sync_engineering_sources(
@@ -82,6 +83,7 @@ def build_engineering_index(
 def load_engineering_service(
     index_root: str | Path | None = None,
     *,
+    target_repo: str | Path | None = None,
     mini_nanobot_repo: str | Path | None = None,
     manifest_path: str | Path | None = None,
     embedding_manager=None,
@@ -95,7 +97,10 @@ def load_engineering_service(
     root = index_root or os.getenv("ENGINEERING_INDEX_DIR", str(DEFAULT_INDEX))
     return EngineeringRAGService.from_index(
         root,
-        mini_nanobot_repo=mini_nanobot_repo or os.getenv("MINI_NANOBOT_REPO"),
+        target_repo=resolve_target_repository(
+            target_repo,
+            legacy_repo=mini_nanobot_repo,
+        ),
         manifest_path=manifest_path or os.getenv(
             "ENGINEERING_MANIFEST_PATH", str(DEFAULT_MANIFEST)
         ),

@@ -1,0 +1,1025 @@
+{
+  "schema_version": "engineering-eval/v2",
+  "generated_at": "2026-08-21T09:28:13.901343+00:00",
+  "dataset": "ecommerce_development.jsonl",
+  "question_count": 16,
+  "top_k": 5,
+  "baseline": "hybrid_live",
+  "suite": "e2e",
+  "run_metadata": {
+    "factory": "rag_core.evaluation.engineering_adapter:create_default_e2e_predictors",
+    "dataset_files": [
+      {
+        "name": "ecommerce_development.jsonl",
+        "sha256": "6eb9f66541ea56207a49e402de786d3a3365695cb64a39e9dff95dfd354c87c7"
+      }
+    ],
+    "dataset_roles": [
+      "development_regression"
+    ],
+    "label_versions": [
+      "engineering-eval/v2"
+    ],
+    "evaluation_snapshot": {
+      "datasets": [
+        {
+          "dataset_roles": [
+            "development_regression"
+          ],
+          "label_versions": [
+            "engineering-eval/v2"
+          ],
+          "name": "ecommerce_development.jsonl",
+          "question_count": 16,
+          "sha256": "6eb9f66541ea56207a49e402de786d3a3365695cb64a39e9dff95dfd354c87c7"
+        },
+        {
+          "dataset_roles": [
+            "holdout"
+          ],
+          "label_versions": [
+            "engineering-eval/v2"
+          ],
+          "name": "ecommerce_holdout_v1.jsonl",
+          "question_count": 10,
+          "sha256": "cc419e3715ddfcf57f77a0121367fe87f27699bef759424dab06310373c4a611"
+        }
+      ],
+      "manifest_build_id": "build_37262492b5395c01c7a1",
+      "schema_version": "engineering-eval-snapshot/v1",
+      "target_repository": {
+        "commit_sha": "558636f4d607d5a0c594a00d370ced8d37f78a05",
+        "content_hash": "bdc8e94896bcdbbcbd5857dff64beb379562b886bca72fb821a418c43efdad8f",
+        "dirty": false,
+        "source_id": "ecommerce_demo"
+      },
+      "snapshot_path": "ecommerce_evaluation_snapshot.json",
+      "snapshot_sha256": "a96d4437109f11dbda31994bc96cbe8a34a013d9199080cac8719890d44d4f46"
+    },
+    "latency_scope": "warm_requests"
+  },
+  "strategy_metadata": {
+    "hybrid_live": {
+      "build_id": "build_37262492b5395c01c7a1",
+      "embedding_model": "BAAI/bge-small-zh-v1.5",
+      "document_count": 39,
+      "partitions": [
+        {
+          "corpus": "internal",
+          "authority": "code",
+          "directory": "internal__code",
+          "document_count": 28,
+          "weight": 1.35,
+          "file_sha256": {
+            "documents.json": "23bae0f1eea4fae752505f53a230209636058e6f1858c39b13bfa63d3a9a39fa",
+            "index.faiss": "3d84a370c1ea57b724b872d03ca2d76c02820f12ab8c13ace0a90b4bcee37131",
+            "index_meta.json": "386733e5f316dac917f514290c2a048ded85c4a264789abe7e2a1e49cc3b3c55"
+          },
+          "milvus_collection_name": null,
+          "milvus_dimension": null,
+          "milvus_metric_type": null,
+          "milvus_owner_namespace": null
+        },
+        {
+          "corpus": "internal",
+          "authority": "design",
+          "directory": "internal__design",
+          "document_count": 6,
+          "weight": 1.0,
+          "file_sha256": {
+            "documents.json": "5618f286d4e54b06f8190efeadca0315c6ddd802ecb4e1f28e476fc1d6c32a10",
+            "index.faiss": "91c77fc5b2dccd2e71e587a2a79a8d0cc1c327f4ce127bbfab7891d27273a93b",
+            "index_meta.json": "e95e6b670cd7dcacc6967df06c2b8fe45097e40f7804e9184a63be65c24fc29d"
+          },
+          "milvus_collection_name": null,
+          "milvus_dimension": null,
+          "milvus_metric_type": null,
+          "milvus_owner_namespace": null
+        },
+        {
+          "corpus": "internal",
+          "authority": "history",
+          "directory": "internal__history",
+          "document_count": 1,
+          "weight": 0.8,
+          "file_sha256": {
+            "documents.json": "9a03079853d3d907afe6aff0cd84d93a040c89c30f097d62550576b5424cec06",
+            "index.faiss": "94f170b2daf15669ddeeed94d9a8bd5ac913e86e6cf60f6dd86c977676afcb21",
+            "index_meta.json": "643edf0c97cc7ad0958ae1f2ab4b84a1f9cf192b5469be1c67b1721d48a6d840"
+          },
+          "milvus_collection_name": null,
+          "milvus_dimension": null,
+          "milvus_metric_type": null,
+          "milvus_owner_namespace": null
+        },
+        {
+          "corpus": "internal",
+          "authority": "test",
+          "directory": "internal__test",
+          "document_count": 3,
+          "weight": 1.2,
+          "file_sha256": {
+            "documents.json": "6778643332872b12a5159c8e5f410d47590ccf855959c600bc466ab37bef8a77",
+            "index.faiss": "9edb6e219a051c60df1fbac90e45fb823e6e8bf444d689f1c5c442ec26f438c1",
+            "index_meta.json": "8d77413c2f7400c3ca3ac349de2c9b654b6dabb1dd28c35e0b99fddcc52bbc28"
+          },
+          "milvus_collection_name": null,
+          "milvus_dimension": null,
+          "milvus_metric_type": null,
+          "milvus_owner_namespace": null
+        },
+        {
+          "corpus": "official",
+          "authority": "official",
+          "directory": "official__official",
+          "document_count": 1,
+          "weight": 0.9,
+          "file_sha256": {
+            "documents.json": "eddb3d0c543d2d6344d7d0cd3bfe2626ade16a71cc74c44ecc7746306117ea6b",
+            "index.faiss": "bcbe26324f57109e75eeed97c42f9ac813db061189f0b9e1b5e7d748c266f562",
+            "index_meta.json": "643edf0c97cc7ad0958ae1f2ab4b84a1f9cf192b5469be1c67b1721d48a6d840"
+          },
+          "milvus_collection_name": null,
+          "milvus_dimension": null,
+          "milvus_metric_type": null,
+          "milvus_owner_namespace": null
+        }
+      ],
+      "retrieval_strategy": "hybrid",
+      "oracle_route": false,
+      "live_verification": true,
+      "answer_generation": true,
+      "reranker": false,
+      "candidate_budget_multiplier": 3,
+      "partition_candidate_multiplier": 3,
+      "federated_candidate_multiplier": 3,
+      "fail_closed": true
+    }
+  },
+  "strategies": {
+    "hybrid_live": {
+      "strategy": "hybrid_live",
+      "top_k": 5,
+      "metrics": {
+        "routing_accuracy": 1.0,
+        "routing_macro_f1": 1.0,
+        "file_recall_at_k": 1.0,
+        "primary_recall_at_k": 1.0,
+        "hit_rate_at_k": 1.0,
+        "primary_hit_at_k": 1.0,
+        "supporting_recall_at_k": 0.6,
+        "ndcg_at_k": 0.9362993025827968,
+        "citation_precision_at_k": 0.4,
+        "symbol_recall_at_k": 0.7142857142857143,
+        "live_primary_hit_at_k": 1.0,
+        "mrr": 0.9027777777777778,
+        "unanswerable_refusal_rate": 1.0,
+        "answerable_refusal_rate": 0.0,
+        "refusal_precision": 1.0,
+        "refusal_recall": 1.0,
+        "refusal_f1": 1.0,
+        "refusal_reason_accuracy": 1.0,
+        "strict_refusal_reason_recall": 1.0,
+        "mean_latency_ms": 404.97089373820927,
+        "p50_latency_ms": 68.84674995671958,
+        "p95_latency_ms": 937.1283999935258,
+        "p99_latency_ms": 964.4922399951611,
+        "question_count": 16,
+        "routing_eligible_questions": 16,
+        "file_eligible_questions": 12,
+        "symbol_eligible_questions": 7,
+        "unanswerable_questions": 4
+      },
+      "details": [
+        {
+          "id": "ECOM-DEV-001",
+          "category": "order_payment",
+          "answerable": true,
+          "expected_route": "implementation",
+          "predicted_route": "implementation",
+          "routing_correct": true,
+          "file_recall_at_k": 1.0,
+          "primary_recall_at_k": 1.0,
+          "hit_rate_at_k": true,
+          "primary_hit_at_k": true,
+          "supporting_recall_at_k": 1.0,
+          "ndcg_at_k": 1.0,
+          "citation_precision_at_k": 0.6666666666666666,
+          "reciprocal_rank": 1.0,
+          "symbol_recall_at_k": 1.0,
+          "expected_sources": [
+            "commerce_demo/order_service.py"
+          ],
+          "primary_sources": [
+            "commerce_demo/order_service.py"
+          ],
+          "supporting_sources": [
+            "commerce_demo/models.py"
+          ],
+          "retrieved_sources": [
+            "commerce_demo/order_service.py",
+            "commerce_demo/models.py",
+            "docs/runbooks/payment-callback.md"
+          ],
+          "matched_sources": [
+            "commerce_demo/order_service.py"
+          ],
+          "matched_supporting_sources": [
+            "commerce_demo/models.py"
+          ],
+          "expected_symbols": [
+            "OrderService.confirm_payment"
+          ],
+          "retrieved_symbols": [
+            "OrderService.confirm_payment"
+          ],
+          "matched_symbols": [
+            "OrderService.confirm_payment"
+          ],
+          "refused": false,
+          "expected_refusal_reason": null,
+          "predicted_refusal_reason": null,
+          "refusal_reason_correct": null,
+          "live_verification_attempted": true,
+          "live_revision": {
+            "commit_sha": "558636f4d607d5a0c594a00d370ced8d37f78a05",
+            "branch": "main",
+            "commit_time": "2026-08-01T09:00:00+08:00",
+            "dirty": false
+          },
+          "live_primary_hit_at_k": true,
+          "latency_ms": 856.5863999538124
+        },
+        {
+          "id": "ECOM-DEV-002",
+          "category": "order_lifecycle",
+          "answerable": true,
+          "expected_route": "design",
+          "predicted_route": "design",
+          "routing_correct": true,
+          "file_recall_at_k": 1.0,
+          "primary_recall_at_k": 1.0,
+          "hit_rate_at_k": true,
+          "primary_hit_at_k": true,
+          "supporting_recall_at_k": 0.0,
+          "ndcg_at_k": 0.8262346571285599,
+          "citation_precision_at_k": 0.2,
+          "reciprocal_rank": 1.0,
+          "symbol_recall_at_k": null,
+          "expected_sources": [
+            "docs/architecture/order-lifecycle.md"
+          ],
+          "primary_sources": [
+            "docs/architecture/order-lifecycle.md"
+          ],
+          "supporting_sources": [
+            "commerce_demo/order_service.py"
+          ],
+          "retrieved_sources": [
+            "docs/architecture/order-lifecycle.md",
+            "docs/runbooks/payment-callback.md",
+            "docs/architecture/inventory-reservation.md",
+            "pyproject.toml",
+            "commerce_demo/models.py#symbol:OrderStatus"
+          ],
+          "matched_sources": [
+            "docs/architecture/order-lifecycle.md"
+          ],
+          "matched_supporting_sources": [],
+          "expected_symbols": [],
+          "retrieved_symbols": [
+            "OrderStatus"
+          ],
+          "matched_symbols": [],
+          "refused": false,
+          "expected_refusal_reason": null,
+          "predicted_refusal_reason": null,
+          "refusal_reason_correct": null,
+          "live_verification_attempted": false,
+          "live_revision": {},
+          "live_primary_hit_at_k": null,
+          "latency_ms": 69.92419995367527
+        },
+        {
+          "id": "ECOM-DEV-003",
+          "category": "order_lifecycle",
+          "answerable": true,
+          "expected_route": "implementation",
+          "predicted_route": "implementation",
+          "routing_correct": true,
+          "file_recall_at_k": 1.0,
+          "primary_recall_at_k": 1.0,
+          "hit_rate_at_k": true,
+          "primary_hit_at_k": true,
+          "supporting_recall_at_k": null,
+          "ndcg_at_k": 1.0,
+          "citation_precision_at_k": 0.25,
+          "reciprocal_rank": 1.0,
+          "symbol_recall_at_k": 0.0,
+          "expected_sources": [
+            "commerce_demo/order_service.py"
+          ],
+          "primary_sources": [
+            "commerce_demo/order_service.py"
+          ],
+          "supporting_sources": [],
+          "retrieved_sources": [
+            "commerce_demo/order_service.py",
+            "commerce_demo/models.py",
+            "commerce_demo/models.py#symbol:OrderStatus",
+            "docs/architecture/order-lifecycle.md"
+          ],
+          "matched_sources": [
+            "commerce_demo/order_service.py"
+          ],
+          "matched_supporting_sources": [],
+          "expected_symbols": [
+            "ALLOWED_TRANSITIONS",
+            "OrderService.transition"
+          ],
+          "retrieved_symbols": [
+            "OrderStatus"
+          ],
+          "matched_symbols": [],
+          "refused": false,
+          "expected_refusal_reason": null,
+          "predicted_refusal_reason": null,
+          "refusal_reason_correct": null,
+          "live_verification_attempted": true,
+          "live_revision": {
+            "commit_sha": "558636f4d607d5a0c594a00d370ced8d37f78a05",
+            "branch": "main",
+            "commit_time": "2026-08-01T09:00:00+08:00",
+            "dirty": false
+          },
+          "live_primary_hit_at_k": true,
+          "latency_ms": 857.5297999195755
+        },
+        {
+          "id": "ECOM-DEV-004",
+          "category": "inventory",
+          "answerable": true,
+          "expected_route": "design",
+          "predicted_route": "design",
+          "routing_correct": true,
+          "file_recall_at_k": 1.0,
+          "primary_recall_at_k": 1.0,
+          "hit_rate_at_k": true,
+          "primary_hit_at_k": true,
+          "supporting_recall_at_k": 0.0,
+          "ndcg_at_k": 0.8262346571285599,
+          "citation_precision_at_k": 0.2,
+          "reciprocal_rank": 1.0,
+          "symbol_recall_at_k": null,
+          "expected_sources": [
+            "docs/architecture/inventory-reservation.md"
+          ],
+          "primary_sources": [
+            "docs/architecture/inventory-reservation.md"
+          ],
+          "supporting_sources": [
+            "commerce_demo/inventory.py"
+          ],
+          "retrieved_sources": [
+            "docs/architecture/inventory-reservation.md",
+            "docs/runbooks/payment-callback.md",
+            "docs/architecture/order-lifecycle.md",
+            "pyproject.toml",
+            "commerce_demo/inventory.py#symbol:InventoryLedger"
+          ],
+          "matched_sources": [
+            "docs/architecture/inventory-reservation.md"
+          ],
+          "matched_supporting_sources": [],
+          "expected_symbols": [],
+          "retrieved_symbols": [
+            "InventoryLedger"
+          ],
+          "matched_symbols": [],
+          "refused": false,
+          "expected_refusal_reason": null,
+          "predicted_refusal_reason": null,
+          "refusal_reason_correct": null,
+          "live_verification_attempted": false,
+          "live_revision": {},
+          "live_primary_hit_at_k": null,
+          "latency_ms": 65.34229998942465
+        },
+        {
+          "id": "ECOM-DEV-005",
+          "category": "inventory",
+          "answerable": true,
+          "expected_route": "implementation",
+          "predicted_route": "implementation",
+          "routing_correct": true,
+          "file_recall_at_k": 1.0,
+          "primary_recall_at_k": 1.0,
+          "hit_rate_at_k": true,
+          "primary_hit_at_k": true,
+          "supporting_recall_at_k": 1.0,
+          "ndcg_at_k": 1.0,
+          "citation_precision_at_k": 0.6666666666666666,
+          "reciprocal_rank": 1.0,
+          "symbol_recall_at_k": 1.0,
+          "expected_sources": [
+            "commerce_demo/inventory.py"
+          ],
+          "primary_sources": [
+            "commerce_demo/inventory.py"
+          ],
+          "supporting_sources": [
+            "tests/test_commerce.py"
+          ],
+          "retrieved_sources": [
+            "commerce_demo/inventory.py",
+            "tests/test_commerce.py",
+            "docs/architecture/inventory-reservation.md"
+          ],
+          "matched_sources": [
+            "commerce_demo/inventory.py"
+          ],
+          "matched_supporting_sources": [
+            "tests/test_commerce.py"
+          ],
+          "expected_symbols": [
+            "InventoryLedger.reserve_stock"
+          ],
+          "retrieved_symbols": [
+            "InventoryLedger.reserve_stock"
+          ],
+          "matched_symbols": [
+            "InventoryLedger.reserve_stock"
+          ],
+          "refused": false,
+          "expected_refusal_reason": null,
+          "predicted_refusal_reason": null,
+          "refusal_reason_correct": null,
+          "live_verification_attempted": true,
+          "live_revision": {
+            "commit_sha": "558636f4d607d5a0c594a00d370ced8d37f78a05",
+            "branch": "main",
+            "commit_time": "2026-08-01T09:00:00+08:00",
+            "dirty": false
+          },
+          "live_primary_hit_at_k": true,
+          "latency_ms": 925.7267999928445
+        },
+        {
+          "id": "ECOM-DEV-006",
+          "category": "inventory",
+          "answerable": true,
+          "expected_route": "implementation",
+          "predicted_route": "implementation",
+          "routing_correct": true,
+          "file_recall_at_k": 1.0,
+          "primary_recall_at_k": 1.0,
+          "hit_rate_at_k": true,
+          "primary_hit_at_k": true,
+          "supporting_recall_at_k": 1.0,
+          "ndcg_at_k": 0.944847956559586,
+          "citation_precision_at_k": 0.5,
+          "reciprocal_rank": 1.0,
+          "symbol_recall_at_k": 1.0,
+          "expected_sources": [
+            "commerce_demo/inventory.py"
+          ],
+          "primary_sources": [
+            "commerce_demo/inventory.py"
+          ],
+          "supporting_sources": [
+            "docs/architecture/inventory-reservation.md"
+          ],
+          "retrieved_sources": [
+            "commerce_demo/inventory.py",
+            "commerce_demo/inventory.py#symbol:InventoryLedger.release_reservation",
+            "commerce_demo/inventory.py#symbol:InventoryLedger",
+            "docs/architecture/inventory-reservation.md"
+          ],
+          "matched_sources": [
+            "commerce_demo/inventory.py"
+          ],
+          "matched_supporting_sources": [
+            "docs/architecture/inventory-reservation.md"
+          ],
+          "expected_symbols": [
+            "InventoryLedger.release_reservation"
+          ],
+          "retrieved_symbols": [
+            "InventoryLedger.release_reservation",
+            "InventoryLedger.release_reservation",
+            "release_reservation",
+            "InventoryLedger"
+          ],
+          "matched_symbols": [
+            "InventoryLedger.release_reservation"
+          ],
+          "refused": false,
+          "expected_refusal_reason": null,
+          "predicted_refusal_reason": null,
+          "refusal_reason_correct": null,
+          "live_verification_attempted": true,
+          "live_revision": {
+            "commit_sha": "558636f4d607d5a0c594a00d370ced8d37f78a05",
+            "branch": "main",
+            "commit_time": "2026-08-01T09:00:00+08:00",
+            "dirty": false
+          },
+          "live_primary_hit_at_k": true,
+          "latency_ms": 796.8961000442505
+        },
+        {
+          "id": "ECOM-DEV-007",
+          "category": "promotion",
+          "answerable": true,
+          "expected_route": "design",
+          "predicted_route": "design",
+          "routing_correct": true,
+          "file_recall_at_k": 1.0,
+          "primary_recall_at_k": 1.0,
+          "hit_rate_at_k": true,
+          "primary_hit_at_k": true,
+          "supporting_recall_at_k": 0.0,
+          "ndcg_at_k": 0.41311732856427996,
+          "citation_precision_at_k": 0.2,
+          "reciprocal_rank": 0.3333333333333333,
+          "symbol_recall_at_k": null,
+          "expected_sources": [
+            "docs/architecture/promotion-rules.md"
+          ],
+          "primary_sources": [
+            "docs/architecture/promotion-rules.md"
+          ],
+          "supporting_sources": [
+            "commerce_demo/promotion.py"
+          ],
+          "retrieved_sources": [
+            "docs/architecture/inventory-reservation.md",
+            "docs/architecture/order-lifecycle.md",
+            "docs/architecture/promotion-rules.md",
+            "pyproject.toml",
+            "commerce_demo/order_service.py"
+          ],
+          "matched_sources": [
+            "docs/architecture/promotion-rules.md"
+          ],
+          "matched_supporting_sources": [],
+          "expected_symbols": [],
+          "retrieved_symbols": [],
+          "matched_symbols": [],
+          "refused": false,
+          "expected_refusal_reason": null,
+          "predicted_refusal_reason": null,
+          "refusal_reason_correct": null,
+          "live_verification_attempted": false,
+          "live_revision": {},
+          "live_primary_hit_at_k": null,
+          "latency_ms": 64.97199996374547
+        },
+        {
+          "id": "ECOM-DEV-008",
+          "category": "promotion",
+          "answerable": true,
+          "expected_route": "implementation",
+          "predicted_route": "implementation",
+          "routing_correct": true,
+          "file_recall_at_k": 1.0,
+          "primary_recall_at_k": 1.0,
+          "hit_rate_at_k": true,
+          "primary_hit_at_k": true,
+          "supporting_recall_at_k": 1.0,
+          "ndcg_at_k": 1.357965285123866,
+          "citation_precision_at_k": 0.75,
+          "reciprocal_rank": 1.0,
+          "symbol_recall_at_k": 1.0,
+          "expected_sources": [
+            "commerce_demo/promotion.py"
+          ],
+          "primary_sources": [
+            "commerce_demo/promotion.py"
+          ],
+          "supporting_sources": [
+            "docs/architecture/promotion-rules.md"
+          ],
+          "retrieved_sources": [
+            "commerce_demo/promotion.py",
+            "commerce_demo/promotion.py#symbol:calculate_discount",
+            "commerce_demo/promotion.py",
+            "docs/architecture/promotion-rules.md"
+          ],
+          "matched_sources": [
+            "commerce_demo/promotion.py"
+          ],
+          "matched_supporting_sources": [
+            "docs/architecture/promotion-rules.md"
+          ],
+          "expected_symbols": [
+            "calculate_discount"
+          ],
+          "retrieved_symbols": [
+            "calculate_discount",
+            "calculate_discount"
+          ],
+          "matched_symbols": [
+            "calculate_discount"
+          ],
+          "refused": false,
+          "expected_refusal_reason": null,
+          "predicted_refusal_reason": null,
+          "refusal_reason_correct": null,
+          "live_verification_attempted": true,
+          "live_revision": {
+            "commit_sha": "558636f4d607d5a0c594a00d370ced8d37f78a05",
+            "branch": "main",
+            "commit_time": "2026-08-01T09:00:00+08:00",
+            "dirty": false
+          },
+          "live_primary_hit_at_k": true,
+          "latency_ms": 794.1137000452727
+        },
+        {
+          "id": "ECOM-DEV-009",
+          "category": "payment_vendor",
+          "answerable": true,
+          "expected_route": "official",
+          "predicted_route": "official",
+          "routing_correct": true,
+          "file_recall_at_k": 1.0,
+          "primary_recall_at_k": 1.0,
+          "hit_rate_at_k": true,
+          "primary_hit_at_k": true,
+          "supporting_recall_at_k": null,
+          "ndcg_at_k": 1.0,
+          "citation_precision_at_k": 1.0,
+          "reciprocal_rank": 1.0,
+          "symbol_recall_at_k": null,
+          "expected_sources": [
+            "local-directory:vendor"
+          ],
+          "primary_sources": [
+            "local-directory:vendor"
+          ],
+          "supporting_sources": [],
+          "retrieved_sources": [
+            "local-directory:vendor"
+          ],
+          "matched_sources": [
+            "local-directory:vendor"
+          ],
+          "matched_supporting_sources": [],
+          "expected_symbols": [],
+          "retrieved_symbols": [],
+          "matched_symbols": [],
+          "refused": false,
+          "expected_refusal_reason": null,
+          "predicted_refusal_reason": null,
+          "refusal_reason_correct": null,
+          "live_verification_attempted": false,
+          "live_revision": {},
+          "live_primary_hit_at_k": null,
+          "latency_ms": 17.666799947619438
+        },
+        {
+          "id": "ECOM-DEV-010",
+          "category": "payment_vendor",
+          "answerable": true,
+          "expected_route": "comparison",
+          "predicted_route": "comparison",
+          "routing_correct": true,
+          "file_recall_at_k": 1.0,
+          "primary_recall_at_k": 1.0,
+          "hit_rate_at_k": true,
+          "primary_hit_at_k": true,
+          "supporting_recall_at_k": 1.0,
+          "ndcg_at_k": 1.0,
+          "citation_precision_at_k": 0.6666666666666666,
+          "reciprocal_rank": 1.0,
+          "symbol_recall_at_k": 0.0,
+          "expected_sources": [
+            "commerce_demo/payment.py"
+          ],
+          "primary_sources": [
+            "commerce_demo/payment.py"
+          ],
+          "supporting_sources": [
+            "local-directory:vendor"
+          ],
+          "retrieved_sources": [
+            "commerce_demo/payment.py",
+            "local-directory:vendor",
+            "tests/test_commerce.py"
+          ],
+          "matched_sources": [
+            "commerce_demo/payment.py"
+          ],
+          "matched_supporting_sources": [
+            "local-directory:vendor"
+          ],
+          "expected_symbols": [
+            "PaymentWebhookHandler.handle"
+          ],
+          "retrieved_symbols": [
+            "PaymentWebhookHandler"
+          ],
+          "matched_symbols": [],
+          "refused": false,
+          "expected_refusal_reason": null,
+          "predicted_refusal_reason": null,
+          "refusal_reason_correct": null,
+          "live_verification_attempted": true,
+          "live_revision": {
+            "commit_sha": "558636f4d607d5a0c594a00d370ced8d37f78a05",
+            "branch": "main",
+            "commit_time": "2026-08-01T09:00:00+08:00",
+            "dirty": false
+          },
+          "live_primary_hit_at_k": true,
+          "latency_ms": 971.3331999955699
+        },
+        {
+          "id": "ECOM-DEV-011",
+          "category": "payment_security",
+          "answerable": true,
+          "expected_route": "implementation",
+          "predicted_route": "implementation",
+          "routing_correct": true,
+          "file_recall_at_k": 1.0,
+          "primary_recall_at_k": 1.0,
+          "hit_rate_at_k": true,
+          "primary_hit_at_k": true,
+          "supporting_recall_at_k": 0.0,
+          "ndcg_at_k": 1.2393519856928399,
+          "citation_precision_at_k": 0.5,
+          "reciprocal_rank": 1.0,
+          "symbol_recall_at_k": 1.0,
+          "expected_sources": [
+            "commerce_demo/payment.py"
+          ],
+          "primary_sources": [
+            "commerce_demo/payment.py"
+          ],
+          "supporting_sources": [
+            "local-directory:vendor"
+          ],
+          "retrieved_sources": [
+            "commerce_demo/payment.py",
+            "commerce_demo/payment.py#symbol:verify_signature",
+            "commerce_demo/payment.py",
+            "pyproject.toml"
+          ],
+          "matched_sources": [
+            "commerce_demo/payment.py"
+          ],
+          "matched_supporting_sources": [],
+          "expected_symbols": [
+            "verify_signature"
+          ],
+          "retrieved_symbols": [
+            "verify_signature",
+            "verify_signature"
+          ],
+          "matched_symbols": [
+            "verify_signature"
+          ],
+          "refused": false,
+          "expected_refusal_reason": null,
+          "predicted_refusal_reason": null,
+          "refusal_reason_correct": null,
+          "live_verification_attempted": true,
+          "live_revision": {
+            "commit_sha": "558636f4d607d5a0c594a00d370ced8d37f78a05",
+            "branch": "main",
+            "commit_time": "2026-08-01T09:00:00+08:00",
+            "dirty": false
+          },
+          "live_primary_hit_at_k": true,
+          "latency_ms": 800.8573000552133
+        },
+        {
+          "id": "ECOM-DEV-012",
+          "category": "payment_runbook",
+          "answerable": true,
+          "expected_route": "design",
+          "predicted_route": "design",
+          "routing_correct": true,
+          "file_recall_at_k": 1.0,
+          "primary_recall_at_k": 1.0,
+          "hit_rate_at_k": true,
+          "primary_hit_at_k": true,
+          "supporting_recall_at_k": 1.0,
+          "ndcg_at_k": 0.6278397607958708,
+          "citation_precision_at_k": 0.4,
+          "reciprocal_rank": 0.5,
+          "symbol_recall_at_k": null,
+          "expected_sources": [
+            "docs/runbooks/payment-callback.md"
+          ],
+          "primary_sources": [
+            "docs/runbooks/payment-callback.md"
+          ],
+          "supporting_sources": [
+            "commerce_demo/order_service.py"
+          ],
+          "retrieved_sources": [
+            "docs/architecture/order-lifecycle.md",
+            "docs/runbooks/payment-callback.md",
+            "docs/architecture/inventory-reservation.md",
+            "README.md",
+            "commerce_demo/order_service.py"
+          ],
+          "matched_sources": [
+            "docs/runbooks/payment-callback.md"
+          ],
+          "matched_supporting_sources": [
+            "commerce_demo/order_service.py"
+          ],
+          "expected_symbols": [],
+          "retrieved_symbols": [],
+          "matched_symbols": [],
+          "refused": false,
+          "expected_refusal_reason": null,
+          "predicted_refusal_reason": null,
+          "refusal_reason_correct": null,
+          "live_verification_attempted": false,
+          "live_revision": {},
+          "live_primary_hit_at_k": null,
+          "latency_ms": 60.96270005218685
+        },
+        {
+          "id": "ECOM-DEV-013",
+          "category": "unanswerable_boundary",
+          "answerable": false,
+          "expected_route": "design",
+          "predicted_route": "design",
+          "routing_correct": true,
+          "file_recall_at_k": null,
+          "primary_recall_at_k": null,
+          "hit_rate_at_k": null,
+          "primary_hit_at_k": null,
+          "supporting_recall_at_k": null,
+          "ndcg_at_k": null,
+          "citation_precision_at_k": 0.0,
+          "reciprocal_rank": null,
+          "symbol_recall_at_k": null,
+          "expected_sources": [],
+          "primary_sources": [],
+          "supporting_sources": [],
+          "retrieved_sources": [
+            "docs/runbooks/payment-callback.md",
+            "docs/architecture/inventory-reservation.md",
+            "docs/architecture/order-lifecycle.md",
+            "README.md",
+            "commerce_demo/order_service.py#symbol:OrderService.confirm_payment"
+          ],
+          "matched_sources": [],
+          "matched_supporting_sources": [],
+          "expected_symbols": [],
+          "retrieved_symbols": [
+            "OrderService.confirm_payment",
+            "confirm_payment"
+          ],
+          "matched_symbols": [],
+          "refused": true,
+          "expected_refusal_reason": "missing_production_telemetry",
+          "predicted_refusal_reason": "missing_production_telemetry",
+          "refusal_reason_correct": true,
+          "live_verification_attempted": false,
+          "live_revision": {},
+          "live_primary_hit_at_k": null,
+          "latency_ms": 67.76929995976388
+        },
+        {
+          "id": "ECOM-DEV-014",
+          "category": "unanswerable_boundary",
+          "answerable": false,
+          "expected_route": "design",
+          "predicted_route": "design",
+          "routing_correct": true,
+          "file_recall_at_k": null,
+          "primary_recall_at_k": null,
+          "hit_rate_at_k": null,
+          "primary_hit_at_k": null,
+          "supporting_recall_at_k": null,
+          "ndcg_at_k": null,
+          "citation_precision_at_k": 0.0,
+          "reciprocal_rank": null,
+          "symbol_recall_at_k": null,
+          "expected_sources": [],
+          "primary_sources": [],
+          "supporting_sources": [],
+          "retrieved_sources": [
+            "docs/architecture/order-lifecycle.md",
+            "README.md",
+            "docs/architecture/inventory-reservation.md",
+            "docs/runbooks/payment-callback.md",
+            "commerce_demo/order_service.py"
+          ],
+          "matched_sources": [],
+          "matched_supporting_sources": [],
+          "expected_symbols": [],
+          "retrieved_symbols": [],
+          "matched_symbols": [],
+          "refused": true,
+          "expected_refusal_reason": "missing_empirical_evidence",
+          "predicted_refusal_reason": "missing_empirical_evidence",
+          "refusal_reason_correct": true,
+          "live_verification_attempted": false,
+          "live_revision": {},
+          "live_primary_hit_at_k": null,
+          "latency_ms": 63.483100035227835
+        },
+        {
+          "id": "ECOM-DEV-015",
+          "category": "unanswerable_boundary",
+          "answerable": false,
+          "expected_route": "out_of_scope",
+          "predicted_route": "out_of_scope",
+          "routing_correct": true,
+          "file_recall_at_k": null,
+          "primary_recall_at_k": null,
+          "hit_rate_at_k": null,
+          "primary_hit_at_k": null,
+          "supporting_recall_at_k": null,
+          "ndcg_at_k": null,
+          "citation_precision_at_k": null,
+          "reciprocal_rank": null,
+          "symbol_recall_at_k": null,
+          "expected_sources": [],
+          "primary_sources": [],
+          "supporting_sources": [],
+          "retrieved_sources": [],
+          "matched_sources": [],
+          "matched_supporting_sources": [],
+          "expected_symbols": [],
+          "retrieved_symbols": [],
+          "matched_symbols": [],
+          "refused": true,
+          "expected_refusal_reason": "future_commitment_not_documented",
+          "predicted_refusal_reason": "future_commitment_not_documented",
+          "refusal_reason_correct": true,
+          "live_verification_attempted": false,
+          "live_revision": {},
+          "live_primary_hit_at_k": null,
+          "latency_ms": 0.06130000110715628
+        },
+        {
+          "id": "ECOM-DEV-016",
+          "category": "unanswerable_boundary",
+          "answerable": false,
+          "expected_route": "design",
+          "predicted_route": "design",
+          "routing_correct": true,
+          "file_recall_at_k": null,
+          "primary_recall_at_k": null,
+          "hit_rate_at_k": null,
+          "primary_hit_at_k": null,
+          "supporting_recall_at_k": null,
+          "ndcg_at_k": null,
+          "citation_precision_at_k": 0.0,
+          "reciprocal_rank": null,
+          "symbol_recall_at_k": null,
+          "expected_sources": [],
+          "primary_sources": [],
+          "supporting_sources": [],
+          "retrieved_sources": [
+            "docs/architecture/inventory-reservation.md",
+            "docs/architecture/order-lifecycle.md",
+            "README.md",
+            "docs/runbooks/payment-callback.md",
+            "commerce_demo/models.py#symbol:PaymentEvent"
+          ],
+          "matched_sources": [],
+          "matched_supporting_sources": [],
+          "expected_symbols": [],
+          "retrieved_symbols": [
+            "PaymentEvent"
+          ],
+          "matched_symbols": [],
+          "refused": true,
+          "expected_refusal_reason": "missing_independent_verification",
+          "predicted_refusal_reason": "missing_independent_verification",
+          "refusal_reason_correct": true,
+          "live_verification_attempted": false,
+          "live_revision": {},
+          "live_primary_hit_at_k": null,
+          "latency_ms": 66.30929990205914
+        }
+      ]
+    }
+  },
+  "deltas_from_baseline": {
+    "hybrid_live": {
+      "routing_accuracy": 0.0,
+      "routing_macro_f1": 0.0,
+      "primary_recall_at_k": 0.0,
+      "primary_hit_at_k": 0.0,
+      "supporting_recall_at_k": 0.0,
+      "ndcg_at_k": 0.0,
+      "citation_precision_at_k": 0.0,
+      "symbol_recall_at_k": 0.0,
+      "mrr": 0.0,
+      "refusal_f1": 0.0,
+      "answerable_refusal_rate": 0.0,
+      "mean_latency_ms": 0.0
+    }
+  }
+}

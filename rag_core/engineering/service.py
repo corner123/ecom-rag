@@ -29,6 +29,7 @@ from .support_selection import (
     SupportSelectionProfile,
     ensure_internal_support,
 )
+from .target import resolve_target_repository
 
 
 _BACKTICK_RE = re.compile(r"`([^`\r\n]{1,128})`")
@@ -83,6 +84,7 @@ class EngineeringRAGService:
         cls,
         index_root: str | Path,
         *,
+        target_repo: str | Path | None = None,
         mini_nanobot_repo: str | Path | None = None,
         manifest_path: str | Path | None = None,
         embedding_manager=None,
@@ -105,7 +107,10 @@ class EngineeringRAGService:
             milvus_settings=milvus_settings,
             milvus_client_factory=milvus_client_factory,
         )
-        repo = mini_nanobot_repo or os.getenv("MINI_NANOBOT_REPO")
+        repo = resolve_target_repository(
+            target_repo,
+            legacy_repo=mini_nanobot_repo,
+        )
         live = (
             LiveCodeRetriever(
                 repo,

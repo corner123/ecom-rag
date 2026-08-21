@@ -5,9 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="Mini-Nanobot 多源工程知识 RAG 的只读检索、回答与引用界面"
+      content="合成电商研发知识 RAG 的只读检索、回答与引用界面"
     />
-    <title>Engineering Knowledge</title>
+    <title>E-commerce Engineering Knowledge</title>
     <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/assets/app.css" />
     <script src="/assets/app.js" defer></script>
@@ -19,9 +19,9 @@
     <aside id="app-sidebar" class="app-sidebar" aria-label="主导航">
       <div class="sidebar-head">
         <a class="brand" href="#query-workspace" aria-label="返回工程知识问答工作台">
-          <span class="brand-mark" aria-hidden="true">EK</span>
+          <span class="brand-mark" aria-hidden="true">EC</span>
           <span class="brand-copy">
-            <strong>Engineering Knowledge</strong>
+            <strong>E-commerce Knowledge</strong>
             <small>Evidence-first RAG</small>
           </span>
         </a>
@@ -116,7 +116,7 @@
         <section id="query-workspace" class="workspace" aria-labelledby="workspace-title">
           <div class="workspace-intro">
             <div>
-              <p class="eyebrow">MINI-NANOBOT · MULTI-SOURCE RAG</p>
+              <p class="eyebrow">SYNTHETIC E-COMMERCE · MULTI-SOURCE RAG</p>
               <h1 id="workspace-title">先检索证据，再生成回答</h1>
             </div>
             <p>系统先召回 Top-K 相关片段，核验证据边界，再由已配置的大模型综合回答并保留引用。</p>
@@ -160,7 +160,7 @@
                   name="query"
                   rows="6"
                   maxlength="1000"
-                  placeholder="例如：LangChain 是什么？"
+                  placeholder="例如：库存预占为什么需要幂等键？"
                   required
                 ></textarea>
                 <div class="field-meta">
@@ -182,17 +182,17 @@
                   <details id="example-menu" class="compact-settings example-menu">
                     <summary>示例问题</summary>
                     <div class="examples" aria-label="示例问题">
-                      <button type="button" data-question="为什么 Mini-Nanobot 使用手写 ReAct 循环？">
-                        为什么使用手写 ReAct 循环？
+                      <button type="button" data-question="为什么结算流程采用库存预占，而不是直接最终扣减？">
+                        为什么采用库存预占？
                       </button>
-                      <button type="button" data-question="当前 QueryEngine.submit_message 在哪个文件实现？">
-                        QueryEngine 在哪里实现？
+                      <button type="button" data-question="当前 InventoryLedger.reserve_stock 如何处理重复 reservation_id？">
+                        库存预占如何保证幂等？
                       </button>
-                      <button type="button" data-question="LangChain 是什么？">
-                        LangChain 是什么？
+                      <button type="button" data-question="根据 PayGate 官方规范，回调消费者应使用哪个字段去重？">
+                        PayGate 回调如何去重？
                       </button>
-                      <button type="button" data-question="对比当前 MCPToolAdapter 与 MCP 官方 tools 规范是否一致？">
-                        当前实现是否符合 MCP 规范？
+                      <button type="button" data-question="当前 PaymentWebhookHandler 实现与 PayGate 官方规范的 event_id 去重要求是否一致？">
+                        当前实现是否符合回调规范？
                       </button>
                     </div>
                   </details>
@@ -329,7 +329,7 @@
         <article><span>实时核验</span><strong id="metric-live">—</strong><small>rg · AST · Git</small></article>
         <article><span>回答生成</span><strong id="metric-answer-provider">—</strong><small id="metric-answer-model">等待服务配置</small></article>
         <article class="status-wide"><span>向量后端</span><strong id="metric-vector-backend">—</strong><small id="metric-vector-detail">等待索引后端信息</small></article>
-        <article class="status-wide"><span>Mini-Nanobot 工作区</span><strong id="metric-branch">—</strong><small id="metric-revision">等待工作区信息</small></article>
+        <article class="status-wide"><span>目标代码仓库</span><strong id="metric-branch">—</strong><small id="metric-revision">等待工作区信息</small></article>
       </div>
     </section>
   </body>

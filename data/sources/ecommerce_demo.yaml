@@ -1,0 +1,48 @@
+schema_version: "1.0"
+
+# All material is generated from demo/ecommerce_seed and is synthetic.
+sources:
+  - id: ecommerce_demo
+    type: git_repository
+    path: "${KNOWLEDGE_TARGET_REPO}"
+    license: "synthetic-demo"
+    python_symbol_cards: true
+    git_history_limit: 20
+    include:
+      - "README.md"
+      - "pyproject.toml"
+      - "commerce_demo/*.py"
+      - "docs/**/*.md"
+      - "tests/*.py"
+    exclude:
+      - ".git/**"
+      - ".pytest_cache/**"
+      - "**/__pycache__/**"
+      - "**/*.pyc"
+      - "**/.env*"
+      - "**/*secret*"
+      - "**/*credential*"
+    metadata:
+      corpus: "internal"
+      authority: "project"
+      scenario: "synthetic-ecommerce"
+
+  - id: paygate_specification
+    type: local_directory
+    path: "${KNOWLEDGE_TARGET_REPO}/vendor"
+    version: "synthetic-v1"
+    license: "synthetic-demo"
+    include: ["*.md"]
+    metadata:
+      corpus: "official"
+      authority: "official"
+      scenario: "synthetic-ecommerce"
+      scope_aliases: ["PayGate", "支付回调"]
+      covered_topics:
+        - "webhook"
+        - "callback"
+        - "回调"
+        - "event_id"
+        - "payment.succeeded"
+        - "X-PayGate-Signature"
+        - "HMAC-SHA256"

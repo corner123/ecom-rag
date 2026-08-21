@@ -46,11 +46,16 @@ _GENERIC_ANCHORS = {
     "documentation", "current", "implementation", "design", "architecture",
 }
 _MISSING_EMPIRICAL_CLAIM = re.compile(
-    r"(?:(?:成功率|准确率|Recall@\d+|吞吐量|失败恢复时间|月均故障率|"
+    r"(?:(?:成功率|准确率|转化率|失败率|活跃订单|Recall@\d+|吞吐量|失败恢复时间|月均故障率|"
     r"P(?:50|90|95|99)|峰值内存|并发)"
     r".{0,30}(?:多少|是多少|分别|精确)|"
     r"(?:是否|能否).{0,30}(?:独立.*审计|不存在.*逃逸)|"
     r"(?:真实模型|大型仓库).{0,40}(?:成功率|吞吐量|恢复时间))",
+    re.IGNORECASE,
+)
+_MISSING_PRODUCTION_TELEMETRY = re.compile(
+    r"(?:生产环境|生产客户|真实用户|线上).{0,60}"
+    r"(?:SLA|P99|延迟|故障率|月均故障|活跃订单|库存预占失败率|客户影响)",
     re.IGNORECASE,
 )
 _MISSING_INDEPENDENT_VERIFICATION = re.compile(
@@ -94,6 +99,13 @@ class EvidenceSufficiencyGuard:
     ) -> tuple[bool, list[str], str | None]:
         evidence = list(results)
         warnings: list[str] = []
+
+        if _MISSING_PRODUCTION_TELEMETRY.search(query):
+            return (
+                False,
+                ["the curated snapshot contains no production telemetry"],
+                "missing_production_telemetry",
+            )
 
         if _MISSING_INDEPENDENT_VERIFICATION.search(query):
             return (

@@ -23,6 +23,7 @@ from .models import (
 from .service import EngineeringRAGService
 from .sufficiency import EvidenceSufficiencyGuard, SufficiencyProfile
 from .support_selection import SupportSelectionProfile
+from .target import resolve_target_repository, resolve_target_source_id
 from .workflows import (
     build_engineering_index,
     cleanup_engineering_milvus,
@@ -54,5 +55,7 @@ __all__ = [
     "build_grounded_answerer_from_env",
     "load_engineering_service",
     "query_engineering_knowledge",
+    "resolve_target_repository",
+    "resolve_target_source_id",
     "sync_engineering_sources",
 ]

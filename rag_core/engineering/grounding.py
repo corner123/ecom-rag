@@ -44,7 +44,7 @@ _MODEL_REFUSAL_RE = re.compile(
 
 _REFUSALS: Final[dict[SourceIntent, str]] = {
     SourceIntent.IMPLEMENTATION: (
-        "现有证据不足以确认 Mini-Nanobot 的当前实现：没有获得实时源码核验结果。"
+        "现有证据不足以确认目标项目的当前实现：没有获得实时源码核验结果。"
         "请提供更具体的类名、函数名或配置项后重试。"
     ),
     SourceIntent.DESIGN: "现有内部设计资料不足，无法可靠回答该设计问题。",
@@ -573,5 +573,5 @@ class GroundedAnswerer:
                 "本次仅返回检索证据，不生成 AI 总结；请查看下方检索证据。"
             )
         if retrieval.intent is SourceIntent.OFFICIAL:
-            answer += " 外部规范证据不能单独证明 Mini-Nanobot 的当前实现。"
+            answer += " 外部规范证据不能单独证明目标项目的当前实现。"
         return answer

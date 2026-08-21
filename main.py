@@ -11,8 +11,8 @@ from typing import Sequence
 from dotenv import load_dotenv
 
 
-DEFAULT_MANIFEST = "data/manifests/builds/current.json"
-DEFAULT_INDEX = "data/indexes/engineering"
+DEFAULT_MANIFEST = "data/manifests/builds/ecommerce_demo.json"
+DEFAULT_INDEX = "data/indexes/ecommerce_demo"
 
 
 def _json(value) -> None:
@@ -29,7 +29,7 @@ def _legacy_engine():
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="AI 团队多源工程知识 RAG")
+    parser = argparse.ArgumentParser(description="电商研发知识 RAG")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     query = subparsers.add_parser("query", help="使用原有 RAG 引擎查询")
@@ -47,9 +47,9 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("stats", help="查看原有 RAG 引擎状态")
 
     sync = subparsers.add_parser(
-        "sources-sync", help="只读采集 Mini-Nanobot 与白名单官方资料"
+        "sources-sync", help="只读采集目标 Git 仓库与白名单资料"
     )
-    sync.add_argument("--catalog", default="data/sources/catalog.yaml")
+    sync.add_argument("--catalog", default="data/sources/ecommerce_demo.yaml")
     sync.add_argument("--manifest", default=DEFAULT_MANIFEST)
     sync.add_argument("--chunk-size", type=int, default=1200)
     sync.add_argument("--chunk-overlap", type=int, default=120)
@@ -82,7 +82,12 @@ def build_parser() -> argparse.ArgumentParser:
     engineering_query.add_argument("--top-k", "-k", type=int, default=5)
     engineering_query.add_argument("--answer", action="store_true")
     engineering_query.add_argument("--index-dir", default=DEFAULT_INDEX)
-    engineering_query.add_argument("--mini-repo")
+    engineering_query.add_argument(
+        "--target-repo",
+        "--mini-repo",
+        dest="target_repo",
+        help="独立目标代码仓库；--mini-repo 为兼容别名",
+    )
     engineering_query.add_argument(
         "--backend",
         choices=("faiss", "milvus", "auto"),
@@ -112,8 +117,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--dataset",
         nargs="+",
         default=[
-            "data/eval/mini_nanobot_internal.jsonl",
-            "data/eval/official_engineering_specs.jsonl",
+            "data/eval/ecommerce_development.jsonl",
         ],
     )
     engineering_eval.add_argument(
@@ -124,7 +128,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--output", default="data/eval/reports/engineering_ablation"
     )
     engineering_eval.add_argument(
-        "--snapshot", default="data/eval/evaluation_snapshot.json"
+        "--snapshot", default="data/eval/ecommerce_evaluation_snapshot.json"
     )
     engineering_eval.add_argument("--top-k", type=int, default=5)
     engineering_eval.add_argument("--baseline", default=None)
@@ -140,7 +144,12 @@ def build_parser() -> argparse.ArgumentParser:
     response_eval.add_argument("--snapshot", required=True)
     response_eval.add_argument("--manifest", default=DEFAULT_MANIFEST)
     response_eval.add_argument("--index-dir", default=DEFAULT_INDEX)
-    response_eval.add_argument("--mini-repo")
+    response_eval.add_argument(
+        "--target-repo",
+        "--mini-repo",
+        dest="target_repo",
+        help="独立目标代码仓库；--mini-repo 为兼容别名",
+    )
     response_eval.add_argument("--output", required=True)
     response_eval.add_argument("--profile-name", required=True)
     response_eval.add_argument("--dense-weight", type=float, default=1.0)
@@ -306,7 +315,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         service = load_engineering_service(
             args.index_dir,
-            mini_nanobot_repo=args.mini_repo,
+            target_repo=args.target_repo,
             runtime_backend=args.backend,
         )
         outcome = (
@@ -350,11 +359,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "engineering-response-eval":
         from rag_core.evaluation.response_experiment import run_response_experiment
         from rag_core.evaluation.retrieval_profiles import RetrievalExperimentProfile
+        from rag_core.engineering.target import resolve_target_repository
 
-        mini_repo = args.mini_repo or os.getenv("MINI_NANOBOT_REPO")
-        if not args.judge_only and not mini_repo:
+        target_repo = resolve_target_repository(args.target_repo)
+        if not args.judge_only and not target_repo:
             raise SystemExit(
-                "--mini-repo or MINI_NANOBOT_REPO is required for generation"
+                "--target-repo or KNOWLEDGE_TARGET_REPO is required for generation "
+                "(legacy --mini-repo/MINI_NANOBOT_REPO also supported)"
             )
         if args.judge_only and not (args.replay or args.retry_from):
             raise SystemExit("--judge-only requires --replay or --retry-from")
@@ -374,7 +385,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             snapshot_path=args.snapshot,
             manifest_path=args.manifest,
             index_root=args.index_dir,
-            mini_nanobot_repo=mini_repo or ".",
+            mini_nanobot_repo=target_repo or ".",
             output_path=args.output,
             profile=profile,
             sufficiency_profile=args.sufficiency_profile,

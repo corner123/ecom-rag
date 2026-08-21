@@ -9,6 +9,10 @@ from typing import Iterable, Mapping
 
 from rag_core.engineering import EngineeringIndex, EngineeringRAGService
 from rag_core.engineering.index import HybridPartitionRetriever
+from rag_core.engineering.target import (
+    resolve_target_repository,
+    resolve_target_source_id,
+)
 from rag_core.ingestion import BuildManifest
 from rag_core.sources import GitRepositorySource
 from rag_core.retrieval.engineering import (
@@ -356,6 +360,7 @@ def create_e2e_predictors(
     *,
     index_root: str | Path,
     mini_nanobot_repo: str | Path,
+    target_source_id: str | None = None,
     embedding_manager=None,
 ) -> Mapping[str, EngineeringPredictor]:
     index = EngineeringIndex.load(
@@ -365,7 +370,11 @@ def create_e2e_predictors(
     )
     manifest = _assert_current_build(index)
     repo = Path(mini_nanobot_repo).expanduser().resolve()
-    _assert_live_repo_matches_manifest(repo, manifest)
+    _assert_live_repo_matches_manifest(
+        repo,
+        manifest,
+        source_id=resolve_target_source_id(target_source_id),
+    )
     live = LiveCodeRetriever(
         repo,
         corpus="internal",
@@ -411,12 +420,16 @@ def create_default_predictors() -> Mapping[str, EngineeringPredictor]:
 
 def create_default_e2e_predictors() -> Mapping[str, EngineeringPredictor]:
     index_root = os.getenv("ENGINEERING_INDEX_DIR", "data/indexes/engineering")
-    mini_repo = os.getenv("MINI_NANOBOT_REPO")
-    if not mini_repo:
-        raise ValueError("MINI_NANOBOT_REPO is required for end-to-end evaluation")
+    target_repo = resolve_target_repository()
+    if not target_repo:
+        raise ValueError(
+            "KNOWLEDGE_TARGET_REPO is required for end-to-end evaluation "
+            "(legacy MINI_NANOBOT_REPO also supported)"
+        )
     return create_e2e_predictors(
         index_root=index_root,
-        mini_nanobot_repo=mini_repo,
+        mini_nanobot_repo=target_repo,
+        target_source_id=resolve_target_source_id(),
     )
 
 

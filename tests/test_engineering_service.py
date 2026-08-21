@@ -381,7 +381,7 @@ def test_comparison_requires_both_live_and_official_evidence(tmp_path: Path):
 def test_official_answer_is_explicitly_not_implementation_proof(tmp_path: Path):
     answer = _service(tmp_path).answer("根据官方 MCP tools 规范，inputSchema 是什么？")
     assert answer.refused is False
-    assert "不能单独证明 Mini-Nanobot 的当前实现" in answer.answer
+    assert "不能单独证明目标项目的当前实现" in answer.answer
     assert {citation.evidence_role for citation in answer.citations} == {"external_normative"}
 
 

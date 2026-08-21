@@ -61,18 +61,25 @@ def main() -> int:
     parser.add_argument(
         "--output", default=str(ROOT / "data/eval/evaluation_snapshot.json")
     )
+    parser.add_argument(
+        "--source-id",
+        default=os.getenv("ENGINEERING_TARGET_SOURCE_ID", "mini_nanobot"),
+        help="manifest Git source bound to live-code evaluation",
+    )
     args = parser.parse_args()
 
     manifest = BuildManifest.read(args.manifest)
-    mini = next(
-        (record for record in manifest.sources if record.source_id == "mini_nanobot"),
+    target = next(
+        (record for record in manifest.sources if record.source_id == args.source_id),
         None,
     )
-    if mini is None or not mini.commit_sha or not mini.content_hash:
-        raise RuntimeError("manifest lacks a reproducible mini_nanobot source snapshot")
+    if target is None or not target.commit_sha or not target.content_hash:
+        raise RuntimeError(
+            f"manifest lacks a reproducible Git source snapshot: {args.source_id}"
+        )
     revision = (
-        f"manifest={manifest.build_id};commit={mini.commit_sha};"
-        f"worktree_sha256={mini.content_hash};dirty={str(mini.dirty).lower()}"
+        f"manifest={manifest.build_id};commit={target.commit_sha};"
+        f"worktree_sha256={target.content_hash};dirty={str(target.dirty).lower()}"
     )
     datasets = [
         _freeze_dataset(Path(value).resolve(), revision) for value in args.dataset
@@ -80,14 +87,16 @@ def main() -> int:
     payload = {
         "schema_version": "engineering-eval-snapshot/v1",
         "manifest_build_id": manifest.build_id,
-        "mini_nanobot": {
-            "source_id": mini.source_id,
-            "commit_sha": mini.commit_sha,
-            "dirty": mini.dirty,
-            "content_hash": mini.content_hash,
+        "target_repository": {
+            "source_id": target.source_id,
+            "commit_sha": target.commit_sha,
+            "dirty": target.dirty,
+            "content_hash": target.content_hash,
         },
         "datasets": datasets,
     }
+    if target.source_id == "mini_nanobot":
+        payload["mini_nanobot"] = dict(payload["target_repository"])
     output = Path(args.output).resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_suffix(output.suffix + ".tmp")

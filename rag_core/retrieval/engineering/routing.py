@@ -61,7 +61,7 @@ class SourceIntentRouter:
         re.IGNORECASE,
     )
     _comparison = re.compile(
-        r"(?:对比|比较|区别|差异|是否符合|一致性|"
+        r"(?:对比|比较|区别|差异|是否符合|是否一致|一致性|"
         r"\bvs\.?\b|versus|compare|comparison|difference|differ|comply|alignment)",
         re.IGNORECASE,
     )
@@ -74,7 +74,7 @@ class SourceIntentRouter:
     _official_topic = re.compile(
         r"(?:\bMCP\b|Model\s+Context\s+Protocol|LangChain|LangGraph|StateSnapshot|"
         r"JSON\s+Schema|Draft\s+2020-12|Python\s+3\.12|asyncio(?:\.run)?|"
-        r"pathlib(?:\.Path)?|sqlite3|subprocess|Docker)",
+        r"pathlib(?:\.Path)?|sqlite3|subprocess|Docker|PayGate|支付回调)",
         re.IGNORECASE,
     )
     _internal = re.compile(
@@ -89,6 +89,8 @@ class SourceIntentRouter:
     )
     _internal_topic = re.compile(
         r"(?:ReAct|QueryEngine|AgentState|ToolRegistry|StreamingToolExecutor|"
+        r"OrderService|InventoryLedger|PaymentWebhookHandler|reserve_stock|"
+        r"confirm_payment|calculate_discount|订单|库存|优惠券|支付回调|"
         r"checkpoint|snapshot|context|memory|subagent|sandbox|permission|"
         r"shell\.run|search\.rg|file\.(?:read|write|patch)|skill\.load|"
         r"agent\.(?:run|status)|手写循环|工具调用|上下文|长期记忆|检查点|"
@@ -99,6 +101,7 @@ class SourceIntentRouter:
         r"(?:(?:为什么|为何)|"
         r"设计|架构|权衡|取舍|原理|决策|核心阶段|职责|角色|"
         r"边界|限制|缺口|本质|生命周期|方案|系统层|教学型|生产级|Runtime|"
+        r"故障手册|运行手册|runbook|转化率|失败率|活跃订单|业务指标|"
         r"应称为|不能说|不等同|不只是|又缺少|威胁模型|安全模型|"
         r"成功率|准确率|Recall@\d+|吞吐量|失败恢复时间|"
         r"P(?:50|90|95|99)|峰值内存|并发|benchmark|认证|审计报告|独立安全审计|"
@@ -125,7 +128,7 @@ class SourceIntentRouter:
         re.IGNORECASE,
     )
     _design_override = re.compile(
-        r"(?:(?:为什么|为何).{0,40}(?:选择|采用|拆分|设计|使用)|"
+        r"(?:(?:为什么|为何).{0,40}(?:选择|采用|拆分|设计|使用|需要|经过)|"
         r"架构决策|权衡|取舍|是否由.{0,20}驱动|"
         r"权限集合|五级上下文|默认上下文预算|压缩阈值|"
         r"哪些状态.{0,40}哪些运行时资源|有何不同|"
