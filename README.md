@@ -82,9 +82,11 @@ python app.py
 | Dense | 0.417 | 0.278 | 0.190 | 80.59 |
 | Hybrid RRF | 0.583 | 0.361 | 0.278 | 110.09 |
 
-16 条开发题的完整 E2E：Route accuracy 1.000、Primary Hit@5 1.000、拒答 F1 1.000、可答题误拒答率 0、P95 约 937 ms。开发题很少且参与了规则修正，不能解释为泛化能力或生产 SLA；正式首次 holdout 报告单独保存，运行后不覆盖。
+16 条开发题的完整 E2E：Route accuracy 1.000、Primary Hit@5 1.000、拒答 F1 1.000、可答题误拒答率 0、P95 约 937 ms。开发题很少且参与了规则修正，不能解释为泛化能力或生产 SLA。
 
-报告见 [公开评测目录](data/eval/reports_public/README.md)。指标是来源/符号/路由/拒答层面的离线指标，不是答案正确率、业务转化率或线上稳定性证明。
+候选提交 `8a0e188` 的 10 题首次冻结 holdout：Route accuracy 1.000、Primary Hit@5 1.000、拒答 F1 0.857；3 个不可答题全部拒答，但 7 个可答题中有 1 个因 PayGate topic scope 过严被误拒答。首次报告还暴露出 nDCG 可能超过 1 的评测归一化问题，因此不引用该 nDCG 数字，raw 报告保持原样且不重跑覆盖。
+
+报告见 [公开评测目录](data/eval/reports_public/README.md)和[首次 holdout 审计说明](data/eval/reports_public/ecommerce_evaluation_notes.md)。指标是来源/符号/路由/拒答层面的离线指标，不是答案正确率、业务转化率或线上稳定性证明。
 
 ## API
 

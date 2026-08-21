@@ -11,10 +11,10 @@
 - 面向订单、库存、促销和支付研发知识查询，构建多源 RAG 原型；使用 YAML catalog 只读接入独立 Git 仓库与 synthetic vendor 规范，并保留 commit、dirty、SHA-256、解析器和引用位置等溯源信息。
 - 基于 BGE-small-zh-v1.5、FAISS、BM25 与 RRF 实现混合检索，通过确定性路由区分当前实现、设计历史、外部规范和跨来源比较；涉及代码事实时结合 `rg`、AST 与 Git 实时核验。
 - 在近邻召回之上实现 hard-anchor、topic scope 和证据充分性检查，对生产指标、业务收益、独立审计及未来承诺返回结构化拒答，避免把相似文档当作充分证据。
-- 建立纯索引消融、E2E 开发集和首次冻结 holdout：当前 16 题开发集 Route accuracy、Primary Hit@5、拒答 F1 均为 1.000；同时保留纯索引 Primary Hit@5 仅 0.583 的局限，所有指标均来自 synthetic 小样本离线评测。
+- 建立纯索引消融、E2E 开发集和首次冻结 holdout：10 题首次 holdout 的 Route accuracy、Primary Hit@5 为 1.000，拒答 F1 为 0.857，7 个可答题中 1 个因 topic scope 过严被误拒答；所有指标均来自 synthetic 小样本离线评测。
 - 使用 FastAPI 提供 `/health`、`/retrieve`、`/answer` 只读接口，保留 FAISS/Milvus 双后端契约与故障分类；Milvus 仅有离线合约测试，不声称生产部署或性能提升。
 
-首次 holdout 完成后，第四条应替换成首次报告的真实结果，并保留“10 题 synthetic 小样本、非生产 SLA”的限定。
+简历使用该结果时必须保留“10 题 synthetic 小样本、非生产 SLA”的限定；不引用当前异常的 nDCG 数字。
 
 ## STAR
 
@@ -36,7 +36,7 @@
 
 ### Result
 
-冻结 synthetic build 包含 2 个 source、37 份采集文档和 39 个索引文档/片段。开发集纯索引中 BM25/Hybrid Primary Hit@5 为 0.583，Dense 为 0.417；完整 E2E 借助路由和实时源码核验，在 16 题上 Primary Hit@5、Route accuracy、拒答 F1 均为 1.000。该结果说明实时核验能补足小型代码语料中的 raw-file 召回，但不能外推到生产或真实公司知识库。
+冻结 synthetic build 包含 2 个 source、37 份采集文档和 39 个索引文档/片段。开发集纯索引中 BM25/Hybrid Primary Hit@5 为 0.583，Dense 为 0.417；10 题首次 holdout 的 Primary Hit@5 和 Route accuracy 为 1.000、拒答 F1 为 0.857。失败题已召回代码与规范，但自然语言“签名算法”没有命中登记的 PayGate topic，系统选择失败关闭。该结果不能外推到生产或真实公司知识库。
 
 ## 八周时间线
 
