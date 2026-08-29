@@ -33,6 +33,7 @@ htmlcov/
 .DS_Store
 .ruff_cache/
 .mypy_cache/
+.worktrees/
 docs/superpowers/
 scripts/fetch_docs.sh
 data/sources/catalog.local.yaml
