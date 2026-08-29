@@ -14,6 +14,7 @@ runtime = [
     "beautifulsoup4>=4.12,<5",
     "fastapi>=0.115,<1",
     "pydantic>=2.9,<3",
+    "pydantic-settings>=2.6,<3",
     "pymilvus==2.6.17",
     "pymysql>=1.1,<2",
     "pymupdf>=1.24,<2",

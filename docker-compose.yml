@@ -1,0 +1,70 @@
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: foreign_trade_db
+      MYSQL_USER: trade_app
+      MYSQL_PASSWORD: ${MYSQL__PASSWORD:?set MYSQL__PASSWORD in .env}
+      MYSQL_ROOT_PASSWORD: ${MYSQL__ROOT_PASSWORD:?set MYSQL__ROOT_PASSWORD in .env}
+    ports: ["127.0.0.1:3306:3306"]
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u$${MYSQL_USER} -p$${MYSQL_PASSWORD}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.25
+    command: ["/usr/local/bin/etcd", "--advertise-client-urls=http://0.0.0.0:2379", "--listen-client-urls=http://0.0.0.0:2379", "--initial-advertise-peer-urls=http://0.0.0.0:2380", "--listen-peer-urls=http://0.0.0.0:2380", "--initial-cluster=default=http://0.0.0.0:2380"]
+    ports: ["127.0.0.1:2379:2379"]
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  minio:
+    image: minio/minio:RELEASE.2024-12-18T13-15-44Z
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+    ports: ["127.0.0.1:9000:9000", "127.0.0.1:9001:9001"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  milvus:
+    image: milvusdb/milvus:v2.6.22
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+    ports: ["127.0.0.1:19530:19530", "127.0.0.1:9091:9091"]
+    depends_on:
+      etcd: {condition: service_healthy}
+      minio: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://127.0.0.1:9091/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+  redis:
+    image: redis:7.4-alpine
+    ports: ["127.0.0.1:6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  api:
+    build: {context: ., dockerfile: docker/Dockerfile}
+    environment:
+      ENVIRONMENT: compose
+      MYSQL__HOST: mysql
+      MYSQL__PASSWORD: ${MYSQL__PASSWORD:?set MYSQL__PASSWORD in .env}
+      MILVUS__HOST: milvus
+      REDIS__HOST: redis
+    depends_on:
+      mysql: {condition: service_healthy}
+      milvus: {condition: service_healthy}
+      redis: {condition: service_healthy}
