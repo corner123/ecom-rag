@@ -7,17 +7,24 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _PLACEHOLDERS = {"change-me", "replace-me", "password", "secret", ""}
 
+def _is_placeholder(value: str | None) -> bool:
+    if value is None:
+        return True
+    normalized = value.strip().lower()
+    return normalized in _PLACEHOLDERS or normalized.startswith(("replace-", "change-", "example-"))
+
 class MysqlSettings(BaseModel):
     host: str = "mysql"
     port: int = Field(default=3306, ge=1, le=65535)
     database: str = "foreign_trade_db"
     user: str = "trade_app"
-    password: str = "local-development-password"
+    password: str | None = None
+    root_password: str | None = None
 
     @model_validator(mode="after")
     def reject_placeholder_password(self) -> "MysqlSettings":
-        if self.password.strip().lower() in _PLACEHOLDERS:
-            raise ValueError("mysql password must not be a placeholder")
+        if _is_placeholder(self.password) or _is_placeholder(self.root_password):
+            raise ValueError("mysql password must be provided and must not be a placeholder")
         return self
 
 class MilvusSettings(BaseModel):
@@ -43,7 +50,7 @@ class RuntimeLimits(BaseModel):
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_nested_delimiter="__", extra="ignore")
     environment: Literal["test", "development", "compose"] = "development"
-    mysql: MysqlSettings = MysqlSettings()
+    mysql: MysqlSettings = Field(default_factory=MysqlSettings)
     milvus: MilvusSettings = MilvusSettings()
     redis: RedisSettings = RedisSettings()
     models: ModelSettings = ModelSettings()

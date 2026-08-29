@@ -11,6 +11,7 @@ def test_settings_reject_placeholder_password(monkeypatch):
 
 def test_nested_environment_is_loaded(monkeypatch):
     monkeypatch.setenv("MYSQL__PASSWORD", "safe-password")
+    monkeypatch.setenv("MYSQL__ROOT_PASSWORD", "safe-root-password")
     settings = Settings.load(runtime="compose")
     assert settings.mysql.password == "safe-password"
     assert settings.environment == "compose"
@@ -24,3 +25,18 @@ def test_limits_are_positive():
 def test_limits_reject_zero_graph_steps():
     with pytest.raises(ValueError):
         RuntimeLimits(max_graph_steps=0)
+
+
+@pytest.mark.parametrize("value", ["replace-with-a-local-secret", "replace-with-a-local-root-secret"])
+def test_committed_example_passwords_are_rejected(monkeypatch, value):
+    monkeypatch.setenv("MYSQL__PASSWORD", value)
+    monkeypatch.setenv("MYSQL__ROOT_PASSWORD", "safe-root-password")
+    with pytest.raises(ValueError, match="placeholder"):
+        Settings.load(runtime="development")
+
+
+def test_missing_mysql_password_is_rejected(monkeypatch):
+    monkeypatch.delenv("MYSQL__PASSWORD", raising=False)
+    monkeypatch.delenv("MYSQL__ROOT_PASSWORD", raising=False)
+    with pytest.raises(ValueError, match="required|placeholder"):
+        Settings.load(runtime="test")

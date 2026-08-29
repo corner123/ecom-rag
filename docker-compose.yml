@@ -62,8 +62,15 @@ services:
       ENVIRONMENT: compose
       MYSQL__HOST: mysql
       MYSQL__PASSWORD: ${MYSQL__PASSWORD:?set MYSQL__PASSWORD in .env}
+      MYSQL__ROOT_PASSWORD: ${MYSQL__ROOT_PASSWORD:?set MYSQL__ROOT_PASSWORD in .env}
       MILVUS__HOST: milvus
       REDIS__HOST: redis
+    ports: ["127.0.0.1:8000:8000"]
+    healthcheck:
+      test: ["CMD", "python", "docker/healthcheck.py"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
     depends_on:
       mysql: {condition: service_healthy}
       milvus: {condition: service_healthy}
