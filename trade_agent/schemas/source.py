@@ -5,17 +5,16 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from copy import deepcopy
 from datetime import datetime
 from enum import Enum
-from typing import Any, TypeAlias
+from math import isfinite
+from typing import Any, Mapping
 from urllib.parse import urlparse
 
 from pydantic import AnyUrl, BaseModel, ConfigDict, Field, StrictBool, StrictStr, field_validator, model_validator
+from pydantic.types import JsonValue
 
-# Pydantic's JSON serializer enforces serializability at the boundary; keeping
-# this alias open avoids recursive-schema limitations while allowing structured
-# parser units and aggregation attributes.
-JsonValue: TypeAlias = Any
 _SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
 _HS = re.compile(r"^[0-9]{4,10}$")
 
@@ -71,7 +70,28 @@ def _sha(value: str, field: str) -> str:
 
 def _reserved_synthetic_url(value: AnyUrl) -> bool:
     host = (urlparse(str(value)).hostname or "").lower().rstrip(".")
-    return host == "example" or host.endswith(".example") or host == "synthetic.example" or host.endswith(".synthetic.example")
+    roots = ("example.com", "example.org", "example.net")
+    return host == "example" or host.endswith(".example") or any(host == root or host.endswith("." + root) for root in roots)
+
+
+def _validate_json_value(value: Any, path: str = "value") -> None:
+    if value is None or isinstance(value, (str, bool, int)):
+        return
+    if isinstance(value, float):
+        if not isfinite(value):
+            raise ValueError(f"{path} must not contain NaN or infinity")
+        return
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            _validate_json_value(item, f"{path}[{index}]")
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError(f"{path} object keys must be strings")
+            _validate_json_value(item, f"{path}.{key}")
+        return
+    raise ValueError(f"{path} is not JSON-serializable")
 
 
 def content_sha256(value: str | bytes) -> str:
@@ -107,20 +127,37 @@ class SourceLocator(BaseModel):
     block: int | None = Field(default=None, ge=0)
     table: StrictStr | None = None
     section: StrictStr | None = None
-    post: StrictStr | None = None
+    post_id: StrictStr | None = None
     row: int | None = Field(default=None, ge=0)
     profile: StrictStr | None = None
     sql: StrictStr | None = None
-    raw: StrictStr | None = None
+    raw: JsonValue | None = None
 
-    @field_validator("table", "section", "post", "profile", "sql", "raw")
+    @field_validator("table", "section", "post_id", "profile", "sql")
     @classmethod
     def strings_nonblank(cls, value: str | None) -> str | None:
         return None if value is None else _nonblank(value)
 
+    @model_validator(mode="after")
+    def require_concrete_locator(self) -> "SourceLocator":
+        _validate_json_value(self.raw, "raw")
+        values = (self.page, self.block, self.table, self.section, self.post_id, self.row, self.profile, self.sql, self.raw)
+        if not any(value is not None and value != "" and value != {} and value != [] for value in values):
+            raise ValueError("source locator requires at least one meaningful component")
+        return self
+
 
 class _StrictBase(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
+
+    def model_copy(self, *, update: Mapping[str, Any] | None = None, deep: bool = False) -> "_StrictBase":
+        if update is None:
+            return super().model_copy(deep=deep)
+        data = self.model_dump(mode="python")
+        if deep:
+            data = deepcopy(data)
+        data.update(update)
+        return type(self).model_validate(data)
 
 
 class SourceRecord(_StrictBase):
@@ -146,8 +183,8 @@ class SourceRecord(_StrictBase):
     @model_validator(mode="after")
     def synthetic_urls_are_reserved(self) -> "SourceRecord":
         if self.is_synthetic:
-            if not _reserved_synthetic_url(self.url):
-                raise ValueError("synthetic sources must use reserved example.com or synthetic.example hosts")
+            if any(not _reserved_synthetic_url(url) for url in (self.url, self.canonical_url) if url is not None):
+                raise ValueError("synthetic sources must use reserved .example or example.com/org/net hosts")
         return self
 
 
@@ -180,6 +217,9 @@ class DocumentRecord(_StrictBase):
             raise ValueError("content_hash does not match content")
         if self.is_synthetic and any(url is not None and not _reserved_synthetic_url(url) for url in (self.source_url, self.canonical_url)):
             raise ValueError("synthetic documents must use reserved example hosts")
+        for index, unit in enumerate(self.units):
+            _validate_json_value(unit, f"units[{index}]")
+        _validate_json_value(self.attributes, "attributes")
         return self
 
 
@@ -248,6 +288,7 @@ class ChunkMetadata(_StrictBase):
             raise ValueError("valid_from must be before or equal to valid_to")
         if self.is_synthetic and any(url is not None and not _reserved_synthetic_url(url) for url in (self.source_url, self.canonical_url)):
             raise ValueError("synthetic chunks must use reserved example hosts")
+        _validate_json_value(self.aggregation_info, "aggregation_info")
         return self
 
 

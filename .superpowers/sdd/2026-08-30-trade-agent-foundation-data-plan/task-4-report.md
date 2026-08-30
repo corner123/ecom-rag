@@ -61,3 +61,29 @@ python -m compileall -q trade_agent tests: passed
 
 `docker compose ps -a` with the same redacted process-local setup returned no
 containers. No product-code changes were needed after the initial commit.
+
+## Review fix round 1
+
+Addressed the contract review findings:
+
+- `SourceLocator.post_id` is the stable Task 6 field; locators now require a
+  meaningful concrete component and support structured JSON `raw` values.
+- Structured units, attributes, aggregation info, and locator raw values use
+  Pydantic's recursive `JsonValue` plus finite/JSON validation.
+- Synthetic URL policy checks both primary and canonical URLs on all URL-bearing
+  records, accepting normalized `.example` and `example.com`/`.org`/`.net`
+  roots/subdomains while rejecting real or invalid hosts.
+- Strict base `model_copy(update=...)` rebuilds through `model_validate`, so
+  nested hashes, content, URL, truth, date-range, locator, and JSON invariants
+  cannot be bypassed.
+- Tests omit every required `ChunkMetadata` field individually and cover all
+  direct negative probes.
+
+Verification after the fix:
+
+```
+Host Python 3.12.14: focused 13 passed; full unit 29 passed
+API image Python 3.12.14: focused 13 passed; full unit 29 passed
+compileall, diff check, secret/absolute-path scan: passed
+docker compose ps -a: no containers
+```

@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from math import inf, nan
 
 import pytest
 from pydantic import ValidationError
@@ -113,7 +114,7 @@ def test_synthetic_url_boundary_and_real_public_source():
             source_id="src_demo",
             source_type="official_website",
             file_type="html",
-            url="https://example.org/about",
+            url="https://evil.invalid/about",
             title="About",
             language="en",
             fetched_at=NOW,
@@ -152,7 +153,80 @@ def test_document_to_chunk_fixture_round_trips_and_hashes_match():
 
 
 def test_source_locator_supports_structured_and_json_serializable_variants():
-    value = SourceLocator(table="monthly_trade", row=8, profile="2026-07", post="post-1", sql="SELECT 1")
+    value = SourceLocator(table="monthly_trade", row=8, profile="2026-07", post_id="post-1", sql="SELECT 1")
     assert value.model_dump(mode="json")["table"] == "monthly_trade"
+    assert value.post_id == "post-1"
     with pytest.raises(ValidationError):
         SourceLocator(page=-1)
+    with pytest.raises(ValidationError):
+        SourceLocator()
+    with pytest.raises(ValidationError):
+        SourceLocator(raw={})
+
+
+def test_structured_json_rejects_non_json_values_and_non_finite_numbers():
+    base = {
+        "document_id": "doc_abc123", "source_id": "src_demo", "file_type": "html",
+        "source_type": "official_website", "title": "Products", "language": "en",
+        "content": "Acme exports pumps.", "content_hash": content_sha256("Acme exports pumps."),
+        "fetched_at": NOW, "is_synthetic": True,
+    }
+    with pytest.raises(ValidationError):
+        DocumentRecord(**base, units=[{"bad": object()}])
+    with pytest.raises(ValidationError):
+        DocumentRecord(**base, attributes={"bad": {1, 2}})
+    with pytest.raises(ValidationError):
+        DocumentRecord(**base, attributes={"bad": nan})
+    with pytest.raises(ValidationError):
+        ChunkMetadata(**metadata(aggregation_info={"bad": inf}))
+
+
+def test_synthetic_urls_cover_canonical_and_all_url_bearing_records():
+    with pytest.raises(ValidationError):
+        SourceRecord(
+            source_id="src_demo", source_type="official_website", file_type="html",
+            url="https://acme.synthetic.example/about", canonical_url="https://evil.invalid/about",
+            title="About", language="en", fetched_at=NOW, is_synthetic=True,
+        )
+    with pytest.raises(ValidationError):
+        DocumentRecord(
+            document_id="doc_abc123", source_id="src_demo", file_type="html",
+            source_type="official_website", title="Products", language="en",
+            content="x", content_hash=content_sha256("x"), fetched_at=NOW,
+            is_synthetic=True, canonical_url="https://evil.invalid/products",
+        )
+    with pytest.raises(ValidationError):
+        ChunkMetadata(**metadata(canonical_url="https://evil.invalid/chunk"))
+    assert SourceRecord(
+        source_id="src_demo", source_type="official_website", file_type="html",
+        url="https://WWW.EXAMPLE.COM./about", canonical_url="https://EXAMPLE.ORG/about",
+        title="About", language="en", fetched_at=NOW, is_synthetic=True,
+    )
+
+
+def test_model_copy_revalidates_updates_for_nested_contracts():
+    document = DocumentRecord(
+        document_id="doc_abc123", source_id="src_demo", file_type="html",
+        source_type="official_website", title="Products", language="en", content="x",
+        content_hash=content_sha256("x"), fetched_at=NOW, is_synthetic=True,
+    )
+    with pytest.raises(ValidationError):
+        document.model_copy(update={"content": "tampered"})
+    record = ChunkRecord(content="a chunk", metadata=ChunkMetadata(**metadata()))
+    with pytest.raises(ValidationError):
+        record.model_copy(update={"content": "tampered"})
+    with pytest.raises(ValidationError):
+        record.model_copy(update={"metadata": {**metadata(), "is_synthetic": None}})
+
+
+def test_every_chunk_metadata_required_field_is_explicit():
+    required = {
+        "chunk_id", "document_id", "file_type", "source_type", "source_weight",
+        "ingested_at", "source_locator", "content_hash", "parent_document_hash",
+        "language", "is_synthetic",
+    }
+    for field in required:
+        values = metadata()
+        values.pop(field)
+        with pytest.raises(ValidationError):
+            ChunkMetadata(**values)
