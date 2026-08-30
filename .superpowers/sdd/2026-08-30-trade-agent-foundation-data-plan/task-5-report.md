@@ -9,8 +9,8 @@
   social, regulator, and customs profile.
 - Included 12 website HTML sections plus Markdown, 18 B2B products, 16 news stories
   (four controlled syndicated mirrors), 12 JSONL social posts, two text-bearing PDFs,
-  one image-only scanned PDF, and 12 narrow deterministic monthly company/HS customs
-  profiles derived from `TradeSeedBundle` records.
+  one image-only scanned PDF, and 54 narrow deterministic monthly company/country/HS
+  customs profiles derived from `TradeSeedBundle` aggregates.
 - Manifest records use stable relative POSIX paths and include hashes, entity, fact
   type, fixed timestamps, claim IDs, source/file type, locators, and synthetic status.
 - Hardened output cleanup: broad roots and nonempty unowned directories are refused;
@@ -27,7 +27,7 @@ uv run pytest tests/unit/test_demo_corpus.py -q
 ModuleNotFoundError: No module named 'trade_agent.data'
 ```
 
-GREEN:
+Initial GREEN (historical, before review-round regressions were added):
 
 ```text
 uv run pytest tests/unit/test_demo_corpus.py -q
@@ -41,19 +41,19 @@ test_clean_requires_a_owned_marker_and_rejects_broad_roots FAILED
 Failed: DID NOT RAISE <class 'ValueError'>
 ```
 
-Safety regression GREEN is included in the focused green run above.
+Final safety regression GREEN is recorded in the final verification evidence below.
 
 ## Verification evidence
 
 - Two independently generated temporary corpora had byte-identical relative file hash
   maps; all generated manifest hashes rehashed successfully.
-- Checked-in manifest rehash: `32 records`.
+- Checked-in manifest rehash: `74 records`.
 - `pypdf` extraction from the scanned fixture was empty, proving image-only content.
-- `uv run pytest tests/unit -q`: `33 passed in 0.21s`.
+- `uv run pytest tests/unit -q`: `38 passed in 1.51s`.
 - `docker compose config --quiet`: exit 0.
 - `docker compose build api`: exit 0.
-- In-image CLI generated `/tmp/trade-intel-image-demo`; in-image focused test:
-  `3 passed in 0.57s`.
+- In-image CLI generated `/tmp/trade-intel-image-demo`; final in-image unit suite:
+  `38 passed in 2.15s`.
 - `git diff --check`: exit 0.
 - Targeted source scans found no non-example URLs, host paths, or credential-like
   assignments in the Task 5 corpus implementation/artifacts.
@@ -86,7 +86,7 @@ Additional RED/GREEN evidence:
 
 ```text
 RED symlink file regression: Failed: DID NOT RAISE <class 'ValueError'>
-GREEN focused corpus suite: 8 passed in 1.48s
+GREEN final focused corpus suite: 8 passed in 1.48s
 GREEN host units: 38 passed in 1.51s; in-image units: 38 passed in 2.15s
 ```
 

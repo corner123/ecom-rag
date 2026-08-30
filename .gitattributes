@@ -1,1 +1,4 @@
+data/eval/**/*.json text eol=lf
+data/eval/**/*.jsonl text eol=lf
+data/eval/reports_public/*.md text eol=lf
 *.pdf binary
