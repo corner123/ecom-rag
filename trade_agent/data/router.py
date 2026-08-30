@@ -6,11 +6,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from bs4 import BeautifulSoup
 from pydantic import AnyUrl, BaseModel, ConfigDict, Field, StrictBool, StrictStr, field_validator, model_validator
 from trade_agent.schemas.source import _aware, _validate_json_value
 
 from trade_agent.data.pdf import MinerUAdapter, pymupdf_extract
+from trade_agent.data.parsers import parse_html_sections, parse_markdown_sections
 from trade_agent.data.quarantine import QuarantineRecord, sanitize_diagnostic
 from trade_agent.schemas.source import DocumentRecord, FileType, SourceType, content_sha256, stable_id
 
@@ -116,27 +116,7 @@ class DocumentRouter:
             docs.append(self._record(source, post, content, self._attrs(source, item), [{"text": content, "locator": {"post_id": post, "row": row}}], post))
         return docs
     def _sections(self, source, text, html):
-        sections=[]
-        if html:
-            soup=BeautifulSoup(text, "html.parser"); current=""
-            dom_sections = soup.find_all("section")
-            for section in dom_sections:
-                heading = section.find_previous(["h1", "h2", "h3", "h4", "h5", "h6"])
-                value = section.get_text(" ", strip=True)
-                if value: sections.append(((heading.get_text(" ", strip=True) if heading else section.get("id") or source.title), value))
-            if not dom_sections:
-                for element in soup.find_all(["h1","h2","h3","h4","h5","h6","p","li"]):
-                    value=element.get_text(" ", strip=True)
-                    if element.name.startswith("h"): current=value
-                    elif value: sections.append((current or source.title, value))
-        else:
-            current=source.title; buffer=[]
-            for line in text.splitlines():
-                if line.startswith("#"):
-                    if buffer: sections.append((current, "\n".join(buffer).strip())); buffer=[]
-                    current=line.lstrip("#").strip()
-                else: buffer.append(line)
-            if buffer: sections.append((current, "\n".join(buffer).strip()))
+        sections = parse_html_sections(text, source.title) if html else parse_markdown_sections(text, source.title)
         return [self._record(source, heading, body, self._attrs(source, {}), [{"text": body, "locator": {"section": heading}}], f"{heading}:{i}") for i,(heading,body) in enumerate(sections) if body]
     def _pdf(self, source):
         extraction=self.mineru.extract(source.path) or pymupdf_extract(source.path)
