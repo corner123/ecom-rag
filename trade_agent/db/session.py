@@ -19,6 +19,6 @@ def database_url_from_environment(*, role: str) -> str:
     host = os.environ.get("MYSQL__HOST", "mysql")
     port = os.environ.get("MYSQL__PORT", "3306")
     database = os.environ.get("MYSQL__DATABASE", "foreign_trade_db")
-    user = _required(f"{prefix}_USER")
+    user = {"migration": "trade_migrator", "query": "trade_query"}[role]
     password = _required(f"{prefix}_PASSWORD")
     return f"mysql+pymysql://{quote_plus(user)}:{quote_plus(password)}@{host}:{port}/{database}?charset=utf8mb4"

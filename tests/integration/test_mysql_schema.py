@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import os
-from pathlib import Path
-
 import pytest
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import IntegrityError, OperationalError
@@ -90,3 +87,21 @@ def test_query_user_cannot_mutate_database(statement: str):
         assert connection.execute(text("SELECT COUNT(*) FROM countries")).scalar_one() >= 8
         with pytest.raises(OperationalError):
             connection.execute(text(statement))
+
+
+def test_seed_rejects_invalid_fk_and_conflicting_existing_content_atomically():
+    engine = create_engine(_migration_url())
+    migrate_database(engine)
+    bundle = generate_trade_seed()
+    with engine.connect() as connection:
+        before_countries = connection.execute(text("SELECT COUNT(*) FROM countries")).scalar_one()
+    invalid = bundle.model_copy(update={"companies": [bundle.companies[0].model_copy(update={"country_id": 999999}), *bundle.companies[1:]]})
+    with pytest.raises(IntegrityError):
+        seed_database(engine, invalid)
+    with engine.connect() as connection:
+        assert connection.execute(text("SELECT COUNT(*) FROM countries")).scalar_one() == before_countries
+
+    seed_database(engine, bundle)
+    conflicting = bundle.model_copy(update={"countries": [bundle.countries[0].model_copy(update={"country_name": "Conflict"}), *bundle.countries[1:]]})
+    with pytest.raises(IntegrityError):
+        seed_database(engine, conflicting)

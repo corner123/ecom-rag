@@ -1,6 +1,13 @@
 from decimal import Decimal
+from pathlib import Path
+import subprocess
 
-from trade_agent.db.seed import generate_trade_seed
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.exc import IntegrityError
+
+from trade_agent.db.migrate import migrate_database
+from trade_agent.db.seed import generate_trade_seed, seed_database
 
 
 def test_seed_is_deterministic_and_synthetic():
@@ -29,3 +36,10 @@ def test_seed_preserves_trade_contract_invariants():
     assert all(isinstance(record.trade_amount, Decimal) for record in bundle.trade_records)
     assert all(company.website.endswith(".example") for company in bundle.companies)
     assert all(source.source_url.split("/")[2].endswith(".example") for source in bundle.data_sources)
+
+
+def test_init_sql_escape_supports_apostrophes_and_rejects_controls():
+    script = Path("db/init/010_users.sh")
+    escaped = subprocess.run(["sh", str(script), "--escape", "O'Reilly\\safe"], check=True, capture_output=True, text=True)
+    assert escaped.stdout.strip() == "O''Reilly\\\\safe"
+    assert subprocess.run(["sh", str(script), "--escape", "bad\npassword"], capture_output=True).returncode

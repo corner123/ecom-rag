@@ -7,7 +7,8 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from pydantic import BaseModel
-from sqlalchemy import Engine, insert
+from sqlalchemy import Engine, func, insert, select
+from sqlalchemy.exc import IntegrityError
 
 from trade_agent.db.models import Company, CompanyProduct, Country, DataSource, HsCode, Product, TradeRecord
 
@@ -112,8 +113,19 @@ def seed_database(engine: Engine, bundle: TradeSeedBundle) -> SeedSummary:
     groups = [(Country, bundle.countries), (HsCode, bundle.hs_codes), (Company, bundle.companies), (Product, bundle.products), (DataSource, bundle.data_sources), (CompanyProduct, bundle.company_products), (TradeRecord, bundle.trade_records)]
     with engine.begin() as connection:
         for model, values in groups:
-            connection.execute(insert(model).prefix_with("IGNORE"), _rows(values))
-    return SeedSummary(countries=len(bundle.countries), companies=len(bundle.companies), hs_codes=len(bundle.hs_codes), products=len(bundle.products), data_sources=len(bundle.data_sources), company_products=len(bundle.company_products), trade_records=len(bundle.trade_records), months=len({record.trade_date.strftime("%Y-%m") for record in bundle.trade_records}))
+            for expected in _rows(values):
+                try:
+                    connection.execute(insert(model).values(**expected))
+                except IntegrityError:
+                    existing = connection.execute(select(model.__table__).where(model.__table__.c.id == expected["id"])).mappings().one_or_none()
+                    if existing is None or any(existing[key] != value for key, value in expected.items()):
+                        raise
+        counts = {model.__tablename__: connection.scalar(select(func.count()).select_from(model)) for model, _ in groups}
+        expected_counts = {model.__tablename__: len(values) for model, values in groups}
+        if counts != expected_counts:
+            raise RuntimeError("seed persisted unexpected row counts")
+        months = connection.scalar(select(func.count(func.distinct(func.date_format(TradeRecord.trade_date, "%Y-%m")))))
+    return SeedSummary(countries=counts["countries"], companies=counts["companies"], hs_codes=counts["hs_codes"], products=counts["products"], data_sources=counts["data_sources"], company_products=counts["company_products"], trade_records=counts["trade_records"], months=months)
 
 
 def main() -> None:

@@ -21,3 +21,9 @@ def test_mysql_healthcheck_uses_the_migration_account():
     healthcheck = compose["services"]["mysql"]["healthcheck"]["test"]
     assert "MYSQL_MIGRATION_USER" in healthcheck[-1]
     assert "MYSQL_MIGRATION_PASSWORD" in healthcheck[-1]
+
+
+def test_mysql_base_image_contract_is_explicit():
+    compose = yaml.safe_load(Path("docker-compose.yml").read_text())
+    assert compose["services"]["mysql"]["build"]["args"]["MYSQL_BASE_IMAGE"] == "mysql:8.4"
+    assert "ARG MYSQL_BASE_IMAGE" in Path("docker/mysql.Dockerfile").read_text()
