@@ -28,6 +28,7 @@ class MinerUAdapter:
                 argv = [*self.command, "-p", str(path), "-o", str(out), "-m", "auto"]
                 result = self.runner(argv, shell=False, timeout=self.timeout, capture_output=True, text=True)
                 if getattr(result, "returncode", 1) != 0:
+                    self.last_status = "nonzero_exit"
                     return None
                 for candidate in sorted(out.rglob("*_content_list_v2.json")):
                     units = self._content_list(candidate)
@@ -58,6 +59,7 @@ class MinerUAdapter:
         except OSError:
             self.last_status = "execution_error"
             return None
+        self.last_status = "no_usable_output"
         return None
 
     @staticmethod

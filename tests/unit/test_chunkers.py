@@ -46,3 +46,19 @@ def test_pdf_tables_are_independent_and_keep_page_locator():
     assert len(chunks) == 2
     assert chunks[1].metadata.source_locator.table == "table-1"
     assert all(c.metadata.source_locator.page == 1 for c in chunks)
+
+
+def test_counter_units_include_injected_heading_and_overlap_exactly():
+    from trade_agent.data.chunkers import ChunkRouter
+    value = doc(SourceType.INDUSTRY_NEWS, "One short sentence. Two short sentence. Three short sentence.")
+    chunks = ChunkRouter(max_tokens=28, overlap_tokens=5, token_counter=len).chunk(value)
+    assert len(chunks) > 1
+    assert all(len(chunk.content) <= 28 for chunk in chunks)
+    assert all(chunk.content.startswith("Factory expansion\n") for chunk in chunks)
+
+
+def test_fallback_counter_never_exceeds_budget_after_prefix():
+    from trade_agent.data.chunkers import ChunkRouter
+    chunks = ChunkRouter(max_tokens=12, overlap_tokens=3).chunk(doc(SourceType.OFFICIAL_WEBSITE, "Alpha beta gamma delta epsilon zeta eta theta iota kappa lambda."))
+    assert len(chunks) > 1
+    assert all(ChunkRouter(max_tokens=12, overlap_tokens=3).by[SourceType.OFFICIAL_WEBSITE].counter(c.content) <= 12 for c in chunks)

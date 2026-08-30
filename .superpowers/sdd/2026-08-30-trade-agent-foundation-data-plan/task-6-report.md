@@ -33,6 +33,24 @@ probe regression.
 - Full host unit suite: `48 passed`.
 - `git diff --check`: exit 0.
 
+## Review round 1 hardening
+
+- Input byte limits are checked from `stat()` before any `read_bytes`; strict source
+  timestamps/ranges and JSON-safe manifest attributes are validated at the boundary.
+- Chunk splitting now uses the same injected counter for every boundary, overlap, and
+  heading-inclusive maximum. It preserves original text slices rather than re-tokenizing
+  into synthetic whitespace, and applies budgets to B2B/social/profile sources too.
+- HTML section containers no longer produce duplicate child paragraph records; PDF sources
+  select layout chunking irrespective of business source type. MinerU now records nonzero
+  exit and no-usable-output status explicitly.
+
+Review RED/GREEN:
+
+```text
+RED: injected len counter emitted one over-budget chunk; fallback chunks exceeded max.
+GREEN: tests/unit/test_chunkers.py -> 5 passed; focused Task 6 suite -> 12 passed.
+```
+
 ## Residual capability risk
 
 MinerU is optional and was not installed on this machine.  The adapter is tested with an

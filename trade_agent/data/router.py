@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from bs4 import BeautifulSoup
-from pydantic import AnyUrl, BaseModel, ConfigDict, Field, StrictBool, StrictStr, field_validator
+from pydantic import AnyUrl, BaseModel, ConfigDict, Field, StrictBool, StrictStr, field_validator, model_validator
+from trade_agent.schemas.source import _aware, _validate_json_value
 
 from trade_agent.data.pdf import MinerUAdapter, pymupdf_extract
 from trade_agent.data.quarantine import QuarantineRecord, sanitize_diagnostic
@@ -39,6 +40,17 @@ class SourceInput(BaseModel):
     def nonblank(cls, value):
         if not value.strip(): raise ValueError("must not be blank")
         return value
+    _times = field_validator("fetched_at", "publish_time", "valid_from", "valid_to")(_aware)
+    @field_validator("license_scope")
+    @classmethod
+    def nonblank_optional(cls, value):
+        if value is not None and not value.strip(): raise ValueError("must not be blank")
+        return value
+    @model_validator(mode="after")
+    def ranges_and_attrs(self):
+        if self.valid_from and self.valid_to and self.valid_from > self.valid_to: raise ValueError("valid_from must not follow valid_to")
+        _validate_json_value(self.manifest_attributes, "manifest_attributes")
+        return self
 
 
 class DocumentRouter:
@@ -53,9 +65,10 @@ class DocumentRouter:
     def load(self, source: SourceInput) -> list[DocumentRecord]:
         try:
             size = source.path.stat().st_size
-            raw = source.path.read_bytes()
         except OSError as exc: return self._quarantine("SOURCE_UNREADABLE", source, "router", exc)
         if size > self.max_bytes: return self._quarantine("INPUT_TOO_LARGE", source, "router", size)
+        try: raw = source.path.read_bytes()
+        except OSError as exc: return self._quarantine("SOURCE_UNREADABLE", source, "router", exc)
         if source.path.suffix.lower() not in _EXTENSIONS[source.file_type]: return self._quarantine("FILE_TYPE_MISMATCH", source, "router", "extension conflicts with declared file type")
         if source.file_type is FileType.PDF and not raw.startswith(b"%PDF"): return self._quarantine("FILE_TYPE_MISMATCH", source, "pdf", "PDF signature missing")
         if source.file_type is not FileType.PDF and raw.startswith(b"%PDF"): return self._quarantine("FILE_TYPE_MISMATCH", source, "router", "PDF signature conflicts with declared file type")
@@ -75,7 +88,7 @@ class DocumentRouter:
         return docs
 
     def _attrs(self, source: SourceInput, item: dict[str, Any]) -> dict[str, Any]:
-        attrs = {**source.manifest_attributes, **item}
+        attrs = {**source.manifest_attributes, "publish_time": source.publish_time.isoformat() if source.publish_time else None, "valid_from": source.valid_from.isoformat() if source.valid_from else None, "valid_to": source.valid_to.isoformat() if source.valid_to else None, "license_scope": source.license_scope, **{k:v for k,v in item.items() if v is not None and v != ""}}
         attrs.setdefault("source_weight", 0.5); attrs.setdefault("source_weight_version", "task6-v1-provisional")
         return attrs
     def _record(self, source, title, content, attributes, units, identity):
@@ -106,14 +119,16 @@ class DocumentRouter:
         sections=[]
         if html:
             soup=BeautifulSoup(text, "html.parser"); current=""
-            for section in soup.find_all("section"):
+            dom_sections = soup.find_all("section")
+            for section in dom_sections:
                 heading = section.find_previous(["h1", "h2", "h3", "h4", "h5", "h6"])
                 value = section.get_text(" ", strip=True)
                 if value: sections.append(((heading.get_text(" ", strip=True) if heading else section.get("id") or source.title), value))
-            for element in soup.find_all(["h1","h2","h3","h4","h5","h6","p","li"]):
-                value=element.get_text(" ", strip=True)
-                if element.name.startswith("h"): current=value
-                elif value: sections.append((current or source.title, value))
+            if not dom_sections:
+                for element in soup.find_all(["h1","h2","h3","h4","h5","h6","p","li"]):
+                    value=element.get_text(" ", strip=True)
+                    if element.name.startswith("h"): current=value
+                    elif value: sections.append((current or source.title, value))
         else:
             current=source.title; buffer=[]
             for line in text.splitlines():
