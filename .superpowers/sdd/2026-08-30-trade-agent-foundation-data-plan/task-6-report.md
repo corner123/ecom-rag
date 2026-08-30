@@ -51,6 +51,20 @@ RED: injected len counter emitted one over-budget chunk; fallback chunks exceede
 GREEN: tests/unit/test_chunkers.py -> 5 passed; focused Task 6 suite -> 12 passed.
 ```
 
+## Review round 2 hardening
+
+- `parsers.py` now owns typed HTML/Markdown/JSON/JSONL parsing failures. JSONL stops
+  before constructing more than the configured document limit and malformed/wrong-shape
+  source payloads receive typed quarantine codes.
+- Source timestamps and provenance remain validated at the edge and are serialized safely
+  into document attributes for later strict chunk metadata validation.
+- Quarantine diagnostics redact token/password/secret/API-key assignment values, URL
+  credentials, and sensitive query values.
+
+Round-2 exploit evidence: `uv run pytest tests/unit/test_data_router.py
+tests/unit/test_chunkers.py tests/integration/test_pdf_pipeline.py -q` returned
+`13 passed`; `uv run pytest tests/unit -q` returned `51 passed`.
+
 ## Residual capability risk
 
 MinerU is optional and was not installed on this machine.  The adapter is tested with an

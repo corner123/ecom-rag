@@ -83,3 +83,12 @@ def test_manifest_probe_is_deterministic_and_never_routes_ledger():
     assert first == second
     assert first["documents"] == 117
     assert first["quarantines"] == [{"error_code": "SCANNED_PDF_OCR_UNAVAILABLE", "path": "pdf/scanned-regulator-notice.pdf"}]
+
+
+def test_quarantine_diagnostics_redact_credentials_and_jsonl_limit(tmp_path):
+    from trade_agent.data.quarantine import sanitize_diagnostic
+    from trade_agent.data.router import DocumentRouter
+    assert "secret-value" not in sanitize_diagnostic("token=secret-value https://u:p@example.test/?key=value")
+    path = tmp_path / "posts.jsonl"; path.write_text('{"post_id":"a","text":"x"}\n{"post_id":"b","text":"x"}\n{"post_id":"c","text":"x"}\n')
+    inp = source("social/posts.jsonl", FileType.JSONL, SourceType.SOCIAL).model_copy(update={"path": path})
+    assert DocumentRouter(max_documents=2).load(inp) == []

@@ -10,7 +10,7 @@ from pydantic import AnyUrl, BaseModel, ConfigDict, Field, StrictBool, StrictStr
 from trade_agent.schemas.source import _aware, _validate_json_value
 
 from trade_agent.data.pdf import MinerUAdapter, pymupdf_extract
-from trade_agent.data.parsers import parse_html_sections, parse_markdown_sections
+from trade_agent.data.parsers import ParseFailure, json_value, jsonl_values, parse_html_sections, parse_markdown_sections
 from trade_agent.data.quarantine import QuarantineRecord, sanitize_diagnostic
 from trade_agent.schemas.source import DocumentRecord, FileType, SourceType, content_sha256, stable_id
 
@@ -82,6 +82,7 @@ class DocumentRouter:
             elif source.file_type is FileType.JSONL: docs = self._jsonl(source, raw.decode("utf-8"))
             else: docs = self._json(source, raw.decode("utf-8"))
         except UnicodeDecodeError as exc: return self._quarantine("TEXT_DECODE_FAILED", source, "parser", exc)
+        except ParseFailure as exc: return self._quarantine(exc.code, source, exc.parser, exc.diagnostic)
         except json.JSONDecodeError as exc: return self._quarantine("MALFORMED_JSON", source, "json", exc)
         except Exception as exc: return self._quarantine("PARSE_FAILED", source, "parser", exc)
         if len(docs) > self.max_documents: return self._quarantine("DOCUMENT_COUNT_LIMIT", source, "parser", len(docs))
@@ -94,26 +95,33 @@ class DocumentRouter:
     def _record(self, source, title, content, attributes, units, identity):
         return DocumentRecord(document_id=stable_id("doc", source.source_id, identity), source_id=source.source_id, file_type=source.file_type, source_type=source.source_type, title=title, language=source.language, content=content, content_hash=content_sha256(content), fetched_at=source.fetched_at, is_synthetic=source.is_synthetic, attributes=attributes, units=units, source_url=attributes.get("url", source.source_url), canonical_url=attributes.get("canonical_url", source.canonical_url))
     def _json(self, source, text):
-        payload = json.loads(text)
+        payload = json_value(text)
+        if not isinstance(payload, dict): raise ParseFailure("INVALID_DOCUMENT_SHAPE", "json", "top-level payload must be object")
         if source.file_type is FileType.GENERATED_PROFILE:
             content = json.dumps(payload, sort_keys=True, separators=(",", ":"))
             attrs = self._attrs(source, payload); attrs["aggregation_info"] = {k: payload[k] for k in ("aggregation_grain", "aggregation_window", "calendar_month", "source_record_count", "raw_record_summary") if k in payload}
-            return [self._record(source, payload.get("company", source.title), content, attrs, [{"text": content, "locator": {"profile": "monthly_company_hs"}}], payload.get("calendar_month", source.path.name))]
+            required={"company","company_id","country_code","hs_code","calendar_month","aggregation_grain"}
+            if not required <= payload.keys(): raise ParseFailure("INVALID_DOCUMENT_SHAPE", "generated_profile", "required profile fields missing")
+            loc={"profile":"monthly_company_hs","raw":{k:payload.get(k) for k in ("company_id","country_code","hs_code","calendar_month","aggregation_grain","source_record_count")}}
+            return [self._record(source, payload.get("company", source.title), content, attrs, [{"text": content, "locator": loc}], payload.get("calendar_month", source.path.name))]
         values = payload.get("products") if source.source_type is SourceType.B2B else payload.get("stories")
-        if not isinstance(values, list): raise ValueError("expected products or stories list")
+        if not isinstance(values, list): raise ParseFailure("INVALID_DOCUMENT_SHAPE", "json", "expected source-specific list")
         docs=[]
         for row, item in enumerate(values, 1):
+            if row > self.max_documents: raise ParseFailure("DOCUMENT_COUNT_LIMIT", "json", "document limit reached")
+            if not isinstance(item,dict): raise ParseFailure("INVALID_DOCUMENT_SHAPE", "json", "items must be objects")
             title = item.get("product_name") or item.get("headline")
             content = item.get("description") or item.get("body") or json.dumps(item, sort_keys=True)
-            locator = {"row": row, "raw": {"item_id": item.get("product_id") or item.get("id")}}
+            if not title or not content: raise ParseFailure("INVALID_DOCUMENT_SHAPE", "json", "item title/content missing")
+            locator = {"row": row, "raw": {"item_id": item.get("product_id") or item.get("id"), "claim_id":item.get("reference_claim_id"),"canonical_story_id":item.get("canonical_story_id"),"dedupe_cluster_id":item.get("dedupe_cluster_id")}}
             docs.append(self._record(source, title, content, self._attrs(source, item), [{"text": content, "locator": locator}], str(item.get("product_id") or item.get("id") or row)))
         return docs
     def _jsonl(self, source, text):
         docs=[]
-        for row, line in enumerate(text.splitlines(), 1):
-            if not line.strip(): continue
-            item=json.loads(line); content=item["text"]; post=item["post_id"]
-            docs.append(self._record(source, post, content, self._attrs(source, item), [{"text": content, "locator": {"post_id": post, "row": row}}], post))
+        for row, item in jsonl_values(text, self.max_documents):
+            if not {"text","post_id"} <= item.keys(): raise ParseFailure("INVALID_DOCUMENT_SHAPE", "social", "post ID/text missing")
+            content=item["text"]; post=item["post_id"]
+            docs.append(self._record(source, post, content, self._attrs(source, item), [{"text": content, "locator": {"post_id": post, "row": row, "raw":{"claim_id":item.get("reference_claim_id")}}}], post))
         return docs
     def _sections(self, source, text, html):
         sections = parse_html_sections(text, source.title) if html else parse_markdown_sections(text, source.title)
