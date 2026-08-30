@@ -7,9 +7,9 @@ services:
       args: {MYSQL_BASE_IMAGE: mysql:8.4}
     environment:
       MYSQL_DATABASE: foreign_trade_db
-      MYSQL_ROOT_PASSWORD: ${MYSQL__ROOT_PASSWORD:?set MYSQL__ROOT_PASSWORD in .env}
-      MYSQL_MIGRATION_PASSWORD: ${MYSQL__MIGRATION_PASSWORD:?set MYSQL__MIGRATION_PASSWORD in .env}
-      MYSQL_QUERY_PASSWORD: ${MYSQL__QUERY_PASSWORD:?set MYSQL__QUERY_PASSWORD in .env}
+      MYSQL_ROOT_PASSWORD: ${MYSQL__ROOT_PASSWORD:-synthetic-demo-root-only}
+      MYSQL_MIGRATION_PASSWORD: ${MYSQL__MIGRATION_PASSWORD:-synthetic-demo-migration-only}
+      MYSQL_QUERY_PASSWORD: ${MYSQL__QUERY_PASSWORD:-synthetic-demo-query-only}
     ports: ["127.0.0.1:3306:3306"]
     healthcheck:
       test: ["CMD-SHELL", "mysql -h 127.0.0.1 -utrade_migrator -p$${MYSQL_MIGRATION_PASSWORD} -e 'SELECT 1'"]
@@ -30,7 +30,7 @@ services:
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
       MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-synthetic-demo-minio-only}
     ports: ["127.0.0.1:9000:9000", "127.0.0.1:9001:9001"]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
@@ -44,7 +44,7 @@ services:
       ETCD_ENDPOINTS: etcd:2379
       MINIO_ADDRESS: minio:9000
       MINIO_ACCESS_KEY_ID: minioadmin
-      MINIO_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+      MINIO_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-synthetic-demo-minio-only}
       MQ_TYPE: woodpecker
     security_opt: ["seccomp:unconfined"]
     ports: ["127.0.0.1:19530:19530", "127.0.0.1:9091:9091"]
@@ -70,7 +70,7 @@ services:
     environment:
       ENVIRONMENT: compose
       MYSQL__HOST: mysql
-      MYSQL__QUERY_PASSWORD: ${MYSQL__QUERY_PASSWORD:?set MYSQL__QUERY_PASSWORD in .env}
+      MYSQL__QUERY_PASSWORD: ${MYSQL__QUERY_PASSWORD:-synthetic-demo-query-only}
       MILVUS__HOST: milvus
       REDIS__HOST: redis
     ports: ["127.0.0.1:8000:8000"]

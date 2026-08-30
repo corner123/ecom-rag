@@ -1,0 +1,28 @@
+catalog_version: 1
+synthetic_notice: "SYNTHETIC DEMONSTRATION ONLY — all entities, facts, and sources are fictional."
+root: demo/trade_intel_seed
+sources:
+  - source_type: official_website
+    file_types: [html, markdown]
+    path: website
+    url_pattern: "https://company-*.example"
+  - source_type: b2b
+    file_types: [json]
+    path: b2b/products.json
+    url_pattern: "https://marketplace.example/*"
+  - source_type: industry_news
+    file_types: [json, html, pdf]
+    path: news
+    url_pattern: "https://newsroom.example/*"
+  - source_type: social
+    file_types: [jsonl]
+    path: social/posts.jsonl
+    url_pattern: "https://social.example/*"
+  - source_type: regulator
+    file_types: [pdf]
+    path: pdf
+    url_pattern: "https://standards.example/*"
+  - source_type: customs_profile
+    file_types: [generated_profile]
+    path: customs_profiles
+    url_pattern: "https://customs.synthetic.example/*"
