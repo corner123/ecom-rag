@@ -1,14 +1,16 @@
 services:
   mysql:
-    image: mysql:8.4
+    build: {context: ., dockerfile: docker/mysql.Dockerfile}
     environment:
       MYSQL_DATABASE: foreign_trade_db
-      MYSQL_USER: trade_app
-      MYSQL_PASSWORD: ${MYSQL__PASSWORD:?set MYSQL__PASSWORD in .env}
       MYSQL_ROOT_PASSWORD: ${MYSQL__ROOT_PASSWORD:?set MYSQL__ROOT_PASSWORD in .env}
+      MYSQL_MIGRATION_USER: ${MYSQL__MIGRATION_USER:?set MYSQL__MIGRATION_USER in .env}
+      MYSQL_MIGRATION_PASSWORD: ${MYSQL__MIGRATION_PASSWORD:?set MYSQL__MIGRATION_PASSWORD in .env}
+      MYSQL_QUERY_USER: ${MYSQL__QUERY_USER:?set MYSQL__QUERY_USER in .env}
+      MYSQL_QUERY_PASSWORD: ${MYSQL__QUERY_PASSWORD:?set MYSQL__QUERY_PASSWORD in .env}
     ports: ["127.0.0.1:3306:3306"]
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u$${MYSQL_USER} -p$${MYSQL_PASSWORD}"]
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u$${MYSQL_MIGRATION_USER} -p$${MYSQL_MIGRATION_PASSWORD}"]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -66,7 +68,10 @@ services:
     environment:
       ENVIRONMENT: compose
       MYSQL__HOST: mysql
-      MYSQL__PASSWORD: ${MYSQL__PASSWORD:?set MYSQL__PASSWORD in .env}
+      MYSQL__MIGRATION_USER: ${MYSQL__MIGRATION_USER:?set MYSQL__MIGRATION_USER in .env}
+      MYSQL__MIGRATION_PASSWORD: ${MYSQL__MIGRATION_PASSWORD:?set MYSQL__MIGRATION_PASSWORD in .env}
+      MYSQL__QUERY_USER: ${MYSQL__QUERY_USER:?set MYSQL__QUERY_USER in .env}
+      MYSQL__QUERY_PASSWORD: ${MYSQL__QUERY_PASSWORD:?set MYSQL__QUERY_PASSWORD in .env}
       MILVUS__HOST: milvus
       REDIS__HOST: redis
     ports: ["127.0.0.1:8000:8000"]
