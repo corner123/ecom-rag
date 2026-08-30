@@ -1,1 +1,1 @@
-"""Synthetic corpus generation and ingestion helpers."""
+"""Deterministic, fail-closed ingestion for the synthetic trade corpus."""
