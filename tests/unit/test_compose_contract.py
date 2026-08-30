@@ -28,3 +28,13 @@ def test_mysql_base_image_contract_is_explicit():
     compose = yaml.safe_load(Path("docker-compose.yml").read_text())
     assert compose["services"]["mysql"]["build"]["args"]["MYSQL_BASE_IMAGE"] == "mysql:8.4"
     assert "ARG MYSQL_BASE_IMAGE" in Path("docker/mysql.Dockerfile").read_text()
+
+
+def test_api_has_only_the_query_database_secret():
+    compose = yaml.safe_load(Path("docker-compose.yml").read_text())
+    api = compose["services"]["api"]["environment"]
+    mysql = compose["services"]["mysql"]["environment"]
+    assert "MYSQL__QUERY_PASSWORD" in api
+    assert "MYSQL__MIGRATION_PASSWORD" not in api
+    assert "MYSQL__ROOT_PASSWORD" not in api
+    assert {"MYSQL_ROOT_PASSWORD", "MYSQL_MIGRATION_PASSWORD", "MYSQL_QUERY_PASSWORD"} <= set(mysql)
