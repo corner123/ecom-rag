@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+from fnmatch import fnmatch
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
+import yaml
+from pypdf import PdfReader
 
 from trade_agent.data.demo_generator import generate_demo_corpus
+from trade_agent.db.seed import generate_trade_seed
 
 
 def _hashes(root: Path) -> dict[str, str]:
@@ -64,3 +69,96 @@ def test_clean_requires_a_owned_marker_and_rejects_broad_roots(tmp_path: Path) -
     generate_demo_corpus(owned)
     generate_demo_corpus(owned, clean=True)
     assert (owned / "manifests" / "corpus_manifest.json").is_file()
+
+
+def test_symlinked_generated_child_is_rejected_without_touching_outside(tmp_path: Path) -> None:
+    owned, outside = tmp_path / "owned", tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "sentinel.txt"
+    sentinel.write_text("do not modify")
+    generate_demo_corpus(owned)
+    for path in (owned / "website").iterdir():
+        path.unlink()
+    (owned / "website").rmdir()
+    (owned / "website").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="symlink"):
+        generate_demo_corpus(owned)
+    with pytest.raises(ValueError, match="symlink"):
+        generate_demo_corpus(owned, clean=True)
+    assert sentinel.read_text() == "do not modify"
+
+
+def test_symlinked_generated_file_is_rejected_without_touching_outside(tmp_path: Path) -> None:
+    owned, outside = tmp_path / "owned", tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "sentinel.txt"
+    sentinel.write_text("do not modify")
+    generate_demo_corpus(owned)
+    target = owned / "website" / "section-01.html"
+    target.unlink()
+    target.symlink_to(sentinel)
+
+    with pytest.raises(ValueError, match="symlink"):
+        generate_demo_corpus(owned)
+    with pytest.raises(ValueError, match="symlink"):
+        generate_demo_corpus(owned, clean=True)
+    assert sentinel.read_text() == "do not modify"
+
+
+def test_customs_profiles_are_monthly_company_hs_aggregates(tmp_path: Path) -> None:
+    generate_demo_corpus(tmp_path)
+    bundle = generate_trade_seed(20260830)
+    expected: dict[tuple[int, str, str], dict[str, Decimal | int]] = {}
+    for row in bundle.trade_records:
+        for company_id, role in ((row.importer_id, "import"), (row.exporter_id, "export")):
+            if company_id not in {1, 2, 3}:
+                continue
+            hs = bundle.hs_codes[row.hs_code_id - 1].hs_code
+            key = (company_id, hs, row.trade_date.strftime("%Y-%m"))
+            values = expected.setdefault(key, {"total": Decimal(), "import": Decimal(), "export": Decimal(), "rows": 0})
+            values["total"] += row.trade_amount
+            values[role] += row.trade_amount
+            values["rows"] += 1
+    files = sorted((tmp_path / "customs_profiles").glob("*.json"))
+    assert len(files) == len(expected) < len(bundle.trade_records)
+    for file in files:
+        profile = json.loads(file.read_text())
+        values = expected[(profile["company_id"], profile["hs_code"], profile["calendar_month"])]
+        assert Decimal(profile["total_amount_usd"]) == values["total"]
+        assert Decimal(profile["import_amount_usd"]) == values["import"]
+        assert Decimal(profile["export_amount_usd"]) == values["export"]
+        assert profile["source_record_count"] == values["rows"]
+        assert profile["aggregation_grain"] == "company_country_hs_calendar_month"
+
+
+def test_scanned_pdf_is_nontrivial_image_only_raster(tmp_path: Path) -> None:
+    generate_demo_corpus(tmp_path)
+    page = PdfReader(str(tmp_path / "pdf" / "scanned-regulator-notice.pdf")).pages[0]
+    assert page.extract_text().strip() == ""
+    images = list(page.images)
+    assert len(images) == 1
+    assert images[0].image.width >= 1000
+    assert images[0].image.height >= 1400
+    assert len(images[0].data) > 1_000
+
+
+def test_catalog_matches_each_manifest_record_once_and_news_syndication_is_traceable(tmp_path: Path) -> None:
+    generate_demo_corpus(tmp_path)
+    manifest = json.loads((tmp_path / "manifests" / "corpus_manifest.json").read_text())
+    catalog = yaml.safe_load(Path("data/sources/trade_intel_demo.yaml").read_text())
+    for record in manifest["records"]:
+        matches = [rule for rule in catalog["sources"] if record["file_type"] in rule["file_types"] and any(fnmatch(record["path"], pattern) for pattern in rule["paths"])]
+        assert len(matches) == 1
+        assert matches[0]["source_type"] == record["source_type"]
+    stories = json.loads((tmp_path / "news" / "stories.json").read_text())["stories"]
+    by_id = {story["id"]: story for story in stories}
+    for number in range(13, 17):
+        mirror = by_id[f"NEWS-{number:03d}"]
+        canonical = by_id[mirror["syndicated_from"]]
+        assert (mirror["headline"], mirror["body"], mirror["entity"]) == (canonical["headline"], canonical["body"], canonical["entity"])
+        assert mirror["canonical_story_id"] == canonical["id"]
+        assert mirror["dedupe_cluster_id"] == canonical["dedupe_cluster_id"]
+    news_record = next(row for row in manifest["records"] if row["path"] == "news/stories.json")
+    assert len(news_record["reference_claim_ids"]) == 16
+    assert len(news_record["locator"]["items"]) == 16

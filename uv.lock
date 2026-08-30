@@ -642,6 +642,7 @@ integration = [
 runtime = [
     { name = "beautifulsoup4" },
     { name = "fastapi" },
+    { name = "pillow" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "pymilvus" },
@@ -658,6 +659,7 @@ requires-dist = [
     { name = "beautifulsoup4", marker = "extra == 'runtime'", specifier = ">=4.12,<5" },
     { name = "fastapi", marker = "extra == 'runtime'", specifier = ">=0.115,<1" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27,<1" },
+    { name = "pillow", marker = "extra == 'runtime'", specifier = ">=12.3,<13" },
     { name = "pydantic", marker = "extra == 'runtime'", specifier = ">=2.9,<3" },
     { name = "pydantic-settings", marker = "extra == 'runtime'", specifier = ">=2.6,<3" },
     { name = "pymilvus", marker = "extra == 'runtime'", specifier = "==2.6.17" },

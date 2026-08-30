@@ -4,25 +4,29 @@ root: demo/trade_intel_seed
 sources:
   - source_type: official_website
     file_types: [html, markdown]
-    path: website
+    paths: [website/section-01.html, website/section-02.html, website/section-03.html, website/section-04.html, website/section-05.html, website/section-06.html, website/section-07.html, website/section-08.html, website/section-09.html, website/section-10.html, website/section-11.html, website/section-12.html, website/methodology.md]
     url_pattern: "https://company-*.example"
   - source_type: b2b
     file_types: [json]
-    path: b2b/products.json
+    paths: [b2b/products.json]
     url_pattern: "https://marketplace.example/*"
   - source_type: industry_news
-    file_types: [json, html, pdf]
-    path: news
+    file_types: [json, html]
+    paths: [news/stories.json, news/representative-story.html]
     url_pattern: "https://newsroom.example/*"
   - source_type: social
     file_types: [jsonl]
-    path: social/posts.jsonl
+    paths: [social/posts.jsonl]
     url_pattern: "https://social.example/*"
   - source_type: regulator
     file_types: [pdf]
-    path: pdf
+    paths: [pdf/regulator-notice.pdf, pdf/scanned-regulator-notice.pdf]
     url_pattern: "https://standards.example/*"
   - source_type: customs_profile
     file_types: [generated_profile]
-    path: customs_profiles
+    paths: [customs_profiles/*.json]
     url_pattern: "https://customs.synthetic.example/*"
+  - source_type: industry_news
+    file_types: [pdf]
+    paths: [pdf/market-bulletin.pdf]
+    url_pattern: "https://newsroom.example/*"

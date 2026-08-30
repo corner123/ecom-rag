@@ -4,14 +4,15 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import shutil
 from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from reportlab.lib.colors import HexColor
+from PIL import Image, ImageDraw, ImageFont
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen.canvas import Canvas
 
@@ -20,6 +21,7 @@ from trade_agent.db.seed import TradeSeedBundle, generate_trade_seed
 _STAMP = "2026-08-30T00:00:00+00:00"
 _MARKER = ".trade-intel-demo-owned"
 _BANNER = "SYNTHETIC DEMONSTRATION ONLY — FICTIONAL DATA; NOT FOR PRODUCTION USE."
+_SCAN_WARNING = "SYNTHETIC DEMONSTRATION ONLY - FICTIONAL DATA - NOT FOR PRODUCTION USE."
 
 
 @dataclass(frozen=True)
@@ -41,35 +43,58 @@ def _json(value: Any) -> bytes:
 
 
 def _safe_root(output: Path) -> Path:
-    root = output.resolve()
-    cwd = Path.cwd().resolve()
-    home = Path.home().resolve()
+    root = output.absolute()
+    cwd = Path.cwd().absolute()
+    home = Path.home().absolute()
     forbidden = {Path(root.anchor), cwd, home}
     if root in forbidden or root.parent == root or root == cwd.parent:
         raise ValueError("refusing broad output root")
     return root
 
 
+def _assert_no_symlinks(root: Path) -> None:
+    """Reject symlinks in the owned output tree without resolving ordinary parents."""
+    if root.is_symlink():
+        raise ValueError("refusing symlink output root")
+    if not root.exists():
+        return
+    for directory, directories, filenames in os.walk(root, followlinks=False):
+        for name in [*directories, *filenames]:
+            if (Path(directory) / name).is_symlink():
+                raise ValueError("refusing symlink inside output tree")
+
+
+def _owned_marker(root: Path) -> Path:
+    marker = root / _MARKER
+    if marker.is_symlink():
+        raise ValueError("refusing symlink ownership marker")
+    return marker
+
+
 def ensure_safe_output(output: Path, *, clean: bool = False) -> Path:
     """Prepare an owned output directory without ever deleting an arbitrary tree."""
     root = _safe_root(output)
+    _assert_no_symlinks(root)
     if root.exists() and not root.is_dir():
         raise ValueError("output must be a directory")
-    if root.exists() and any(root.iterdir()) and not (root / _MARKER).is_file():
+    if root.exists() and any(root.iterdir()) and not _owned_marker(root).is_file():
         raise ValueError("refusing to write into a nonempty directory not owned by this demo")
     if clean and root.exists():
-        marker = root / _MARKER
+        marker = _owned_marker(root)
         if not marker.is_file() or marker.read_text(encoding="utf-8") != "synthetic-trade-intel-demo-v1\n":
             raise ValueError("refusing to clean a nonempty directory not owned by this demo")
         for child in sorted(root.iterdir()):
             if child.name in {_MARKER, "README.md"}:
                 continue
+            if child.is_symlink():
+                raise ValueError("refusing symlink inside output tree")
             if child.is_dir():
                 shutil.rmtree(child)
             else:
                 child.unlink()
     root.mkdir(parents=True, exist_ok=True)
-    marker = root / _MARKER
+    _assert_no_symlinks(root)
+    marker = _owned_marker(root)
     if marker.exists() and marker.read_text(encoding="utf-8") != "synthetic-trade-intel-demo-v1\n":
         raise ValueError("output ownership marker is invalid")
     marker.write_text("synthetic-trade-intel-demo-v1\n", encoding="utf-8")
@@ -79,8 +104,13 @@ def ensure_safe_output(output: Path, *, clean: bool = False) -> Path:
 def _write(root: Path, relative: str, payload: bytes, *, source_type: str, file_type: str,
            expected_entity: str, fact_type: str, locator: dict[str, Any], claim_id: str,
            records: list[dict[str, Any]]) -> None:
-    path = root / relative
+    relative_path = Path(relative)
+    if relative_path.is_absolute() or ".." in relative_path.parts or relative_path.as_posix() != relative:
+        raise ValueError("generated path must be a safe relative POSIX path")
+    _assert_no_symlinks(root)
+    path = root / relative_path
     path.parent.mkdir(parents=True, exist_ok=True)
+    _assert_no_symlinks(root)
     path.write_bytes(payload)
     records.append({
         "path": relative, "content_hash": hashlib.sha256(payload).hexdigest(),
@@ -104,13 +134,34 @@ def _text_pdf(title: str, lines: list[str]) -> bytes:
 
 
 def _scanned_pdf() -> bytes:
-    # A tiny embedded raster image makes this a genuinely image-only PDF.
-    png = (b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
-           b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDAT\x08\xd7c\xf8\xcf\xc0\x00\x00\x03\x01\x01\x00\x18\xdd\x8d\xb1\x00\x00\x00\x00IEND\xaeB`\x82")
+    image = Image.new("RGB", (1200, 1550), "white")
+    draw = ImageDraw.Draw(image)
+    heading = ImageFont.load_default(size=42)
+    body = ImageFont.load_default(size=27)
+    table_font = ImageFont.load_default(size=22)
+    warning_font = ImageFont.load_default(size=20)
+    draw.rectangle((35, 35, 1165, 1515), outline="black", width=5)
+    draw.rectangle((55, 70, 1145, 155), fill="black")
+    draw.text((75, 102), _SCAN_WARNING, fill="white", font=warning_font)
+    draw.text((75, 205), "SYNTHETIC TRADE STANDARDS OFFICE", fill="black", font=heading)
+    draw.text((75, 270), "FICTIONAL SCANNED REGULATOR NOTICE / DEMO ONLY", fill="black", font=body)
+    draw.text((75, 345), "NOTICE TABLE", fill="black", font=heading)
+    rows = [("Rule", "Synthetic compliance window", "2026-09-01"), ("Scope", "Fictional HS sample", "010121"), ("Status", "Demo-only notice", "NOT PRODUCTION")]
+    y = 420
+    for row in [("Field", "Description", "Value"), *rows]:
+        draw.rectangle((75, y, 1125, y + 90), outline="black", width=2)
+        draw.line((350, y, 350, y + 90), fill="black", width=2)
+        draw.line((800, y, 800, y + 90), fill="black", width=2)
+        for x, value in zip((90, 365, 815), row):
+            draw.text((x, y + 32), value, fill="black", font=table_font)
+        y += 90
+    draw.text((75, 850), _SCAN_WARNING, fill="black", font=warning_font)
+    png_buffer = io.BytesIO()
+    image.save(png_buffer, format="PNG", optimize=False, compress_level=9)
     buffer = io.BytesIO()
     pdf = Canvas(buffer, pagesize=(612, 792), invariant=1, pageCompression=1)
     pdf.setTitle("Synthetic scanned regulator notice")
-    pdf.drawImage(ImageReader(io.BytesIO(png)), 36, 36, width=540, height=720, mask="auto")
+    pdf.drawImage(ImageReader(io.BytesIO(png_buffer.getvalue())), 36, 36, width=540, height=720, mask="auto")
     pdf.showPage(); pdf.save()
     return buffer.getvalue()
 
@@ -133,27 +184,34 @@ def _b2b(root: Path, bundle: TradeSeedBundle, records: list[dict[str, Any]]) -> 
     for index in range(18):
         product = bundle.products[index]
         company = bundle.companies[index]
-        products.append({"synthetic_notice": _BANNER, "product_id": product.id, "sku": product.sku, "product_name": product.product_name, "hs_code": bundle.hs_codes[product.hs_code_id - 1].hs_code, "supplier": company.company_name, "url": f"https://marketplace.example/products/{product.sku.lower()}"})
+        products.append({"synthetic_notice": _BANNER, "reference_claim_id": f"CLAIM-B2B-{index + 1:03d}", "product_id": product.id, "sku": product.sku, "product_name": product.product_name, "hs_code": bundle.hs_codes[product.hs_code_id - 1].hs_code, "supplier": company.company_name, "url": f"https://marketplace.example/products/{product.sku.lower()}"})
     payload = _json({"synthetic_notice": _BANNER, "products": products})
-    _write(root, "b2b/products.json", payload, source_type="b2b", file_type="json", expected_entity="Synthetic B2B Marketplace", fact_type="product_offering", locator={"table": "products", "rows": 18}, claim_id="CLAIM-B2B-CATALOG", records=records)
+    _write(root, "b2b/products.json", payload, source_type="b2b", file_type="json", expected_entity="Synthetic B2B Marketplace", fact_type="product_offering", locator={"table": "products", "items": [{"row": index + 1, "claim_id": product["reference_claim_id"]} for index, product in enumerate(products)]}, claim_id="CLAIM-B2B-CATALOG", records=records)
+    records[-1]["reference_claim_ids"] = [product["reference_claim_id"] for product in products]
     return len(products)
 
 
 def _news(root: Path, bundle: TradeSeedBundle, records: list[dict[str, Any]]) -> int:
-    stories = []
-    for index in range(16):
+    stories: list[dict[str, Any]] = []
+    for index in range(12):
         company = bundle.companies[index]
-        syndicated_from = None if index < 12 else f"NEWS-{index - 11:03d}"
-        stories.append({"id": f"NEWS-{index + 1:03d}", "synthetic_notice": _BANNER, "headline": f"Fictional trade signal for {company.company_name}", "body": f"{_BANNER} This fictional report describes a demo-only market signal.", "url": f"https://newsroom.example/story/{index + 1:03d}", "syndicated_from": syndicated_from, "published_at": _STAMP})
-    _write(root, "news/stories.json", _json({"synthetic_notice": _BANNER, "stories": stories}), source_type="industry_news", file_type="json", expected_entity="Synthetic Industry Newswire", fact_type="market_signal", locator={"table": "stories", "rows": 16, "syndication_control": "NEWS-013..016 mirror NEWS-001..004"}, claim_id="CLAIM-NEWS-SET", records=records)
+        story_id = f"NEWS-{index + 1:03d}"
+        stories.append({"id": story_id, "synthetic_notice": _BANNER, "reference_claim_id": f"CLAIM-{story_id}", "entity": company.company_name, "headline": f"Fictional trade signal for {company.company_name}", "body": f"{_BANNER} This fictional report describes a demo-only market signal.", "url": f"https://newsroom.example/story/{index + 1:03d}", "publisher": "Synthetic Primary Newswire", "canonical_story_id": story_id, "syndicated_from": None, "dedupe_cluster_id": f"NEWS-CLUSTER-{index + 1:03d}", "published_at": _STAMP})
+    for index in range(4):
+        canonical = stories[index]
+        story_id = f"NEWS-{index + 13:03d}"
+        stories.append({**canonical, "id": story_id, "reference_claim_id": f"CLAIM-{story_id}", "url": f"https://syndication.example/story/{index + 13:03d}", "publisher": "Synthetic Syndication Mirror", "syndicated_from": canonical["id"], "published_at": _STAMP})
+    _write(root, "news/stories.json", _json({"synthetic_notice": _BANNER, "stories": stories}), source_type="industry_news", file_type="json", expected_entity="Synthetic Industry Newswire", fact_type="market_signal", locator={"table": "stories", "items": [{"row": index + 1, "story_id": story["id"], "canonical_story_id": story["canonical_story_id"], "syndicated_from": story["syndicated_from"], "dedupe_cluster_id": story["dedupe_cluster_id"], "claim_id": story["reference_claim_id"]} for index, story in enumerate(stories)]}, claim_id="CLAIM-NEWS-SET", records=records)
+    records[-1]["reference_claim_ids"] = [story["reference_claim_id"] for story in stories]
     html = f"<html><body><p>{_BANNER}</p><article><h1>{stories[0]['headline']}</h1><p>{stories[0]['body']}</p></article></body></html>"
     _write(root, "news/representative-story.html", html.encode(), source_type="industry_news", file_type="html", expected_entity=bundle.companies[0].company_name, fact_type="market_signal", locator={"section": "article", "story_id": "NEWS-001"}, claim_id="CLAIM-NEWS-001", records=records)
     return len(stories)
 
 
 def _social(root: Path, bundle: TradeSeedBundle, records: list[dict[str, Any]]) -> int:
-    posts = [{"post_id": f"POST-{index + 1:03d}", "synthetic_notice": _BANNER, "company": bundle.companies[index].company_name, "text": f"{_BANNER} Fictional update about a sample shipment.", "url": f"https://social.example/posts/{index + 1:03d}", "published_at": _STAMP} for index in range(12)]
-    _write(root, "social/posts.jsonl", b"".join(_json(post) for post in posts), source_type="social", file_type="jsonl", expected_entity="Synthetic Social Feed", fact_type="market_signal", locator={"post_id": "POST-001..POST-012", "rows": 12}, claim_id="CLAIM-SOCIAL-SET", records=records)
+    posts = [{"post_id": f"POST-{index + 1:03d}", "reference_claim_id": f"CLAIM-POST-{index + 1:03d}", "synthetic_notice": _BANNER, "company": bundle.companies[index].company_name, "text": f"{_BANNER} Fictional update about a sample shipment.", "url": f"https://social.example/posts/{index + 1:03d}", "published_at": _STAMP} for index in range(12)]
+    _write(root, "social/posts.jsonl", b"".join(_json(post) for post in posts), source_type="social", file_type="jsonl", expected_entity="Synthetic Social Feed", fact_type="market_signal", locator={"items": [{"row": index + 1, "post_id": post["post_id"], "claim_id": post["reference_claim_id"]} for index, post in enumerate(posts)]}, claim_id="CLAIM-SOCIAL-SET", records=records)
+    records[-1]["reference_claim_ids"] = [post["reference_claim_id"] for post in posts]
     return len(posts)
 
 
@@ -165,13 +223,26 @@ def _pdfs(root: Path, records: list[dict[str, Any]]) -> tuple[int, int]:
 
 
 def _profiles(root: Path, bundle: TradeSeedBundle, records: list[dict[str, Any]]) -> int:
-    chosen = [record for record in bundle.trade_records if record.importer_id in {1, 2, 3}][:12]
-    for index, record in enumerate(chosen, 1):
-        company = bundle.companies[record.importer_id - 1]
-        hs = bundle.hs_codes[record.hs_code_id - 1]
-        profile = {"synthetic_notice": _BANNER, "company": company.company_name, "company_id": company.id, "hs_code": hs.hs_code, "month": record.trade_date.isoformat(), "trade_amount_usd": str(record.trade_amount), "aggregation": "one deterministic monthly company/HS tuple from Task 3 seed aggregates", "source_record_count": 1}
-        _write(root, f"customs_profiles/{company.id:03d}-{hs.hs_code}-{record.trade_date:%Y-%m}.json", _json(profile), source_type="customs_profile", file_type="generated_profile", expected_entity=company.company_name, fact_type="trade_activity", locator={"profile": "monthly_company_hs", "company_id": company.id, "hs_code": hs.hs_code, "month": record.trade_date.isoformat(), "aggregate_rows": 1}, claim_id=f"CLAIM-CUSTOMS-{index:02d}", records=records)
-    return len(chosen)
+    selected = {1, 2, 3}
+    aggregates: dict[tuple[int, int, str, str], dict[str, Any]] = {}
+    for row in bundle.trade_records:
+        for company_id, role in ((row.importer_id, "import"), (row.exporter_id, "export")):
+            if company_id not in selected:
+                continue
+            hs = bundle.hs_codes[row.hs_code_id - 1]
+            company = bundle.companies[company_id - 1]
+            key = (company_id, company.country_id, hs.hs_code, row.trade_date.strftime("%Y-%m"))
+            value = aggregates.setdefault(key, {"total_amount": Decimal(), "import_amount": Decimal(), "export_amount": Decimal(), "total_quantity": Decimal(), "import_quantity": Decimal(), "export_quantity": Decimal(), "raw_ids": []})
+            value["total_amount"] += row.trade_amount; value[f"{role}_amount"] += row.trade_amount
+            value["total_quantity"] += row.quantity; value[f"{role}_quantity"] += row.quantity
+            value["raw_ids"].append(row.raw_record_id)
+    for index, ((company_id, country_id, hs_code, month), value) in enumerate(sorted(aggregates.items()), 1):
+        company = bundle.companies[company_id - 1]
+        country = bundle.countries[country_id - 1]
+        raw_ids = sorted(value["raw_ids"])
+        profile = {"synthetic_notice": _BANNER, "company": company.company_name, "company_id": company_id, "country_code": country.country_code, "hs_code": hs_code, "calendar_month": month, "currency": "USD", "aggregation_grain": "company_country_hs_calendar_month", "roles_included": ["import", "export"], "aggregation_window": {"start": f"{month}-01", "calendar_month": month}, "import_amount_usd": str(value["import_amount"]), "export_amount_usd": str(value["export_amount"]), "total_amount_usd": str(value["total_amount"]), "import_quantity_kg": str(value["import_quantity"]), "export_quantity_kg": str(value["export_quantity"]), "total_quantity_kg": str(value["total_quantity"]), "source_record_count": len(raw_ids), "raw_record_summary": {"record_ids": raw_ids[:5], "record_id_hash": hashlib.sha256(_json(raw_ids)).hexdigest()}}
+        _write(root, f"customs_profiles/{company_id:03d}-{hs_code}-{month}.json", _json(profile), source_type="customs_profile", file_type="generated_profile", expected_entity=company.company_name, fact_type="trade_activity", locator={"profile": "monthly_company_hs", "company_id": company_id, "country_code": country.country_code, "hs_code": hs_code, "calendar_month": month, "aggregation_grain": profile["aggregation_grain"], "aggregate_rows": len(raw_ids)}, claim_id=f"CLAIM-CUSTOMS-{index:03d}", records=records)
+    return len(aggregates)
 
 
 def generate_demo_corpus(output: Path, seed: int = 20260830, clean: bool = False) -> CorpusSummary:

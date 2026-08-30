@@ -10,10 +10,7 @@ def test_milvus_uses_minio_credentials_from_same_compose_variables():
     mysql = compose["services"]["mysql"]["environment"]
     api = compose["services"]["api"]["environment"]
     assert minio["MINIO_ROOT_USER"] == milvus["MINIO_ACCESS_KEY_ID"] == "minioadmin"
-    assert milvus["MINIO_SECRET_ACCESS_KEY"] == "${MINIO_ROOT_PASSWORD:-synthetic-demo-minio-only}"
-    assert mysql["MYSQL_ROOT_PASSWORD"] == "${MYSQL__ROOT_PASSWORD:-synthetic-demo-root-only}"
-    assert mysql["MYSQL_MIGRATION_PASSWORD"] == "${MYSQL__MIGRATION_PASSWORD:-synthetic-demo-migration-only}"
-    assert mysql["MYSQL_QUERY_PASSWORD"] == "${MYSQL__QUERY_PASSWORD:-synthetic-demo-query-only}"
+    assert milvus["MINIO_SECRET_ACCESS_KEY"] == "${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}"
     assert "MQ_TYPE" in milvus
     assert "MYSQL_ROOT_PASSWORD" in mysql
     assert "MYSQL__ROOT_PASSWORD" not in api

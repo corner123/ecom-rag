@@ -15,8 +15,8 @@
   type, fixed timestamps, claim IDs, source/file type, locators, and synthetic status.
 - Hardened output cleanup: broad roots and nonempty unowned directories are refused;
   only a marked demo root can be cleaned, and its checked-in README is preserved.
-- Copied scripts/data/demo into the API image and provided process-local non-secret
-  Compose defaults for the four demo bootstrap variables.
+- Copied scripts/data/demo into the API image. Compose retains required secret
+  interpolations; verification injects non-secret demo values only into each process.
 
 ## TDD evidence
 
@@ -63,3 +63,33 @@ Safety regression GREEN is included in the focused green run above.
 
 The image-only scan fixture intentionally has no OCR text. Later PDF routing must either
 OCR it or quarantine it explicitly, as specified by the next foundation task.
+
+## Review round 1 hardening
+
+- Output handling now rejects a symlink root, marker, directory, or file anywhere in an
+  existing owned tree before cleaning or writing. Generated relative paths are validated
+  and each write repeats the tree check. Directory- and file-symlink regression probes
+  both preserved an outside sentinel on regeneration and clean attempts.
+- Customs profiles now aggregate every Task 3 record involving the declared fictional
+  company-ID subset `{1, 2, 3}` by company/country/HS/calendar month. Each profile carries
+  import/export/total USD and kg sums, roles, window/grain, source count, and compact raw-ID
+  summary/hash; the corpus has 54 profiles, well below 825 ledger facts.
+- The image-only scan is a deterministic 1200×1550 Pillow raster with the exact visible ASCII
+  synthetic warning, fictional regulator notice, and table. A 150-DPI Poppler render was
+  visually inspected: 1275×1650 pixels, 138501 black pixels, 256 colors; pypdf extraction
+  remains empty and the embedded image is nontrivial.
+- The catalog has explicit, non-overlapping paths for regulator PDFs and the industry-news
+  bulletin. Controlled syndication now makes NEWS-013..016 content-equivalent mirrors of
+  NEWS-001..004 with provenance, canonical IDs, dedupe clusters, and item-level claims.
+
+Additional RED/GREEN evidence:
+
+```text
+RED symlink file regression: Failed: DID NOT RAISE <class 'ValueError'>
+GREEN focused corpus suite: 8 passed in 1.48s
+GREEN host units: 38 passed in 1.51s; in-image units: 38 passed in 2.15s
+```
+
+The API image initially failed because the unpinned latest `uv` (0.12.7) produced an editable
+requirements hash mismatch. Pinning the Docker build tool to `uv==0.9.21`, which matches the
+project export/install workflow, rebuilt the image successfully.
