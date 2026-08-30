@@ -40,7 +40,8 @@ def _ddl_columns() -> dict[str, dict[str, tuple[str, bool, str | None]]]:
 
 
 def _normal_type(value: str) -> str:
-    return value.lower().replace(" unsigned", " unsigned")
+    normalized = value.lower().replace("numeric", "decimal").replace(", ", ",")
+    return "tinyint(1)" if normalized in {"bool", "boolean"} else normalized
 
 
 def test_ddl_matches_sqlalchemy_metadata_and_seed_contract():
@@ -91,7 +92,7 @@ def test_ddl_matches_sqlalchemy_metadata_and_seed_contract():
             )
             assert actual_indexes == expected_indexes
             fk_rows = connection.execute(text("SELECT k.column_name, k.referenced_table_name, k.referenced_column_name, r.update_rule, r.delete_rule FROM information_schema.key_column_usage k JOIN information_schema.referential_constraints r ON r.constraint_schema=k.constraint_schema AND r.constraint_name=k.constraint_name AND r.table_name=k.table_name WHERE k.table_schema=DATABASE() AND k.table_name=:table AND k.referenced_table_name IS NOT NULL"), {"table": table.name}).all()
-            actual_fks = {(row[0], row[1], row[2], row[3], row[4]) for row in fk_rows}
+            actual_fks = {(row[0], row[1], row[2], "RESTRICT" if row[3] == "NO ACTION" else row[3], "RESTRICT" if row[4] == "NO ACTION" else row[4]) for row in fk_rows}
             expected_fks = {(fk.parent.name, fk.column.table.name, fk.column.name, "RESTRICT", "RESTRICT") for fk in table.foreign_keys}
             assert expected_fks == actual_fks
 
