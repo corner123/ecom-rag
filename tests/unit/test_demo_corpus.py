@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import tempfile
 from fnmatch import fnmatch
 from decimal import Decimal
 from pathlib import Path
@@ -104,6 +105,36 @@ def test_symlinked_generated_file_is_rejected_without_touching_outside(tmp_path:
     with pytest.raises(ValueError, match="symlink"):
         generate_demo_corpus(owned, clean=True)
     assert sentinel.read_text() == "do not modify"
+
+
+def test_symlinked_output_ancestor_is_rejected_before_creating_child(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "sentinel.txt"
+    sentinel.write_text("do not modify")
+    linked_parent = tmp_path / "linked-parent"
+    linked_parent.symlink_to(outside, target_is_directory=True)
+    output = linked_parent / "child"
+
+    with pytest.raises(ValueError, match="symlink"):
+        generate_demo_corpus(output)
+    with pytest.raises(ValueError, match="symlink"):
+        generate_demo_corpus(output, clean=True)
+    assert not (outside / "child").exists()
+    assert sentinel.read_text() == "do not modify"
+
+
+def test_normal_var_tempfile_descendant_is_not_rejected_as_a_system_alias() -> None:
+    if not Path("/var").is_symlink():
+        pytest.skip("platform has no /var system alias")
+    with tempfile.TemporaryDirectory(prefix="trade-demo-") as temp_dir:
+        physical = Path(temp_dir).resolve()
+        if not physical.is_relative_to(Path("/private/var")):
+            pytest.skip("tempfile is not backed by macOS /private/var")
+        lexical_temp = Path("/var") / physical.relative_to(Path("/private/var"))
+        output = lexical_temp / "child"
+        generate_demo_corpus(output)
+        assert (output / "manifests" / "corpus_manifest.json").is_file()
 
 
 def test_customs_profiles_are_monthly_company_hs_aggregates(tmp_path: Path) -> None:

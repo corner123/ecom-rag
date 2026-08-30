@@ -6,6 +6,7 @@ import io
 import json
 import os
 import shutil
+import tempfile
 from collections import Counter
 from dataclasses import dataclass
 from decimal import Decimal
@@ -52,6 +53,30 @@ def _safe_root(output: Path) -> Path:
     return root
 
 
+def _trusted_baseline(root: Path) -> Path:
+    """Find a lexical safe starting point without resolving a user output path."""
+    candidates = {Path.cwd().absolute(), Path.home().absolute(), Path(tempfile.gettempdir()).absolute()}
+    candidates.update(candidate.resolve() for candidate in tuple(candidates))
+    # macOS commonly exposes /var as an alias to /private/var; it is a system baseline,
+    # not an untrusted portion of a tempfile output path.
+    for system_alias in (Path("/var"), Path("/tmp")):
+        if system_alias.is_symlink():
+            candidates.add(system_alias)
+    matching = [candidate for candidate in candidates if root.is_relative_to(candidate)]
+    return max(matching, key=lambda candidate: len(candidate.parts)) if matching else Path(root.anchor)
+
+
+def _assert_safe_output_ancestors(root: Path) -> None:
+    """Reject symlink components from a trusted lexical baseline through ``root``."""
+    baseline = _trusted_baseline(root)
+    relative = root.relative_to(baseline)
+    current = baseline
+    for part in relative.parts:
+        current /= part
+        if current.is_symlink():
+            raise ValueError("refusing symlink output ancestor")
+
+
 def _assert_no_symlinks(root: Path) -> None:
     """Reject symlinks in the owned output tree without resolving ordinary parents."""
     if root.is_symlink():
@@ -74,6 +99,7 @@ def _owned_marker(root: Path) -> Path:
 def ensure_safe_output(output: Path, *, clean: bool = False) -> Path:
     """Prepare an owned output directory without ever deleting an arbitrary tree."""
     root = _safe_root(output)
+    _assert_safe_output_ancestors(root)
     _assert_no_symlinks(root)
     if root.exists() and not root.is_dir():
         raise ValueError("output must be a directory")
@@ -93,6 +119,7 @@ def ensure_safe_output(output: Path, *, clean: bool = False) -> Path:
             else:
                 child.unlink()
     root.mkdir(parents=True, exist_ok=True)
+    _assert_safe_output_ancestors(root)
     _assert_no_symlinks(root)
     marker = _owned_marker(root)
     if marker.exists() and marker.read_text(encoding="utf-8") != "synthetic-trade-intel-demo-v1\n":
@@ -108,8 +135,10 @@ def _write(root: Path, relative: str, payload: bytes, *, source_type: str, file_
     if relative_path.is_absolute() or ".." in relative_path.parts or relative_path.as_posix() != relative:
         raise ValueError("generated path must be a safe relative POSIX path")
     _assert_no_symlinks(root)
+    _assert_safe_output_ancestors(root)
     path = root / relative_path
     path.parent.mkdir(parents=True, exist_ok=True)
+    _assert_safe_output_ancestors(root)
     _assert_no_symlinks(root)
     path.write_bytes(payload)
     records.append({

@@ -49,11 +49,11 @@ Final safety regression GREEN is recorded in the final verification evidence bel
   maps; all generated manifest hashes rehashed successfully.
 - Checked-in manifest rehash: `74 records`.
 - `pypdf` extraction from the scanned fixture was empty, proving image-only content.
-- `uv run pytest tests/unit -q`: `38 passed in 1.51s`.
+- `uv run pytest tests/unit -q`: `40 passed in 2.52s`.
 - `docker compose config --quiet`: exit 0.
 - `docker compose build api`: exit 0.
 - In-image CLI generated `/tmp/trade-intel-image-demo`; final in-image unit suite:
-  `38 passed in 2.15s`.
+  `39 passed, 1 skipped in 3.11s` (the macOS `/var` alias test is correctly skipped in Linux).
 - `git diff --check`: exit 0.
 - Targeted source scans found no non-example URLs, host paths, or credential-like
   assignments in the Task 5 corpus implementation/artifacts.
@@ -86,10 +86,22 @@ Additional RED/GREEN evidence:
 
 ```text
 RED symlink file regression: Failed: DID NOT RAISE <class 'ValueError'>
-GREEN final focused corpus suite: 8 passed in 1.48s
-GREEN host units: 38 passed in 1.51s; in-image units: 38 passed in 2.15s
+GREEN final focused corpus suite: 10 passed in 2.45s
+GREEN host units: 40 passed in 2.52s; in-image units: 39 passed, 1 skipped in 3.11s
 ```
 
 The API image initially failed because the unpinned latest `uv` (0.12.7) produced an editable
 requirements hash mismatch. Pinning the Docker build tool to `uv==0.9.21`, which matches the
 project export/install workflow, rebuilt the image successfully.
+
+## Review round 2 hardening
+
+- An ancestor-chain guard now starts at the deepest lexical trusted baseline among the current
+  workspace, home, system tempfile location, and their resolved equivalents, then rejects any
+  symlink component through the requested output root before `mkdir`, clean, or a payload write.
+  macOS `/var` and `/tmp` system-alias baselines are deliberately trusted, so ordinary lexical
+  tempfile outputs remain valid.
+- Historical RED: output below `linked-parent -> outside` did not raise and created an outside
+  child. Final GREEN: the normal and `clean=True` calls both raise before the child/marker exists;
+  the outside sentinel remains unchanged. Focused suite: `10 passed in 2.45s`; host units:
+  `40 passed in 2.52s`.
