@@ -12,7 +12,7 @@ services:
       MYSQL_QUERY_PASSWORD: ${MYSQL__QUERY_PASSWORD:?set MYSQL__QUERY_PASSWORD in .env}
     ports: ["127.0.0.1:3306:3306"]
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u$${MYSQL_MIGRATION_USER} -p$${MYSQL_MIGRATION_PASSWORD}"]
+      test: ["CMD-SHELL", "mysql -h 127.0.0.1 -utrade_migrator -p$${MYSQL_MIGRATION_PASSWORD} -e 'SELECT 1'"]
       interval: 5s
       timeout: 5s
       retries: 20

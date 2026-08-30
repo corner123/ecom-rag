@@ -19,8 +19,9 @@ def test_milvus_uses_minio_credentials_from_same_compose_variables():
 def test_mysql_healthcheck_uses_the_migration_account():
     compose = yaml.safe_load(Path("docker-compose.yml").read_text())
     healthcheck = compose["services"]["mysql"]["healthcheck"]["test"]
-    assert "MYSQL_MIGRATION_USER" in healthcheck[-1]
+    assert "-utrade_migrator" in healthcheck[-1]
     assert "MYSQL_MIGRATION_PASSWORD" in healthcheck[-1]
+    assert "SELECT 1" in healthcheck[-1]
 
 
 def test_mysql_base_image_contract_is_explicit():

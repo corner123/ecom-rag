@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.dialects import mysql
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from trade_agent.db.migrate import migrate_database
@@ -16,6 +19,30 @@ def _migration_url() -> str:
     return database_url_from_environment(role="migration")
 
 
+def _ddl_columns() -> dict[str, dict[str, tuple[str, bool, str | None]]]:
+    """Parse the authoritative migration, independently of ORM metadata."""
+    result: dict[str, dict[str, tuple[str, bool, str | None]]] = {}
+    table = None
+    for line in Path("db/migrations/001_schema.sql").read_text().splitlines():
+        stripped = line.strip().rstrip(",")
+        if stripped.startswith("CREATE TABLE"):
+            table = stripped.split()[5]
+            result[table] = {}
+        elif table and stripped and not stripped.startswith(("PRIMARY", "CONSTRAINT", "INDEX", ")")):
+            parts = stripped.split()
+            name, type_ = parts[0], parts[1].lower()
+            if len(parts) > 2 and parts[2].upper() == "UNSIGNED":
+                type_ += " unsigned"
+            nullable = "NOT NULL" not in stripped
+            default = "current_timestamp" if "DEFAULT CURRENT_TIMESTAMP" in stripped else None
+            result[table][name] = ("tinyint(1)" if type_ == "boolean" else type_, nullable, default)
+    return result
+
+
+def _normal_type(value: str) -> str:
+    return value.lower().replace(" unsigned", " unsigned")
+
+
 def test_ddl_matches_sqlalchemy_metadata_and_seed_contract():
     engine = create_engine(_migration_url())
     migrate_database(engine)
@@ -28,10 +55,14 @@ def test_ddl_matches_sqlalchemy_metadata_and_seed_contract():
     assert summary.trade_records >= 800
     assert summary.months == 18
 
+    ddl_columns = _ddl_columns()
     with engine.connect() as connection:
         for table in Base.metadata.sorted_tables:
-            actual_columns = {column["name"] for column in inspector.get_columns(table.name)}
-            assert actual_columns == {column.name for column in table.columns}
+            live_columns = connection.execute(text("SELECT column_name, column_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name=:table ORDER BY ordinal_position"), {"table": table.name}).all()
+            actual_columns = {name: (_normal_type(column_type), nullable == "YES", None if default is None else str(default).lower().replace("()", "")) for name, column_type, nullable, default in live_columns}
+            assert actual_columns == ddl_columns[table.name]
+            orm_columns = {column.name: (_normal_type(column.type.compile(dialect=mysql.dialect())), column.nullable, "current_timestamp" if column.server_default is not None else None) for column in table.columns}
+            assert orm_columns == ddl_columns[table.name]
             index_rows = connection.execute(
             text(
                 "SELECT index_name, non_unique, seq_in_index, column_name "
@@ -59,8 +90,9 @@ def test_ddl_matches_sqlalchemy_metadata_and_seed_contract():
                 }
             )
             assert actual_indexes == expected_indexes
-            actual_fks = {(fk["constrained_columns"][0], fk["referred_table"]) for fk in inspector.get_foreign_keys(table.name)}
-            expected_fks = {(fk.parent.name, fk.column.table.name) for fk in table.foreign_keys}
+            fk_rows = connection.execute(text("SELECT k.column_name, k.referenced_table_name, k.referenced_column_name, r.update_rule, r.delete_rule FROM information_schema.key_column_usage k JOIN information_schema.referential_constraints r ON r.constraint_schema=k.constraint_schema AND r.constraint_name=k.constraint_name AND r.table_name=k.table_name WHERE k.table_schema=DATABASE() AND k.table_name=:table AND k.referenced_table_name IS NOT NULL"), {"table": table.name}).all()
+            actual_fks = {(row[0], row[1], row[2], row[3], row[4]) for row in fk_rows}
+            expected_fks = {(fk.parent.name, fk.column.table.name, fk.column.name, "RESTRICT", "RESTRICT") for fk in table.foreign_keys}
             assert expected_fks == actual_fks
 
     with engine.begin() as connection:
