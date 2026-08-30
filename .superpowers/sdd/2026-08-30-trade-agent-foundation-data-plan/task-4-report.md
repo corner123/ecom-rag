@@ -87,3 +87,22 @@ API image Python 3.12.14: focused 13 passed; full unit 29 passed
 compileall, diff check, secret/absolute-path scan: passed
 docker compose ps -a: no containers
 ```
+
+## Review fix round 2
+
+Closed the remaining strictness gaps:
+
+- Numeric locator fields use strict integers with bounds; source weight and OCR
+  confidence accept real Python ints/floats only, reject strings, booleans,
+  non-finite values, and retain inclusive `[0, 1]` boundaries.
+- Raw locator values are meaningful only when nonblank/nonempty recursively;
+  valid structured raw locators remain supported.
+
+Verification after the fix:
+
+```
+Host Python 3.12.14: focused 14 passed; full unit 30 passed
+API image Python 3.12.14: focused 14 passed; full unit 30 passed
+compileall, diff check, secret/absolute-path scan: passed
+docker compose ps -a: no containers
+```

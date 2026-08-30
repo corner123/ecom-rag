@@ -12,7 +12,7 @@ from math import isfinite
 from typing import Any, Mapping
 from urllib.parse import urlparse
 
-from pydantic import AnyUrl, BaseModel, ConfigDict, Field, StrictBool, StrictStr, field_validator, model_validator
+from pydantic import AnyUrl, BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, field_validator, model_validator
 from pydantic.types import JsonValue
 
 _SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
@@ -94,6 +94,28 @@ def _validate_json_value(value: Any, path: str = "value") -> None:
     raise ValueError(f"{path} is not JSON-serializable")
 
 
+def _meaningful_raw(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, dict):
+        return any(bool(str(key).strip()) and _meaningful_raw(item) for key, item in value.items())
+    if isinstance(value, list):
+        return any(_meaningful_raw(item) for item in value)
+    return True
+
+
+def _strict_unit_interval(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("must be a finite int or float, not a coerced value")
+    if not isfinite(value):
+        raise ValueError("must be finite")
+    return float(value)
+
+
 def content_sha256(value: str | bytes) -> str:
     """Return the SHA-256 digest of UTF-8 text or bytes; reject implicit coercion."""
     if isinstance(value, str):
@@ -123,12 +145,13 @@ def stable_id(prefix: str, *parts: str) -> str:
 class SourceLocator(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    page: int | None = Field(default=None, ge=1)
-    block: int | None = Field(default=None, ge=0)
+    page: StrictInt | None = Field(default=None, ge=1)
+    page_end: StrictInt | None = Field(default=None, ge=1)
+    block: StrictInt | None = Field(default=None, ge=0)
     table: StrictStr | None = None
     section: StrictStr | None = None
     post_id: StrictStr | None = None
-    row: int | None = Field(default=None, ge=0)
+    row: StrictInt | None = Field(default=None, ge=0)
     profile: StrictStr | None = None
     sql: StrictStr | None = None
     raw: JsonValue | None = None
@@ -144,6 +167,10 @@ class SourceLocator(BaseModel):
         values = (self.page, self.block, self.table, self.section, self.post_id, self.row, self.profile, self.sql, self.raw)
         if not any(value is not None and value != "" and value != {} and value != [] for value in values):
             raise ValueError("source locator requires at least one meaningful component")
+        if not _meaningful_raw(self.raw) and all(value is None for value in values[:-1]):
+            raise ValueError("source locator raw value must be meaningful")
+        if self.page_end is not None and self.page is not None and self.page_end < self.page:
+            raise ValueError("page_end must be greater than or equal to page")
         return self
 
 
@@ -280,6 +307,7 @@ class ChunkMetadata(_StrictBase):
     @classmethod
     def validate_hashes(cls, value: str, info: Any) -> str:
         return _sha(value, info.field_name)
+    _strict_weights = field_validator("source_weight", "ocr_confidence", mode="before")(_strict_unit_interval)
     _times = field_validator("publish_time", "valid_from", "valid_to", "ingested_at")(_aware)
 
     @model_validator(mode="after")

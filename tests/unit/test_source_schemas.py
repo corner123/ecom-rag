@@ -162,6 +162,25 @@ def test_source_locator_supports_structured_and_json_serializable_variants():
         SourceLocator()
     with pytest.raises(ValidationError):
         SourceLocator(raw={})
+    with pytest.raises(ValidationError):
+        SourceLocator(raw="   ")
+    with pytest.raises(ValidationError):
+        SourceLocator(raw={"nested": ["", {"deep": "  "}]})
+    assert SourceLocator(raw={"section": "Products", "page": 2}).raw == {"section": "Products", "page": 2}
+
+
+def test_numeric_contracts_reject_coercion_and_accept_real_boundary_numbers():
+    assert SourceLocator(page=1, block=0).page == 1
+    assert ChunkMetadata(**metadata(source_weight=0)).source_weight == 0
+    assert ChunkMetadata(**metadata(source_weight=1, ocr_confidence=1)).ocr_confidence == 1
+    for value in ("1", True, False):
+        with pytest.raises(ValidationError):
+            SourceLocator(page=value)
+    for value in ("0.5", True, False):
+        with pytest.raises(ValidationError):
+            ChunkMetadata(**metadata(source_weight=value))
+        with pytest.raises(ValidationError):
+            ChunkMetadata(**metadata(ocr_confidence=value))
 
 
 def test_structured_json_rejects_non_json_values_and_non_finite_numbers():
