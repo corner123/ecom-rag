@@ -19,11 +19,10 @@ class MysqlSettings(BaseModel):
     database: str = "foreign_trade_db"
     user: str = "trade_app"
     password: str | None = None
-    root_password: str | None = None
 
     @model_validator(mode="after")
     def reject_placeholder_password(self) -> "MysqlSettings":
-        if _is_placeholder(self.password) or _is_placeholder(self.root_password):
+        if _is_placeholder(self.password):
             raise ValueError("mysql password must be provided and must not be a placeholder")
         return self
 

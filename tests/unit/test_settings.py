@@ -14,6 +14,7 @@ def test_nested_environment_is_loaded(monkeypatch):
     monkeypatch.setenv("MYSQL__ROOT_PASSWORD", "safe-root-password")
     settings = Settings.load(runtime="compose")
     assert settings.mysql.password == "safe-password"
+    assert not hasattr(settings.mysql, "root_password")
     assert settings.environment == "compose"
 
 
@@ -37,6 +38,5 @@ def test_committed_example_passwords_are_rejected(monkeypatch, value):
 
 def test_missing_mysql_password_is_rejected(monkeypatch):
     monkeypatch.delenv("MYSQL__PASSWORD", raising=False)
-    monkeypatch.delenv("MYSQL__ROOT_PASSWORD", raising=False)
     with pytest.raises(ValueError, match="required|placeholder"):
         Settings.load(runtime="test")
