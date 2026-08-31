@@ -130,8 +130,15 @@ class IngestionPipeline:
                 else:
                     for match in matches:
                         candidates.append(_Candidate(rule, match.relative_to(catalog.corpus_root).as_posix(), None if match.exists() else "missing_catalog_path"))
-        repeated = Counter(item.relative_path for item in candidates)
-        return sorted((_Candidate(item.rule, item.relative_path, item.issue or ("duplicate_catalog_path" if repeated[item.relative_path] > 1 else None)) for item in candidates), key=lambda item: (item.relative_path, item.rule.source_type.value, item.rule.file_types))
+        grouped: dict[str, list[_Candidate]] = {}
+        for candidate in candidates:
+            grouped.setdefault(candidate.relative_path, []).append(candidate)
+        collapsed: list[_Candidate] = []
+        for path, matches in grouped.items():
+            selected = sorted(matches, key=lambda item: (item.rule.source_type.value, item.rule.file_types, item.rule.url_pattern))[0]
+            issue = selected.issue or ("duplicate_catalog_path" if len(matches) > 1 else None)
+            collapsed.append(_Candidate(selected.rule, path, issue))
+        return sorted(collapsed, key=lambda item: (item.relative_path, item.rule.source_type.value, item.rule.file_types))
 
     @staticmethod
     def _file_type(candidate: _Candidate) -> FileType | None:

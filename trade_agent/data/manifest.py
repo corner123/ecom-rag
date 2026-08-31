@@ -9,11 +9,12 @@ from typing import Any
 from collections import Counter
 import re
 from pathlib import PurePosixPath
+from copy import deepcopy
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, field_validator, model_validator
 
 from trade_agent.data.quarantine import QuarantineRecord
-from trade_agent.schemas.source import ChunkRecord, DocumentRecord, FileType, SourceType
+from trade_agent.schemas.source import ChunkRecord, DocumentRecord, FileType, SourceType, stable_id
 
 METADATA_SCHEMA_VERSION = "task6-source-metadata-v1"
 
@@ -28,6 +29,15 @@ def canonical_hash(value: Any) -> str:
 
 class _FrozenModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+    def model_copy(self, *, update: dict[str, Any] | None = None, deep: bool = False):
+        if update is None:
+            return super().model_copy(deep=deep)
+        value = self.model_dump(mode="python")
+        if deep:
+            value = deepcopy(value)
+        value.update(update)
+        return type(self).model_validate(value)
 
 
 class SourceBuildRecord(_FrozenModel):
@@ -211,6 +221,20 @@ class BuildManifest(_FrozenModel):
             raise ValueError("hashes must be lowercase SHA-256 digests")
         if len({item.source_id for item in self.sources}) != len(self.sources):
             raise ValueError("source IDs must be unique")
+        for source in self.sources:
+            if source.source_id != stable_id("source", source.path):
+                raise ValueError("source ID does not match path")
+        source_by_id = {item.source_id: item for item in self.sources}
+        documents = {item.document_id: item.restore() for item in self.documents}
+        for document in documents.values():
+            source = source_by_id.get(document.source_id)
+            if source is None or source.source_type != document.source_type.value or source.file_type != document.file_type.value:
+                raise ValueError("document does not match source")
+        for snapshot in self.chunks:
+            chunk = snapshot.restore()
+            document = documents.get(chunk.metadata.document_id)
+            if document is None or chunk.metadata.source_type != document.source_type or chunk.metadata.file_type != document.file_type:
+                raise ValueError("chunk does not match document")
         if len(set(self.document_ids)) != len(self.documents) or len(set(self.chunk_ids)) != len(self.chunks):
             raise ValueError("document and chunk IDs must be unique")
         if len({item.name for item in self.counts_by_source_type}) != len(self.counts_by_source_type) or len({item.name for item in self.counts_by_file_type}) != len(self.counts_by_file_type):

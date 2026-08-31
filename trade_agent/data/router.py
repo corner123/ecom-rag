@@ -342,13 +342,14 @@ class DocumentRouter:
         self.quarantines: list[QuarantineRecord] = []
 
     def _quarantine(self, code: str, source: SourceInput, parser: str, diagnostic: object) -> list[DocumentRecord]:
-        source_path = str(source.path)
+        # Persisted quarantine paths must not disclose host filesystem layout.
+        source_path = (Path(source.path.parent.name) / source.path.name).as_posix()
         self.quarantines.append(
             QuarantineRecord(
                 error_code=code,
                 source_path=source_path,
                 parser=parser,
-                diagnostic=sanitize_diagnostic(diagnostic, source_path=source_path),
+                diagnostic=sanitize_diagnostic(diagnostic, source_path=str(source.path)),
             )
         )
         return []
@@ -781,7 +782,7 @@ def probe_manifest(corpus_root: Path, manifest_path: Path) -> dict[str, Any]:
     return {
         "documents": documents,
         "quarantines": [
-            {"error_code": item.error_code, "path": str(Path(item.source_path).relative_to(corpus_root))}
+            {"error_code": item.error_code, "path": (str(Path(item.source_path).relative_to(corpus_root)) if Path(item.source_path).is_absolute() else item.source_path)}
             for item in router.quarantines
         ],
     }

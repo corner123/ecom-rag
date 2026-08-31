@@ -140,3 +140,10 @@ $ docker compose run --rm --no-deps api pytest tests/unit/test_manifest.py tests
 $ uv run pytest tests/unit -q
 150 passed, 5 third-party SWIG deprecation warnings
 ```
+
+## Review-fix round 1
+
+Manifest model copies now revalidate, duplicate catalog paths collapse to one
+fail-closed quarantine outcome, and restored documents/chunks are checked
+against source IDs and types. Quarantine paths/diagnostics are schema-safe;
+router reporting keeps a safe relative locator.

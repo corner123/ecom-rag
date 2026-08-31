@@ -23,6 +23,21 @@ class QuarantineRecord(BaseModel):
             raise ValueError("must not be blank")
         return value
 
+    @field_validator("source_path")
+    @classmethod
+    def safe_relative_path(cls, value: str) -> str:
+        path = Path(value)
+        if path.is_absolute() or ".." in path.parts:
+            raise ValueError("quarantine source_path must be safe and relative")
+        return value
+
+    @field_validator("diagnostic")
+    @classmethod
+    def safe_diagnostic(cls, value: str) -> str:
+        if re.search(r"(?i)(https?://[^/@\s]+@|[?&][^=&#\s]+=([^\[]|$)|\b(?:cookie|session|token|signature|password)\s*[:=]\s*(?!\[REDACTED\]))", value):
+            raise ValueError("quarantine diagnostic contains unsafe data")
+        return value
+
 
 def sanitize_diagnostic(value: object, limit: int = 240, *, source_path: str | None = None) -> str:
     if type(limit) is not int or limit <= 0:
