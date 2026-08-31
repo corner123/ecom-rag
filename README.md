@@ -9,14 +9,18 @@ data. It is not customer, company, customs, or production data.
 
 ## Safe local foundation run
 
-Copy the example environment and replace every `replace-with-*` value with a
-process-local secret. Do not commit `.env`:
+The example file is a field checklist only; do not source it as shell code.
+Copy it for Compose variable names, edit non-secret host/model fields, and do
+not commit `.env`; secrets below are still entered interactively:
 
 ```bash
 cp .env.example .env
 $EDITOR .env
-# Export only for this shell session so one-shot -e arguments can read it.
-set -a; . ./.env; set +a
+read -r -s -p 'MySQL root password: ' MYSQL__ROOT_PASSWORD; printf '\n' >&2
+read -r -s -p 'MySQL migration password: ' MYSQL__MIGRATION_PASSWORD; printf '\n' >&2
+read -r -s -p 'MySQL query password: ' MYSQL__QUERY_PASSWORD; printf '\n' >&2
+read -r -s -p 'MinIO root password: ' MINIO_ROOT_PASSWORD; printf '\n' >&2
+export MYSQL__ROOT_PASSWORD MYSQL__MIGRATION_PASSWORD MYSQL__QUERY_PASSWORD MINIO_ROOT_PASSWORD
 ```
 
 Start exactly the five foundation dependencies (ports are loopback-only):
@@ -31,10 +35,10 @@ environment, which receives only the query role password:
 
 ```bash
 docker compose --env-file .env run --rm --no-deps \
-  -e MYSQL__MIGRATION_PASSWORD="$MYSQL__MIGRATION_PASSWORD" api \
+  -e MYSQL__MIGRATION_PASSWORD api \
   python -m trade_agent.db.migrate
 docker compose --env-file .env run --rm --no-deps \
-  -e MYSQL__MIGRATION_PASSWORD="$MYSQL__MIGRATION_PASSWORD" api \
+  -e MYSQL__MIGRATION_PASSWORD api \
   python -m trade_agent.db.seed --seed 20260830
 ```
 
@@ -49,7 +53,7 @@ Run the complete foundation test command:
 
 ```bash
 docker compose --env-file .env run --rm --no-deps \
-  -e MYSQL__MIGRATION_PASSWORD="$MYSQL__MIGRATION_PASSWORD" api \
+  -e MYSQL__MIGRATION_PASSWORD api \
   pytest tests/unit tests/contract/test_compose_contract.py \
   tests/integration/test_mysql_schema.py tests/integration/test_ingestion_pipeline.py \
   tests/integration/test_pdf_pipeline.py -q
@@ -60,7 +64,15 @@ explicitly):
 
 ```bash
 docker compose --env-file .env down
+
+unset MYSQL__ROOT_PASSWORD MYSQL__MIGRATION_PASSWORD MYSQL__QUERY_PASSWORD MINIO_ROOT_PASSWORD
 ```
+
+The MySQL named-volume users and passwords are applied only during the
+volume's first initialization; changing environment variables does not rotate
+credentials for an existing database. To replace local credentials, first
+understand that `docker compose down -v` deletes all local synthetic data and
+named volumes, then run the startup, migration, and seed commands again.
 
 The scanned regulator PDF is intentionally expected to be quarantined when
 MinerU is unavailable; the smoke output records this degradation truthfully.

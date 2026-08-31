@@ -87,3 +87,66 @@ No retrieval, SQL-agent, Milvus collection/index, answer generation, or
 evaluation behavior was added; those remain later scopes. The live stack may
 be stopped with `docker compose down`; local named volumes are disposable
 development state and are not repository artifacts.
+
+## Controller review remediation
+
+The review follow-up added a safe argparse boundary: unknown arguments are
+converted to one sorted JSON error object (`stage=arguments`) without usage,
+argv, paths, or secret text. The validator and ingestion gate now both require
+exactly 74 sources, 116 documents, and 120 chunks, with regression coverage for
+1/119/121 and related drift values.
+
+All smoke resources resolve from the module-derived repository root, so corpus
+checks work from an arbitrary current directory. Corpus runs use
+`TemporaryDirectory`, and the MySQL engine is disposed in `finally` on success
+and failure. Compose etcd now explicitly uses `--data-dir=/etcd-data`, bound
+to its `etcd_data:/etcd-data` volume.
+
+README secret setup no longer sources `.env` or expands a secret in argv. It
+uses interactive `read -r -s` exports and passes only the variable name to
+one-shot `-e` options, followed by explicit `unset`. The README states that
+named-volume credentials apply only on first initialization: changing an env
+value does not rotate existing users, and `down -v` deletes all local synthetic
+data before reinitialization.
+
+Remediation focused verification:
+
+```text
+$ uv run pytest tests/unit/test_smoke_foundation.py tests/contract/test_compose_contract.py -q -m 'not integration'
+15 passed, 1 deselected
+```
+
+## Final controller-review evidence
+
+The complete non-integration host suite passed after remediation:
+
+```text
+$ uv run pytest tests/unit tests/contract -q -m 'not integration'
+183 passed, 1 deselected, 5 warnings
+```
+
+The live checks used the unique Compose project `task8review20260901` with
+process-local synthetic credentials. The full live foundation suite passed
+after rebuilding the API image:
+
+```text
+$ docker compose -p task8review20260901 run --rm --no-deps -e MYSQL__MIGRATION_PASSWORD api \
+  pytest tests/unit tests/contract/test_compose_contract.py tests/integration/test_mysql_schema.py \
+  tests/integration/test_ingestion_pipeline.py tests/integration/test_pdf_pipeline.py -q
+227 passed, 1 skipped in 20.07s
+```
+
+The final smoke after rebuild and after a dependency down/up persistence cycle
+returned `status=ok`, `synthetic_only=true`, `mysql_tables=7`, row counts
+`8/60/12/30/2/60/825`, `months=18`, corpus `74/116/120`, metadata completeness
+`1.0`, quarantine `expected=1` and `unexpected=0`, with all five service
+readiness values true. Live versions were MySQL 8.4.11, Milvus 2.6.22, etcd
+3.5.25, Redis 7.4.11, and healthy MinIO. The smoke reported build ID
+`build_95a0a4d094fb5c3ec2f67fe8092862d9`, schema fingerprint
+`58c6fcf620e71d3f4ef9af35cf028c859fb350278b656081341728e7e343b799`, and seed
+hash `05c9095448085f074338e3dec227aa9daa8c7423ff79aa7f75e3a542fbb7bbb5`.
+
+The etcd service command now includes the real `--data-dir=/etcd-data` and its
+`etcd_data:/etcd-data` volume is covered by the static contract. The unique
+project was cleaned with `docker compose -p task8review20260901 down -v`; the
+pre-existing `foreign-trade-agent_*` volumes were left untouched.

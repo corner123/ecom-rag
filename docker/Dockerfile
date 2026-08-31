@@ -9,6 +9,7 @@ COPY data ./data
 COPY demo ./demo
 COPY db ./db
 COPY tests ./tests
+COPY README.md ./README.md
 COPY docker/healthcheck.py ./healthcheck.py
 COPY docker/mysql.Dockerfile ./docker/mysql.Dockerfile
 COPY docker-compose.yml ./docker-compose.yml

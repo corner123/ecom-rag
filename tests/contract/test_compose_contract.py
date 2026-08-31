@@ -27,6 +27,21 @@ def test_compose_api_receives_only_query_database_secret() -> None:
     assert not any("ROOT_PASSWORD" in key or "MIGRATION_PASSWORD" in key for key in api_environment)
 
 
+def test_etcd_persists_to_the_declared_data_directory() -> None:
+    compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
+    etcd = compose["services"]["etcd"]
+    assert "--data-dir=/etcd-data" in etcd["command"]
+    assert etcd["volumes"] == ["etcd_data:/etcd-data"]
+
+
+def test_readme_does_not_source_env_or_expand_secret_values_in_argv() -> None:
+    readme = Path("README.md").read_text(encoding="utf-8")
+    assert "source .env" not in readme
+    assert ". ./.env" not in readme
+    assert 'MYSQL__MIGRATION_PASSWORD="$' not in readme
+    assert "-e MYSQL__MIGRATION_PASSWORD" in readme
+
+
 @pytest.mark.integration
 def test_foundation_smoke_returns_machine_readable_summary() -> None:
     from scripts.smoke_foundation import run_foundation_smoke
