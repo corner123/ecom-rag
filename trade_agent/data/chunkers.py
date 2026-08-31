@@ -10,6 +10,7 @@ from trade_agent.schemas.source import (
     ChunkMetadata,
     ChunkRecord,
     DocumentRecord,
+    FileType,
     SourceLocator,
     SourceType,
     content_sha256,
@@ -31,8 +32,9 @@ _PROTECTED = re.compile(
     r")(?![A-Za-z0-9])"
 )
 _PARAGRAPH_END = re.compile(r"\n[ \t]*\n")
-_SENTENCE_END = re.compile(r"[.!?](?:[\"')\]]*)[ \t]*(?:\n|(?=\s)|$)")
-_SAFE_END = re.compile(r"\s+|[,;:]\s*")
+_SENTENCE_END = re.compile(r"[.!?。！？；](?:[\"')\]”’》】）]*)[ \t]*(?:\n|(?=\s)|$)?")
+_SAFE_END = re.compile(r"\s+|[,;:，、；：]\s*")
+_CJK = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +88,9 @@ class BaseChunker:
                     return end
         if self._count(prefix + text[start:]) <= self.max_tokens:
             return len(text)
+        codepoint_end = self._codepoint_end(text, start, prefix, spans)
+        if codepoint_end is not None:
+            return codepoint_end
         next_boundaries = sorted({end for positions in categories for end in positions if end > start and self._safe(end, spans)})
         if not next_boundaries:
             raise ValueError("atomic token cannot fit within chunk budget")
@@ -96,6 +101,36 @@ class BaseChunker:
                 raise ValueError(f"atomic identifier {protected!r} cannot fit within chunk budget")
             raise ValueError("atomic token cannot fit within chunk budget")
         raise ValueError("token counter cannot make progress at a safe boundary")
+
+    def _codepoint_end(
+        self,
+        text: str,
+        start: int,
+        prefix: str,
+        spans: list[tuple[int, int]],
+    ) -> int | None:
+        """Find a bounded codepoint cut for CJK prose when no lexical boundary fits."""
+        if _CJK.search(text, start) is None:
+            return None
+        low, high = start + 1, len(text)
+        best: int | None = None
+        while low <= high:
+            middle = (low + high) // 2
+            if self._count(prefix + text[start:middle]) <= self.max_tokens:
+                best = middle
+                low = middle + 1
+            else:
+                high = middle - 1
+        if best is None:
+            return None
+        for left, right in spans:
+            if left < best < right:
+                if self._count(prefix + text[start:right]) <= self.max_tokens:
+                    best = right
+                else:
+                    best = left
+                break
+        return best if best > start and self._safe(best, spans) else None
 
     def _overlap_start(self, text: str, start: int, end: int, spans: list[tuple[int, int]]) -> int:
         if self.overlap_tokens == 0:
@@ -108,13 +143,28 @@ class BaseChunker:
                 continue
             if self._count(text[candidate:end]) <= self.overlap_tokens:
                 return candidate
+        if _CJK.search(text, start, end) is not None:
+            low, high = start + 1, end - 1
+            best: int | None = None
+            while low <= high:
+                middle = (low + high) // 2
+                if self._count(text[middle:end]) <= self.overlap_tokens:
+                    best = middle
+                    high = middle - 1
+                else:
+                    low = middle + 1
+            if best is not None:
+                for left, right in spans:
+                    if left < best < right:
+                        best = right
+                        break
+                if start < best < end and self._safe(best, spans) and self._count(text[best:end]) <= self.overlap_tokens:
+                    return best
         return end
 
     def split_text(self, text: str, prefix: str = "") -> list[str]:
         if not text:
             raise ValueError("chunk text must not be empty")
-        if self._count(prefix) >= self.max_tokens:
-            raise ValueError("prefix consumes chunk budget")
         if self._count(prefix + text) <= self.max_tokens:
             return [prefix + text]
 
@@ -158,7 +208,8 @@ class WebsiteSectionChunker(BaseChunker):
 class B2BProductChunker(BaseChunker):
     def split(self, document: DocumentRecord) -> list[SplitPiece]:
         locator, confidence = self._first_locator(document, {"row": 1})
-        return [SplitPiece(content, locator, confidence) for content in self.split_text(document.content)]
+        prefix = f"{document.title}\n" if document.file_type is FileType.HTML else ""
+        return [SplitPiece(content, locator, confidence) for content in self.split_text(document.content, prefix)]
 
 
 class NewsParagraphChunker(BaseChunker):
@@ -235,7 +286,7 @@ class ChunkRouter:
                 source_type=document.source_type,
                 source_weight=attrs.get("source_weight", 0.5),
                 fact_type=attrs.get("fact_type"),
-                publish_time=attrs.get("published_at") or attrs.get("publish_time"),
+                publish_time=attrs.get("publish_time"),
                 valid_from=attrs.get("valid_from"),
                 valid_to=attrs.get("valid_to"),
                 ingested_at=document.fetched_at,

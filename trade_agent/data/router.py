@@ -71,6 +71,12 @@ _URL = TypeAdapter(AnyUrl)
 _HTML_SIGNATURE = re.compile(rb"(?is)(?:<!doctype\s+html|<html\b|<head\b|<body\b|<(?:h[1-6]|p|section|article|aside|table)\b)")
 _HS_CODE = re.compile(r"^[0-9]{4,10}$")
 _MONTH = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+_SYSTEM_ATTRIBUTE_KEYS = {
+    "feed_source_url", "feed_canonical_url", "item_source_url", "item_canonical_url",
+    "source_weight", "source_weight_version", "fact_type", "publish_time", "published_at",
+    "valid_from", "valid_to", "license_scope", "aggregation_info", "ocr_confidence",
+    "source_payload",
+}
 
 
 class SourceInput(BaseModel):
@@ -265,23 +271,78 @@ class DocumentRouter:
         item_canonical_url: str | None = None,
     ) -> dict[str, Any]:
         feed_source_url, feed_canonical_url = self._feed_urls(source)
+        catalog = source.manifest_attributes
         attrs = {
-            **source.manifest_attributes,
+            key: value
+            for key, value in item.items()
+            if key not in _SYSTEM_ATTRIBUTE_KEYS and key not in catalog
+        }
+        if item:
+            attrs["source_payload"] = deepcopy(item)
+        attrs.update(catalog)
+        attrs.update({
             "feed_source_url": feed_source_url,
             "feed_canonical_url": feed_canonical_url,
             "item_source_url": item_source_url or feed_source_url,
             "item_canonical_url": item_canonical_url or feed_canonical_url or item_source_url or feed_source_url,
-            "publish_time": source.publish_time.isoformat() if source.publish_time else None,
-            "valid_from": source.valid_from.isoformat() if source.valid_from else None,
-            "valid_to": source.valid_to.isoformat() if source.valid_to else None,
-            "license_scope": source.license_scope,
-            **item,
-        }
+            "publish_time": (
+                source.publish_time.isoformat()
+                if source.publish_time
+                else catalog.get("publish_time")
+                or (item.get("published_at") if source.source_type in {SourceType.INDUSTRY_NEWS, SourceType.SOCIAL} else None)
+            ),
+            "valid_from": source.valid_from.isoformat() if source.valid_from else catalog.get("valid_from"),
+            "valid_to": source.valid_to.isoformat() if source.valid_to else catalog.get("valid_to"),
+            "license_scope": source.license_scope if source.license_scope is not None else catalog.get("license_scope"),
+            "source_weight": catalog.get("source_weight", 0.5),
+            "source_weight_version": catalog.get("source_weight_version", "task6-v1-provisional"),
+            "fact_type": catalog.get("fact_type"),
+        })
         attrs = {key: value for key, value in attrs.items() if value is not None and value != ""}
-        attrs.setdefault("source_weight", 0.5)
-        attrs.setdefault("source_weight_version", "task6-v1-provisional")
         _validate_json_value(attrs, "document_attributes")
         return attrs
+
+    @staticmethod
+    def _b2b_evidence_text(item: dict[str, Any]) -> str:
+        narrative = next(
+            (
+                value.strip()
+                for key in ("description", "body")
+                if isinstance((value := item.get(key)), str) and value.strip()
+            ),
+            None,
+        )
+        if narrative is None:
+            return json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+        narrative_folded = narrative.casefold()
+
+        def appears_standalone(value: str) -> bool:
+            return re.search(
+                rf"(?<!\w){re.escape(value.casefold())}(?!\w)",
+                narrative_folded,
+            ) is not None
+
+        seen: set[str] = set()
+        parts: list[str] = []
+        for label, key in (
+            ("Supplier", "supplier"),
+            ("Product", "product_name"),
+            ("Category", "category"),
+            ("SKU", "sku"),
+            ("HS", "hs_code"),
+        ):
+            value = item.get(key)
+            if not isinstance(value, str) or not value.strip():
+                continue
+            value = value.strip()
+            folded = value.casefold()
+            if folded in seen or appears_standalone(value):
+                continue
+            seen.add(folded)
+            parts.append(f"{label}: {value}")
+        parts.append(narrative)
+        return "\n".join(parts)
 
     def _raw_provenance(
         self,
@@ -412,14 +473,24 @@ class DocumentRouter:
             raise ParseFailure("DOCUMENT_COUNT_LIMIT", "json", "document limit reached")
 
         canonical_urls: dict[str, str] = {}
-        if source.source_type is SourceType.INDUSTRY_NEWS:
-            for item in values:
-                if isinstance(item, dict):
-                    self._validate_news(item)
-                    story_id = item["id"]
-                    if story_id in canonical_urls:
-                        raise ParseFailure("INVALID_DOCUMENT_SHAPE", "industry_news", "duplicate story ID")
-                    canonical_urls[story_id] = item["url"]
+        seen_identities: set[str] = set()
+        for item in values:
+            if not isinstance(item, dict):
+                raise ParseFailure("INVALID_DOCUMENT_SHAPE", "json", "items must be objects")
+            if source.source_type is SourceType.B2B:
+                self._validate_b2b(item)
+                identity = str(item["product_id"])
+                parser = "b2b"
+                label = "product"
+            else:
+                self._validate_news(item)
+                identity = item["id"]
+                parser = "industry_news"
+                label = "story"
+                canonical_urls[identity] = item["url"]
+            if identity in seen_identities:
+                raise ParseFailure("INVALID_DOCUMENT_SHAPE", parser, f"duplicate {label} ID")
+            seen_identities.add(identity)
 
         docs: list[DocumentRecord] = []
         for row, item in enumerate(values, 1):
@@ -428,10 +499,9 @@ class DocumentRouter:
             if not isinstance(item, dict):
                 raise ParseFailure("INVALID_DOCUMENT_SHAPE", "json", "items must be objects")
             if source.source_type is SourceType.B2B:
-                self._validate_b2b(item)
                 identity = str(item["product_id"])
                 title = item["product_name"]
-                content = item.get("description") if isinstance(item.get("description"), str) and item["description"].strip() else json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                content = self._b2b_evidence_text(item)
                 item_url = item["url"]
                 canonical_url = item.get("canonical_url") or item_url
                 raw_values = {
@@ -458,9 +528,19 @@ class DocumentRouter:
         return docs
 
     def _jsonl(self, source: SourceInput, text: str) -> list[DocumentRecord]:
-        docs: list[DocumentRecord] = []
-        for row, item in jsonl_values(text, self.max_documents):
+        values = jsonl_values(text, self.max_documents)
+        if not values:
+            raise ParseFailure("INVALID_DOCUMENT_SHAPE", "social", "JSONL feed must contain at least one post")
+        seen_post_ids: set[str] = set()
+        for _, item in values:
             self._validate_social(item)
+            post_id = item["post_id"]
+            if post_id in seen_post_ids:
+                raise ParseFailure("INVALID_DOCUMENT_SHAPE", "social", "duplicate post ID")
+            seen_post_ids.add(post_id)
+
+        docs: list[DocumentRecord] = []
+        for row, item in values:
             item_url = item["url"]
             canonical_url = item.get("canonical_url") or item_url
             attrs = self._attrs(source, item, item_source_url=item_url, item_canonical_url=canonical_url)
@@ -472,8 +552,6 @@ class DocumentRouter:
             )
             locator = {"post_id": item["post_id"], "row": row, "raw": raw}
             docs.append(self._record(source, item["post_id"], item["text"], attrs, [{"text": item["text"], "locator": locator}], item["post_id"]))
-        if not docs:
-            raise ParseFailure("INVALID_DOCUMENT_SHAPE", "social", "JSONL feed must contain at least one post")
         return docs
 
     def _sections(self, source: SourceInput, text: str, html: bool) -> list[DocumentRecord]:

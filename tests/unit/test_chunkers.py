@@ -108,6 +108,35 @@ def test_nonadditive_counter_is_applied_to_full_prefix_and_slice():
     assert all(not chunk.content.endswith(("bet", "gamm", "epsil")) for chunk in chunks)
 
 
+def test_nonadditive_prefix_equal_to_budget_can_accept_repeated_body_token():
+    import re
+
+    from trade_agent.data.chunkers import ChunkRouter
+
+    def unique_words(value: str) -> int:
+        return len(set(re.findall(r"[A-Za-z]+", value.casefold())))
+
+    chunks = ChunkRouter(max_tokens=2, overlap_tokens=0, token_counter=unique_words).chunk(
+        doc(SourceType.INDUSTRY_NEWS, "Factory")
+    )
+    assert [chunk.content for chunk in chunks] == ["Factory expansion\nFactory"]
+    assert unique_words(chunks[0].content) == 2
+
+
+def test_nonadditive_prefix_equal_to_budget_still_rejects_new_body_token():
+    import re
+
+    from trade_agent.data.chunkers import ChunkRouter
+
+    def unique_words(value: str) -> int:
+        return len(set(re.findall(r"[A-Za-z]+", value.casefold())))
+
+    with pytest.raises(ValueError, match="cannot fit|make progress"):
+        ChunkRouter(max_tokens=2, overlap_tokens=0, token_counter=unique_words).chunk(
+            doc(SourceType.INDUSTRY_NEWS, "Unrelated")
+        )
+
+
 def test_natural_boundaries_preserve_original_punctuation_and_whitespace():
     from trade_agent.data.chunkers import ChunkRouter
 
@@ -132,6 +161,80 @@ def test_all_long_single_record_sources_honor_the_same_budget():
         chunks = router.chunk(value)
         assert len(chunks) > 1
         assert all(len(chunk.content) <= 60 for chunk in chunks)
+
+
+def test_b2b_html_heading_is_injected_inside_every_chunk_budget(tmp_path):
+    from trade_agent.data.chunkers import ChunkRouter
+    from trade_agent.data.router import DocumentRouter, SourceInput
+
+    path = tmp_path / "products.html"
+    path.write_text(
+        "<html><body><h1>Industrial Chargers</h1><p>Supplier Alpha offers SKU-CHG-100 under HS 850440. "
+        "Export evidence remains attached to this product heading.</p></body></html>",
+        encoding="utf-8",
+    )
+    source = SourceInput(
+        path=path, file_type=FileType.HTML, source_type=SourceType.B2B, source_id="b2b-html",
+        title="Catalog", language="en", fetched_at=datetime(2026, 8, 30, tzinfo=timezone.utc),
+        is_synthetic=True, source_url="https://supplier.example/catalog",
+    )
+    document = DocumentRouter().load(source)[0]
+    chunks = ChunkRouter(max_tokens=72, overlap_tokens=8, token_counter=len).chunk(document)
+    assert len(chunks) > 1
+    assert all(chunk.content.startswith("Industrial Chargers\n") for chunk in chunks)
+    assert all(len(chunk.content) <= 72 for chunk in chunks)
+    assert all(chunk.metadata.source_locator.section == "Industrial Chargers" for chunk in chunks)
+    assert any("SKU-CHG-100" in chunk.content and "HS 850440" in chunk.content for chunk in chunks)
+
+
+def test_chinese_punctuation_provides_natural_deterministic_overlap_boundaries():
+    from trade_agent.data.chunkers import ChunkRouter
+
+    text = "企业提供工业充电器。产品通过出口认证！支持稳定供货；适用海外市场。联系团队获取报价。"
+    value = doc(SourceType.SOCIAL, text, post_id="POST-CN-1", row=1)
+    router = ChunkRouter(max_tokens=22, overlap_tokens=8, token_counter=len)
+    first = router.chunk(value)
+    second = router.chunk(value)
+    assert len(first) > 1
+    assert all(len(chunk.content) <= 22 for chunk in first)
+    assert [(chunk.content, chunk.metadata.chunk_id) for chunk in first] == [
+        (chunk.content, chunk.metadata.chunk_id) for chunk in second
+    ]
+    overlaps = []
+    for previous, current in zip(first, first[1:]):
+        sizes = [size for size in range(1, min(len(previous.content), len(current.content)) + 1)
+                 if previous.content[-size:] == current.content[:size]]
+        overlaps.append(max(sizes, default=0))
+    assert any(size > 0 for size in overlaps)
+    assert all(size <= 8 for size in overlaps)
+
+
+def test_unpunctuated_chinese_uses_safe_codepoint_fallback_with_overlap():
+    from trade_agent.data.chunkers import ChunkRouter
+
+    text = "企业持续提供工业充电设备并为海外客户提供交付支持和售后服务" * 3
+    value = doc(SourceType.SOCIAL, text, post_id="POST-CN-2", row=1)
+    router = ChunkRouter(max_tokens=20, overlap_tokens=5, token_counter=len)
+    chunks = router.chunk(value)
+    assert len(chunks) > 1
+    assert all(len(chunk.content) <= 20 for chunk in chunks)
+    assert any(previous.content[-5:] == current.content[:5] for previous, current in zip(chunks, chunks[1:]))
+    assert [chunk.content for chunk in chunks] == [chunk.content for chunk in router.chunk(value)]
+
+
+def test_cjk_codepoint_fallback_never_splits_embedded_trade_identifier():
+    from trade_agent.data.chunkers import ChunkRouter
+
+    identifier = "beta_super-long-SKU-12345"
+    text = "企业提供稳定交付支持" + identifier + "并持续提供售后服务和海外响应"
+    chunks = ChunkRouter(max_tokens=32, overlap_tokens=6, token_counter=len).chunk(
+        doc(SourceType.SOCIAL, text, post_id="POST-CN-ID", row=1)
+    )
+    assert any(identifier in chunk.content for chunk in chunks)
+    assert all(
+        identifier in chunk.content or "beta_" not in chunk.content and "SKU-12345" not in chunk.content
+        for chunk in chunks
+    )
 
 
 def test_website_heading_is_inside_budget_and_full_locator_is_preserved():

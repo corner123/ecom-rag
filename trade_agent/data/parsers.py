@@ -39,38 +39,60 @@ def parse_html_sections(text: str, title: str, limit: int = 10_000) -> list[tupl
     groups: OrderedDict[str, list[str]] = OrderedDict()
     preamble: list[str] = []
     evidence_tags = {"p", "li", "td", "th", "aside", "blockquote", "pre"}
-    direct_text_parents = {"body", "main", "section", "article", "div", "header", "footer"}
+    container_tags = {
+        "html", "body", "main", "section", "article", "div", "header", "footer",
+        "nav", "ul", "ol", "dl", "table", "thead", "tbody", "tfoot", "tr",
+    }
+    heading_tags = {f"h{level}" for level in range(1, 7)}
 
-    for node in soup.descendants:
-        if isinstance(node, Tag):
-            name = node.name.lower() if node.name else ""
-            if re.fullmatch(r"h[1-6]", name):
-                heading = _plain_text("".join(node.strings))
-                if heading:
-                    level = int(name[1])
-                    stack = stack[: level - 1] + [heading]
-                continue
-            if name not in evidence_tags or node.find_parent(evidence_tags) is not None:
-                continue
-            value = _plain_text("".join(node.strings))
-            if not value:
-                continue
-        elif isinstance(node, NavigableString):
-            parent = node.parent
-            if parent is None or (parent.name or "").lower() not in direct_text_parents:
-                continue
-            if parent.find_parent(evidence_tags | {f"h{i}" for i in range(1, 7)}) is not None:
-                continue
-            value = _plain_text(node)
-            if not value:
-                continue
-        else:
-            continue
-
+    def emit(value: str) -> None:
+        value = _plain_text(value)
+        if not value:
+            return
         if stack:
             _append_group(groups, " > ".join(stack), value, limit)
         else:
             preamble.append(value)
+
+    def visit(parent: Tag | BeautifulSoup) -> None:
+        """Walk each block once and coalesce adjacent text/inline wrappers in DOM order."""
+        inline_run: list[str] = []
+
+        def flush_inline() -> None:
+            if inline_run:
+                emit("".join(inline_run))
+                inline_run.clear()
+
+        for child in parent.children:
+            if type(child) is NavigableString:
+                inline_run.append(str(child))
+                continue
+            if not isinstance(child, Tag):
+                continue
+            name = child.name.lower() if child.name else ""
+            if name in {"script", "style", "noscript", "template", "head"}:
+                continue
+            if name in heading_tags:
+                flush_inline()
+                heading = _plain_text("".join(child.strings))
+                if heading:
+                    level = int(name[1])
+                    stack[:] = stack[: level - 1] + [heading]
+                continue
+            if name in evidence_tags:
+                flush_inline()
+                emit("".join(child.strings))
+                continue
+            if name in container_tags or child.find(heading_tags | evidence_tags | container_tags):
+                flush_inline()
+                visit(child)
+                continue
+            # Inline wrappers belong to the surrounding flow. Consuming all of
+            # their leaf strings here prevents both loss and descendant replay.
+            inline_run.append("".join(child.strings))
+        flush_inline()
+
+    visit(soup)
 
     if groups and preamble:
         first = next(iter(groups))
@@ -102,7 +124,20 @@ def parse_markdown_sections(text: str, title: str, limit: int = 10_000) -> list[
         else:
             preamble.append(value)
 
+    fence: tuple[str, int] | None = None
     for line in text.splitlines():
+        fence_match = re.match(r"^[ \t]{0,3}(`{3,}|~{3,})(.*)$", line)
+        if fence is not None:
+            buffer.append(line)
+            marker, minimum = fence
+            if re.fullmatch(rf"[ \t]{{0,3}}{re.escape(marker)}{{{minimum},}}[ \t]*", line):
+                fence = None
+            continue
+        if fence_match:
+            marker = fence_match.group(1)
+            fence = (marker[0], len(marker))
+            buffer.append(line)
+            continue
         match = re.match(r"^(#{1,6})[ \t]+(.+?)\s*#*\s*$", line)
         if match:
             flush()

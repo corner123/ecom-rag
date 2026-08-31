@@ -115,6 +115,43 @@ def test_markdown_golden_hierarchy_matches_html_without_file_title_prefix(tmp_pa
     assert "- List item" in docs[1].content and "| Column | Value |" in docs[1].content
 
 
+@pytest.mark.parametrize(
+    ("markup", "expected"),
+    [
+        ("<section>We sell <strong>industrial chargers</strong> globally.</section>", "We sell industrial chargers globally."),
+        ("<div><span>Nested evidence only</span></div>", "Nested evidence only"),
+    ],
+)
+def test_html_leaf_inline_text_is_preserved_exactly_once(tmp_path, markup, expected):
+    from trade_agent.data.router import DocumentRouter
+
+    path = tmp_path / "inline.html"
+    path.write_text(f"<html><body><h1>Products</h1>{markup}</body></html>", encoding="utf-8")
+    inp = source("website/section-01.html", FileType.HTML, SourceType.OFFICIAL_WEBSITE).model_copy(
+        update={"path": path}
+    )
+    docs = DocumentRouter().load(inp)
+    assert [(item.title, item.content) for item in docs] == [("Products", expected)]
+    assert docs[0].content.count(expected) == 1
+
+
+def test_markdown_fenced_code_hash_is_not_a_heading(tmp_path):
+    from trade_agent.data.router import DocumentRouter
+
+    path = tmp_path / "fenced.md"
+    path.write_text(
+        "# Root\n\nBefore.\n\n```markdown\n# not a heading\n## neither is this\n```\n\nAfter.\n\n## Child\nEvidence.\n",
+        encoding="utf-8",
+    )
+    inp = source("website/methodology.md", FileType.MARKDOWN, SourceType.OFFICIAL_WEBSITE).model_copy(
+        update={"path": path}
+    )
+    docs = DocumentRouter().load(inp)
+    assert [item.title for item in docs] == ["Root", "Root > Child"]
+    assert "# not a heading" in docs[0].content
+    assert "## neither is this" in docs[0].content
+
+
 def test_mismatched_or_malformed_input_quarantines_instead_of_text_fallback(tmp_path):
     from trade_agent.data.router import DocumentRouter
 
@@ -342,6 +379,224 @@ def test_item_and_feed_urls_and_all_provenance_survive_documents_and_chunks():
     assert str(chunk.metadata.source_url) == str(mirror.source_url)
     assert str(chunk.metadata.canonical_url) == str(mirror.canonical_url)
     assert chunk.metadata.dedupe_cluster_id == "NEWS-CLUSTER-001"
+
+
+def test_untrusted_item_metadata_cannot_override_catalog_provenance_or_trust(tmp_path):
+    from trade_agent.data.chunkers import ChunkRouter
+    from trade_agent.data.router import DocumentRouter
+
+    trusted_item_url = "https://marketplace.example/products/P-1"
+    item = {
+        "product_id": "P-1",
+        "product_name": "Industrial charger",
+        "supplier": "Trusted Supplier",
+        "sku": "CHG-100",
+        "hs_code": "850440",
+        "url": trusted_item_url,
+        "reference_claim_id": "CLAIM-P-1",
+        "description": "Export-ready industrial charger.",
+        "feed_source_url": "https://evil.example/feed",
+        "feed_canonical_url": "https://evil.example/canonical-feed",
+        "item_source_url": "https://evil.example/item",
+        "item_canonical_url": "https://evil.example/canonical-item",
+        "source_weight": 1,
+        "source_weight_version": "evil-v1",
+        "fact_type": "risk_event",
+        "license_scope": "evil-license",
+        "publish_time": "1999-01-01T00:00:00Z",
+        "published_at": "1999-01-01T00:00:00Z",
+        "valid_from": "1999-01-01T00:00:00Z",
+        "valid_to": "2099-01-01T00:00:00Z",
+        "country_code": "US",
+    }
+    path = tmp_path / "products.json"
+    path.write_text(json.dumps({"products": [item]}), encoding="utf-8")
+    inp = source(
+        "b2b/products.json",
+        FileType.JSON,
+        SourceType.B2B,
+        source_url="https://trusted.example/feed",
+        canonical_url="https://trusted.example/feed-canonical",
+        publish_time=NOW,
+        valid_from=NOW,
+        valid_to=NOW,
+        license_scope="catalog-license",
+        manifest_attributes={
+            "source_weight": 0.25,
+            "source_weight_version": "catalog-v1",
+            "fact_type": "product_offering",
+            "country_code": "CN",
+        },
+    ).model_copy(update={"path": path})
+
+    document = DocumentRouter().load(inp)[0]
+    chunk = ChunkRouter().chunk(document)[0]
+    assert str(document.source_url) == trusted_item_url
+    assert str(document.canonical_url) == trusted_item_url
+    assert document.attributes["feed_source_url"] == "https://trusted.example/feed"
+    assert document.attributes["feed_canonical_url"] == "https://trusted.example/feed-canonical"
+    assert document.attributes["item_source_url"] == trusted_item_url
+    assert document.attributes["item_canonical_url"] == trusted_item_url
+    assert document.attributes["source_weight"] == 0.25
+    assert document.attributes["source_weight_version"] == "catalog-v1"
+    assert document.attributes["fact_type"] == "product_offering"
+    assert document.attributes["license_scope"] == "catalog-license"
+    assert document.attributes["publish_time"] == NOW.isoformat()
+    assert document.attributes["country_code"] == "CN"
+    assert document.attributes["source_payload"]["feed_source_url"] == "https://evil.example/feed"
+    assert document.attributes["source_payload"]["country_code"] == "US"
+    assert chunk.metadata.source_weight == 0.25
+    assert chunk.metadata.fact_type.value == "product_offering"
+    assert chunk.metadata.license_scope == "catalog-license"
+    assert chunk.metadata.publish_time == NOW
+    assert str(chunk.metadata.source_url) == trusted_item_url
+    assert chunk.metadata.source_locator.raw["feed_source_url"] == "https://trusted.example/feed"
+
+
+@pytest.mark.parametrize("kind", ["news", "social", "profile"])
+def test_reserved_metadata_ownership_is_uniform_across_structured_routes(tmp_path, kind):
+    from trade_agent.data.chunkers import ChunkRouter
+    from trade_agent.data.router import DocumentRouter
+
+    if kind == "news":
+        item = json.loads((ROOT / "news/stories.json").read_text(encoding="utf-8"))["stories"][0]
+        payload = {"stories": [item]}
+        file_type, source_type, fixture, suffix = FileType.JSON, SourceType.INDUSTRY_NEWS, "news/stories.json", ".json"
+    elif kind == "social":
+        item = json.loads((ROOT / "social/posts.jsonl").read_text(encoding="utf-8").splitlines()[0])
+        payload = item
+        file_type, source_type, fixture, suffix = FileType.JSONL, SourceType.SOCIAL, "social/posts.jsonl", ".jsonl"
+    else:
+        item = json.loads((ROOT / "customs_profiles/001-010121-2025-03.json").read_text(encoding="utf-8"))
+        payload = item
+        file_type, source_type = FileType.GENERATED_PROFILE, SourceType.CUSTOMS_PROFILE
+        fixture, suffix = "customs_profiles/001-010121-2025-03.json", ".json"
+    item.update({
+        "feed_source_url": "https://evil.example/feed",
+        "item_source_url": "https://evil.example/item",
+        "item_canonical_url": "https://evil.example/canonical",
+        "source_weight": 1,
+        "fact_type": "risk_event",
+        "license_scope": "evil-license",
+        "publish_time": "1999-01-01T00:00:00Z",
+        "valid_from": "1999-01-01T00:00:00Z",
+        "ocr_confidence": 1,
+    })
+    path = tmp_path / f"record{suffix}"
+    path.write_text(json.dumps(payload) + ("\n" if file_type is FileType.JSONL else ""), encoding="utf-8")
+    inp = source(
+        fixture, file_type, source_type,
+        source_url="https://trusted.example/feed", publish_time=NOW, valid_from=NOW,
+        license_scope="catalog-license",
+        manifest_attributes={"source_weight": 0.4, "fact_type": "market_signal"},
+    ).model_copy(update={"path": path})
+    document = DocumentRouter().load(inp)[0]
+    chunk = ChunkRouter().chunk(document)[0]
+    assert document.attributes["feed_source_url"] == "https://trusted.example/feed"
+    assert document.attributes["source_weight"] == 0.4
+    assert document.attributes["fact_type"] == "market_signal"
+    assert document.attributes["license_scope"] == "catalog-license"
+    assert document.attributes["publish_time"] == NOW.isoformat()
+    assert document.attributes["source_payload"]["item_source_url"] == "https://evil.example/item"
+    assert document.attributes["source_payload"]["ocr_confidence"] == 1
+    assert chunk.metadata.source_weight == 0.4
+    assert chunk.metadata.fact_type.value == "market_signal"
+    assert chunk.metadata.publish_time == NOW
+    assert chunk.metadata.license_scope == "catalog-license"
+
+
+def test_b2b_evidence_text_includes_canonical_identity_fields_without_duplicates(tmp_path):
+    from trade_agent.data.router import DocumentRouter
+
+    item = {
+        "product_id": "P-2",
+        "product_name": "Marine Pump",
+        "category": "Pumps",
+        "supplier": "Harbor Works",
+        "sku": "PUMP-200",
+        "hs_code": "841370",
+        "url": "https://marketplace.example/products/P-2",
+        "reference_claim_id": "CLAIM-P-2",
+        "description": "Marine Pump PUMP-200 is export ready.",
+    }
+    path = tmp_path / "products.json"
+    path.write_text(json.dumps({"products": [item]}), encoding="utf-8")
+    inp = source("b2b/products.json", FileType.JSON, SourceType.B2B).model_copy(update={"path": path})
+    document = DocumentRouter().load(inp)[0]
+    assert "Supplier: Harbor Works" in document.content
+    assert "Category: Pumps" in document.content
+    assert "HS: 841370" in document.content
+    assert document.content.count("Marine Pump") == 1
+    assert document.content.count("PUMP-200") == 1
+
+
+def test_b2b_short_identifiers_are_not_suppressed_by_narrative_substrings(tmp_path):
+    from trade_agent.data.router import DocumentRouter
+
+    item = {
+        "product_id": "P-SHORT", "product_name": "Pump", "category": "Tools", "supplier": "US",
+        "sku": "AI", "hs_code": "841370", "url": "https://marketplace.example/products/P-SHORT",
+        "reference_claim_id": "CLAIM-P-SHORT",
+        "description": "Business details for global buyers mention Pump.",
+    }
+    path = tmp_path / "products.json"
+    path.write_text(json.dumps({"products": [item]}), encoding="utf-8")
+    inp = source("b2b/products.json", FileType.JSON, SourceType.B2B).model_copy(update={"path": path})
+    content = DocumentRouter().load(inp)[0].content
+    assert "Supplier: US" in content
+    assert "SKU: AI" in content
+    assert content.count("Pump") == 1
+
+
+def test_b2b_without_narrative_preserves_full_canonical_json_fallback(tmp_path):
+    from trade_agent.data.router import DocumentRouter
+
+    item = {
+        "product_id": "P-3", "product_name": "Pump", "supplier": "Harbor Works",
+        "sku": "PUMP-300", "hs_code": "841370", "url": "https://marketplace.example/products/P-3",
+        "reference_claim_id": "CLAIM-P-3", "extra_evidence": {"minimum_order": 5},
+    }
+    path = tmp_path / "products.json"
+    path.write_text(json.dumps({"products": [item]}), encoding="utf-8")
+    inp = source("b2b/products.json", FileType.JSON, SourceType.B2B).model_copy(update={"path": path})
+    document = DocumentRouter().load(inp)[0]
+    assert document.content == json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+@pytest.mark.parametrize("kind", ["b2b", "news", "social"])
+def test_duplicate_natural_ids_fail_closed_for_multi_record_routes(tmp_path, kind):
+    from trade_agent.data.router import DocumentRouter
+
+    if kind == "b2b":
+        record = {
+            "product_id": "P-DUP", "product_name": "Pump", "supplier": "Supplier", "sku": "SKU-DUP",
+            "hs_code": "841370", "url": "https://marketplace.example/p", "reference_claim_id": "CLAIM-DUP",
+        }
+        body = json.dumps({"products": [record, {**record, "product_name": "Other"}]})
+        file_type, source_type, fixture = FileType.JSON, SourceType.B2B, "b2b/products.json"
+        suffix = ".json"
+    elif kind == "news":
+        record = {
+            "id": "NEWS-DUP", "headline": "Headline", "body": "Evidence", "published_at": NOW.isoformat(),
+            "url": "https://newsroom.example/dup", "reference_claim_id": "CLAIM-DUP",
+        }
+        body = json.dumps({"stories": [record, {**record, "headline": "Other"}]})
+        file_type, source_type, fixture = FileType.JSON, SourceType.INDUSTRY_NEWS, "news/stories.json"
+        suffix = ".json"
+    else:
+        record = {
+            "post_id": "POST-DUP", "text": "Evidence", "company": "Supplier", "published_at": NOW.isoformat(),
+            "url": "https://social.example/dup", "reference_claim_id": "CLAIM-DUP",
+        }
+        body = "\n".join((json.dumps(record), json.dumps({**record, "text": "Other"})))
+        file_type, source_type, fixture = FileType.JSONL, SourceType.SOCIAL, "social/posts.jsonl"
+        suffix = ".jsonl"
+    path = tmp_path / f"duplicate{suffix}"
+    path.write_text(body, encoding="utf-8")
+    inp = source(fixture, file_type, source_type).model_copy(update={"path": path})
+    router = DocumentRouter()
+    assert router.load(inp) == []
+    assert [item.error_code for item in router.quarantines] == ["INVALID_DOCUMENT_SHAPE"]
 
 
 def test_source_truth_fields_and_profile_grain_reach_strict_chunk_metadata():

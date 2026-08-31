@@ -92,14 +92,64 @@ fallthrough/malformed/status, corpus-wide, and repeat-determinism probe: `12 pas
 - Two complete routing/chunking runs produced identical document JSON, chunk IDs, chunk
   hashes/content, and quarantine records.
 
-## Final verification evidence
+## Controller exploit repair follow-up
 
-Host Python `3.12.14`:
+The controller's post-repair probes exposed seven related boundary defects. Each was
+reproduced directly before implementation:
+
+- A B2B row containing `feed_source_url=https://evil.example`,
+  `item_source_url=https://evil.example`, `source_weight=1`, and an invalid injected
+  `fact_type` made the document cite the evil URL while its locator still named the
+  trusted feed; chunk validation then failed on the attacker-selected fact type.
+- Two B2B rows with the same `product_id` returned two documents with the same stable
+  `document_id`; two social rows with the same `post_id` did the same. News alone already
+  rejected duplicate story IDs.
+- Punctuated and unpunctuated Chinese evidence raised `atomic token cannot fit within
+  chunk budget`; there was no legal CJK boundary or codepoint fallback.
+- B2B rows with a description normalized to the description alone, omitting supplier,
+  category, SKU, and HS evidence. B2B HTML chunks omitted their section heading.
+- `<section>We sell <strong>industrial chargers</strong> globally.</section>` produced
+  `We sell\nglobally.` and dropped the inline evidence. A nested-only
+  `<div><span>Nested evidence only</span></div>` quarantined as having no usable text.
+- A fenced Markdown line `# not a heading` created fake section paths instead of staying
+  inside the root section.
+- A unique-token counter where both the prefix and the complete prefix-plus-body equaled
+  the maximum raised `prefix consumes chunk budget` without evaluating the legal full
+  candidate.
+
+The test-first baseline for these probes was exactly `11 failed, 52 passed`. The repair
+establishes explicit metadata ownership: the raw structured item remains inspectable as
+`source_payload`, but catalog/system provenance, weight/version, fact type, time range,
+license, aggregation, and confidence fields own their top-level values. The same contract
+is tested across B2B, news, social, and generated profiles and through strict chunk
+metadata. B2B/news/social batches prevalidate every row and natural ID before constructing
+documents, so duplicates fail closed with `INVALID_DOCUMENT_SHAPE`.
+
+HTML now consumes each block or coalesced inline flow exactly once in DOM order, and
+Markdown tracks backtick/tilde fences. B2B narrative text composes supplier, product,
+category, SKU, and HS fields, suppressing a label only when the exact value appears as a
+standalone narrative value; `US` and `AI` regressions prove that incidental substrings in
+`business`/`details` do not erase short identifiers. Rows without narrative retain the
+full canonical JSON fallback. B2B HTML injects the section heading inside every chunk
+budget.
+
+CJK sentence/safe punctuation is recognized, and unpunctuated CJK prose uses a bounded
+codepoint fallback plus same-unit overlap. Protected trade identifiers remain atomic in
+both the cut and overlap paths. Prefix-only equality no longer rejects a candidate; every
+decision evaluates the complete prefix-plus-slice counter result, while a genuinely new
+over-budget token still fails explicitly.
+
+## Final verification evidence (2026-08-31)
+
+Fresh verification used the repository's existing `uv` virtual environment on host
+Python `3.12.14`:
 
 ```text
-focused Task 6 + corpus suite: 69 passed
-all unit tests: 91 passed
-named round-2 exploit suite: 12 passed
+controller/router/chunker regressions: 70 passed
+handoff-only named contract slice: 28 passed, 42 deselected
+focused Task 6 + corpus + PDF suite: 88 passed
+all unit tests: 110 passed (5 third-party SWIG deprecation warnings)
+corpus probe: 74 manifest records -> 116 documents -> 120 chunks; 1 explicit scanned-PDF quarantine; repeat deterministic
 compileall: passed
 uv lock --check: passed (49 packages resolved)
 git diff --check: passed
@@ -107,22 +157,17 @@ high-confidence secret scan: passed
 absolute /Users and /home path scan: passed
 ```
 
-Rebuilt API image, Python `3.12.14`:
+Docker Compose rendered successfully with four new process-local secrets and rebuilt the
+current working-tree API image. Its combined unit, corpus-routing, and PDF suite returned
+`127 passed, 1 skipped`; the skip is the expected macOS `/var` system-alias test on Linux.
 
-```text
-focused Task 6 + corpus suite: 69 passed
-all unit tests: 90 passed, 1 skipped
-```
-
-The skip is the existing macOS `/var` system-alias test and is expected on Linux.
-
-Real Task 3 MySQL lifecycle used randomly generated process-local
+A fresh real-MySQL lifecycle used randomly generated process-local
 `MYSQL__ROOT_PASSWORD`, `MYSQL__MIGRATION_PASSWORD`, `MYSQL__QUERY_PASSWORD`, and
-`MINIO_ROOT_PASSWORD`. No `.env` or committed default was used. Cached API/MySQL images
-were rebuilt through the explicit Docker Desktop Compose plugin/socket; MySQL became
-healthy; migration and seed each ran twice. Only the one-shot migrate/seed/test containers
-received the migration secret. The live DDL/ORM/index/FK/unique-key/query-grant/rollback
-suite returned `12 passed`, then Compose teardown completed.
+`MINIO_ROOT_PASSWORD`; no `.env` or committed default was used. MySQL became healthy;
+migration and seed each succeeded twice in separate one-shot containers; and the combined
+settings, seed, and live DDL/ORM/index/FK/unique-key/query-grant/rollback suite returned
+`15 passed`. The dedicated Compose project was then removed with volumes. A post-teardown
+audit found no project container, network, or volume and no listener on TCP 3306.
 
 ## MinerU capability statement
 
