@@ -8,8 +8,9 @@ from typing import Any
 
 from collections import Counter
 import re
+from pathlib import PurePosixPath
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, field_validator, model_validator
 
 from trade_agent.data.quarantine import QuarantineRecord
 from trade_agent.schemas.source import ChunkRecord, DocumentRecord
@@ -40,26 +41,52 @@ class SourceBuildRecord(_FrozenModel):
     parser_backend: StrictStr | None = None
     degraded: StrictBool = False
 
-    @field_validator("source_id", "path", "file_type", "status")
+    @field_validator("source_id", "path", "file_type", "status", "parser_backend")
     @classmethod
     def nonblank(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("must not be blank")
         return value
 
+    @field_validator("actual_content_hash", "manifest_content_hash")
+    @classmethod
+    def hashes(cls, value: str | None) -> str | None:
+        if value is not None and not re.fullmatch(r"[0-9a-f]{64}", value):
+            raise ValueError("source hashes must be lowercase SHA-256 digests")
+        return value
+
+    @model_validator(mode="after")
+    def source_consistency(self) -> "SourceBuildRecord":
+        if self.status not in {"parsed", "quarantined"}:
+            raise ValueError("source status is invalid")
+        if self.path.startswith("/") or ".." in PurePosixPath(self.path).parts:
+            raise ValueError("source path must be safe and relative")
+        if self.status == "parsed" and (self.actual_content_hash != self.manifest_content_hash or not self.parser_backend):
+            raise ValueError("parsed source requires matching hashes and parser backend")
+        return self
+
 
 class CountEntry(_FrozenModel):
     name: StrictStr
-    count: int = Field(ge=0)
+    count: StrictInt = Field(ge=0)
 
 
 class ParserBackends(_FrozenModel):
     document_router_version: StrictStr
     chunk_router_version: StrictStr
-    max_tokens: int = Field(gt=0)
-    overlap_tokens: int = Field(ge=0)
+    max_tokens: StrictInt = Field(gt=0)
+    overlap_tokens: StrictInt = Field(ge=0)
     mineru_statuses: tuple[StrictStr, ...]
     degraded_components: tuple[StrictStr, ...]
+
+    @model_validator(mode="after")
+    def ordered_values(self) -> "ParserBackends":
+        if self.overlap_tokens >= self.max_tokens:
+            raise ValueError("overlap must be below max")
+        for values in (self.mineru_statuses, self.degraded_components):
+            if tuple(sorted(values)) != values or len(set(values)) != len(values) or any(not value.strip() for value in values):
+                raise ValueError("backend tuples must be nonblank, sorted, and unique")
+        return self
 
 
 class DocumentSnapshot(_FrozenModel):
@@ -148,6 +175,8 @@ class BuildManifest(_FrozenModel):
             item["metadata"].pop("ingested_at", None)
         return {
             "config_hash": self.config_hash,
+            "parser_backends": self.parser_backends.model_dump(mode="json"),
+            "metadata_schema_version": self.metadata_schema_version,
             "sources": [item.model_dump(mode="json") for item in self.sources],
             "documents": documents,
             "chunks": chunks,
@@ -156,8 +185,10 @@ class BuildManifest(_FrozenModel):
 
     @model_validator(mode="after")
     def verify_integrity(self) -> "BuildManifest":
-        if not re.fullmatch(r"[0-9a-f]{64}", self.config_hash):
-            raise ValueError("config_hash must be a SHA-256 digest")
+        if self.metadata_schema_version != METADATA_SCHEMA_VERSION:
+            raise ValueError("metadata schema version is unsupported")
+        if not re.fullmatch(r"[0-9a-f]{64}", self.config_hash) or not re.fullmatch(r"[0-9a-f]{64}", self.fingerprint):
+            raise ValueError("hashes must be lowercase SHA-256 digests")
         if len({item.source_id for item in self.sources}) != len(self.sources):
             raise ValueError("source IDs must be unique")
         if len(set(self.document_ids)) != len(self.documents) or len(set(self.chunk_ids)) != len(self.chunks):
@@ -169,10 +200,10 @@ class BuildManifest(_FrozenModel):
         complete = bool(self.chunks) and all(item.restore().metadata.source_locator.raw is not None for item in self.chunks)
         if self.metadata_complete != complete:
             raise ValueError("metadata_complete does not match chunks")
-        expected = canonical_json(self._fingerprint_value())
+        expected = canonical_hash(self._fingerprint_value())
         if self.fingerprint != expected:
             raise ValueError("fingerprint does not match manifest payload")
-        expected_id = "build_" + canonical_hash(self._fingerprint_value())[:32]
+        expected_id = "build_" + expected[:32]
         if self.build_id != expected_id:
             raise ValueError("build_id does not match manifest fingerprint")
         return self

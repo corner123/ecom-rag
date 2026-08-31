@@ -104,3 +104,23 @@ $ docker compose run --rm --no-deps api pytest tests/unit/test_manifest.py tests
 $ uv run pytest tests/unit tests/integration/test_ingestion_pipeline.py -q
 158 passed, 5 third-party SWIG deprecation warnings
 ```
+
+## Bounded hardening round
+
+The `fingerprint` field is now only a lowercase 64-hex SHA-256 digest of the
+semantic payload, rather than a second copy of the manifest. It includes
+backend/version/degradation state and metadata schema version, and validation
+recomputes it before deriving the build ID. Strict numeric/count, source-state,
+hash, tuple ordering, and schema-version checks reject coercion and tampering.
+
+RED controller probes changed parser backend/schema/count values and were
+accepted by `1a61a1e`. GREEN verification:
+
+```text
+$ uv run pytest tests/unit/test_manifest.py tests/integration/test_ingestion_pipeline.py -q
+10 passed in 0.37s
+$ docker compose run --rm --no-deps api pytest tests/unit/test_manifest.py tests/integration/test_ingestion_pipeline.py -q
+10 passed in 0.79s
+$ uv run pytest tests/unit -q
+150 passed, 5 third-party SWIG deprecation warnings
+```

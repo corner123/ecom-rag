@@ -6,6 +6,7 @@ import json
 import os
 import tempfile
 import hashlib
+import re
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
@@ -230,6 +231,9 @@ class IngestionPipeline:
             source_id = stable_id("source", candidate.relative_path)
             file_type = self._file_type(candidate)
             record = records.get(candidate.relative_path)
+            declared_hash = record.get("content_hash") if record else None
+            if not isinstance(declared_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", declared_hash):
+                declared_hash = None
             path = self._safe_file(catalog.corpus_root, candidate.relative_path) if candidate.issue is None else None
             issue = candidate.issue or ("unsupported_file_type" if file_type is None else None) or ("unsafe_source_path" if path is None else None) or ("manifest_record_missing" if record is None else None)
             actual_hash = None
@@ -242,10 +246,11 @@ class IngestionPipeline:
                 except OSError as exc:
                     issue = "source_unreadable"
                     quarantined.append(self._q(issue, candidate.relative_path, exc))
-                if issue is None and actual_hash != record.get("content_hash"): issue = "manifest_hash_mismatch"
+                if issue is None and actual_hash != declared_hash:
+                    issue = "manifest_hash_mismatch"
             if issue:
                 if not quarantined or quarantined[-1].source_path != candidate.relative_path: quarantined.append(self._q(issue, candidate.relative_path, issue))
-                sources.append(SourceBuildRecord(source_id=source_id, path=candidate.relative_path, source_type=candidate.rule.source_type.value, file_type=file_type.value if file_type else "unsupported", actual_content_hash=actual_hash, manifest_content_hash=record.get("content_hash") if record else None, status="quarantined"))
+                sources.append(SourceBuildRecord(source_id=source_id, path=candidate.relative_path, source_type=candidate.rule.source_type.value, file_type=file_type.value if file_type else "unsupported", actual_content_hash=actual_hash, manifest_content_hash=declared_hash, status="quarantined"))
                 continue
             assert path is not None and record is not None and file_type is not None and actual_hash is not None
             try:
@@ -265,7 +270,7 @@ class IngestionPipeline:
                 except Exception as exc:
                     chunk_failed = True
                     quarantined.append(self._q("chunk_failed", candidate.relative_path, exc, "chunker"))
-            parser = next((str(item.attributes["parser"]) for item in routed if item.attributes.get("parser")), None)
+            parser = next((str(item.attributes["parser"]) for item in routed if item.attributes.get("parser")), "document_router")
             sources.append(SourceBuildRecord(source_id=source_id, path=candidate.relative_path, source_type=candidate.rule.source_type.value, file_type=file_type.value, actual_content_hash=actual_hash, manifest_content_hash=record.get("content_hash"), status="quarantined" if own_q or chunk_failed else "parsed", parser_backend=parser, degraded=any(item.attributes.get("degraded_components") for item in routed)))
         sources.sort(key=lambda item: item.path)
         documents.sort(key=lambda item: item.document_id)
@@ -282,6 +287,9 @@ class IngestionPipeline:
         for item in fingerprint_chunks:
             item.get("metadata", {}).pop("ingested_at", None)
         fingerprint = {"config_hash": config_hash, "sources": [item.model_dump(mode="json") for item in sources], "documents": fingerprint_documents, "chunks": fingerprint_chunks, "quarantined": [item.model_dump(mode="json") for item in quarantined]}
-        manifest = BuildManifest(build_id="build_" + canonical_hash(fingerprint)[:32], config_hash=config_hash, sources=tuple(sources), documents=document_snapshots, chunks=chunk_snapshots, quarantined=tuple(quarantined), counts_by_source_type=tuple(CountEntry(name=name, count=count) for name, count in sorted(Counter(item.source_type or "unknown" for item in sources).items())), counts_by_file_type=tuple(CountEntry(name=name, count=count) for name, count in sorted(Counter(item.file_type for item in sources).items())), parser_backends=backends, metadata_complete=bool(chunks) and all(item.metadata.source_locator.raw is not None for item in chunks), fingerprint=canonical_json(fingerprint))
+        fingerprint["parser_backends"] = backends.model_dump(mode="json")
+        fingerprint["metadata_schema_version"] = METADATA_SCHEMA_VERSION
+        fingerprint_hash = canonical_hash(fingerprint)
+        manifest = BuildManifest(build_id="build_" + fingerprint_hash[:32], config_hash=config_hash, sources=tuple(sources), documents=document_snapshots, chunks=chunk_snapshots, quarantined=tuple(quarantined), counts_by_source_type=tuple(CountEntry(name=name, count=count) for name, count in sorted(Counter(item.source_type or "unknown" for item in sources).items())), counts_by_file_type=tuple(CountEntry(name=name, count=count) for name, count in sorted(Counter(item.file_type for item in sources).items())), parser_backends=backends, metadata_complete=bool(chunks) and all(item.metadata.source_locator.raw is not None for item in chunks), fingerprint=fingerprint_hash)
         self._write_atomic(output, manifest)
         return manifest

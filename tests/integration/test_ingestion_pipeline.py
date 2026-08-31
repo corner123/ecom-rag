@@ -121,6 +121,19 @@ def test_persisted_manifest_rejects_snapshot_count_and_build_id_tampering(tmp_pa
     payload["build_id"] = "build_" + "f" * 32
     with pytest.raises(ValidationError):
         BuildManifest.model_validate(payload)
+    payload = result.model_dump(mode="json")
+    payload["parser_backends"]["document_router_version"] = "tampered"
+    with pytest.raises(ValidationError):
+        BuildManifest.model_validate(payload)
+    payload = result.model_dump(mode="json")
+    payload["metadata_schema_version"] = "tampered"
+    with pytest.raises(ValidationError):
+        BuildManifest.model_validate(payload)
+    payload = result.model_dump(mode="json")
+    payload["counts_by_file_type"][0]["count"] = "1"
+    with pytest.raises(ValidationError):
+        BuildManifest.model_validate(payload)
+    assert len(result.fingerprint) == 64
 
 
 def test_oversized_source_is_quarantined_without_aborting_batch(tmp_path: Path) -> None:
