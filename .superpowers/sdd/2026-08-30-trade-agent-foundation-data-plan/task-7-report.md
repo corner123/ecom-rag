@@ -147,3 +147,14 @@ Manifest model copies now revalidate, duplicate catalog paths collapse to one
 fail-closed quarantine outcome, and restored documents/chunks are checked
 against source IDs and types. Quarantine paths/diagnostics are schema-safe;
 router reporting keeps a safe relative locator.
+
+## Review-fix round 2 P1
+
+Frozen record source/file types are checked before routing, chunk snapshots
+inherit comparable document metadata, quarantine copies revalidate and require
+canonical sanitizer output, and backend/schema invariants are strict.
+
+```text
+$ uv run pytest tests/unit/test_manifest.py tests/integration/test_ingestion_pipeline.py tests/unit/test_data_router.py -q
+94 passed, 5 third-party SWIG deprecation warnings
+```

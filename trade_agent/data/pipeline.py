@@ -244,6 +244,13 @@ class IngestionPipeline:
             path = self._safe_file(catalog.corpus_root, candidate.relative_path) if candidate.issue is None else None
             issue = candidate.issue or ("unsupported_file_type" if file_type is None else None) or ("unsafe_source_path" if path is None else None) or ("manifest_record_missing" if record is None else None)
             actual_hash = None
+            if issue is None and (
+                not isinstance(record.get("source_type"), str)
+                or not isinstance(record.get("file_type"), str)
+                or record["source_type"] != candidate.rule.source_type.value
+                or record["file_type"] != file_type.value
+            ):
+                issue = "manifest_record_mismatch"
             if issue is None and path is not None:
                 try:
                     actual_hash = self._hash_limited(path, self.document_router.max_bytes)

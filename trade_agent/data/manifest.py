@@ -111,6 +111,8 @@ class ParserBackends(_FrozenModel):
 
     @model_validator(mode="after")
     def ordered_values(self) -> "ParserBackends":
+        if not self.document_router_version.strip() or not self.chunk_router_version.strip() or not self.mineru_statuses:
+            raise ValueError("backend versions and MinerU statuses must be nonblank")
         if self.overlap_tokens >= self.max_tokens:
             raise ValueError("overlap must be below max")
         for values in (self.mineru_statuses, self.degraded_components):
@@ -233,7 +235,7 @@ class BuildManifest(_FrozenModel):
         for snapshot in self.chunks:
             chunk = snapshot.restore()
             document = documents.get(chunk.metadata.document_id)
-            if document is None or chunk.metadata.source_type != document.source_type or chunk.metadata.file_type != document.file_type:
+            if document is None or chunk.metadata.source_type != document.source_type or chunk.metadata.file_type != document.file_type or chunk.metadata.parent_document_hash != document.content_hash or chunk.metadata.language != document.language or chunk.metadata.is_synthetic != document.is_synthetic or str(chunk.metadata.source_url) != str(document.source_url) or str(chunk.metadata.canonical_url) != str(document.canonical_url):
                 raise ValueError("chunk does not match document")
         if len(set(self.document_ids)) != len(self.documents) or len(set(self.chunk_ids)) != len(self.chunks):
             raise ValueError("document and chunk IDs must be unique")

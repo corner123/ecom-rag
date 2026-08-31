@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, StrictStr, field_validator
+from pydantic import BaseModel, ConfigDict, StrictStr, field_validator, model_validator
 
 
 class QuarantineRecord(BaseModel):
@@ -37,6 +37,19 @@ class QuarantineRecord(BaseModel):
         if re.search(r"(?i)(https?://[^/@\s]+@|[?&][^=&#\s]+=([^\[]|$)|\b(?:cookie|session|token|signature|password)\s*[:=]\s*(?!\[REDACTED\]))", value):
             raise ValueError("quarantine diagnostic contains unsafe data")
         return value
+
+    def model_copy(self, *, update: dict | None = None, deep: bool = False) -> "QuarantineRecord":
+        if update is None:
+            return super().model_copy(deep=deep)
+        value = self.model_dump(mode="python")
+        value.update(update)
+        return type(self).model_validate(value)
+
+    @model_validator(mode="after")
+    def diagnostic_is_canonical(self) -> "QuarantineRecord":
+        if self.diagnostic != sanitize_diagnostic(self.diagnostic):
+            raise ValueError("quarantine diagnostic must be sanitized")
+        return self
 
 
 def sanitize_diagnostic(value: object, limit: int = 240, *, source_path: str | None = None) -> str:
