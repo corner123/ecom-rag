@@ -1,0 +1,80 @@
+# Task 7 implementation report
+
+## Delivered
+
+- Added a deterministic `SourceCatalog` and `IngestionPipeline` that only
+  orchestrate the reviewed `DocumentRouter` and `ChunkRouter`.
+- Catalog expansion is sorted, rooted under the corpus root, rejects symlink
+  sources, and records unsupported paths, traversal, missing globs, duplicate
+  paths, unreadable sources, manifest failures, parser quarantines, and chunk
+  failures explicitly.
+- Each catalog source is joined to the frozen corpus manifest; source bytes are
+  size-guarded and streamed into SHA-256 before the manifest hash is trusted.
+- `BuildManifest` is strict and frozen. Source collections, counts, quarantine
+  records, and backend state are immutable. Documents/chunks use canonical
+  immutable snapshots with lossless `restore()` methods for later indexing.
+- Build fingerprints include normalized catalog data, actual source hashes,
+  router/chunker versions and settings, metadata schema version, and backend
+  degradation; they exclude output location and volatile fetched/ingested times.
+- Output uses a same-directory temporary file, `fsync`, and `os.replace`, and
+  refuses unsafe symlink targets/ancestors. The CLI emits only a concise JSON
+  summary. Cookie/session/signature assignment diagnostics are redacted.
+
+## TDD evidence
+
+RED command:
+
+```text
+$ uv run pytest tests/unit/test_manifest.py tests/integration/test_ingestion_pipeline.py -q
+5 failed in 0.04s
+```
+
+The failures were missing `manifest`/`pipeline` modules and unredacted
+`cookie`, `session_id`, `signature`, and `sig` values.
+
+GREEN command:
+
+```text
+$ uv run pytest tests/unit/test_manifest.py tests/integration/test_ingestion_pipeline.py -q
+7 passed in 0.38s
+```
+
+The focused cases cover deterministic output, unsupported type accounting,
+hash mismatch, symlink output refusal, traversal/missing-glob quarantine,
+snapshot restoration, full corpus CLI build, and sanitizer regression.
+
+## Verification
+
+```text
+$ python -m scripts.ingest_trade_sources ... --output /tmp/task7-a.json
+build_9fe6df4a869783894a1d721fa0c35e5c; 74 sources, 116 documents,
+120 chunks, 1 explicit scanned-PDF quarantine, metadata_complete=true
+
+$ cmp -s /tmp/task7-a.json /tmp/task7-b.json
+deterministic-output-ok
+
+$ docker compose run --rm --no-deps api pytest tests/unit/test_manifest.py tests/integration/test_ingestion_pipeline.py -q
+7 passed in 0.73s
+
+$ uv run pytest tests/unit tests/integration/test_ingestion_pipeline.py -q
+155 passed, 5 expected third-party SWIG deprecation warnings
+
+$ uv run pytest -q
+173 passed, 5 failed: existing live-MySQL tests refuse absent non-placeholder
+MYSQL migration/query credentials; Task 7 does not change that boundary.
+
+$ python -m compileall -q trade_agent scripts tests
+$ uv lock --check
+Resolved 49 packages in 2ms
+$ git diff --check
+passed
+```
+
+Targeted secret/path scans found only the deliberate sanitizer fixture values;
+no host paths or credential assignments appear in production Task 7 files.
+
+## Degradation truth
+
+MinerU is unavailable in the exercised environment. The pipeline records the
+reviewed router's exact degradation and retains the scanned regulator PDF as
+an explicit quarantine; it does not claim OCR succeeded.

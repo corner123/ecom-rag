@@ -35,7 +35,7 @@ def sanitize_diagnostic(value: object, limit: int = 240, *, source_path: str | N
                 text = text.replace(path, "[SOURCE_PATH]")
     text = re.sub(r"(?i)\bbearer\s+[^\s,;]+", "Bearer [REDACTED]", text)
     text = re.sub(
-        r"(?i)([\"']?(?:password|passwd|secret|token|api[-_]?key|access[-_]?key|authorization)[\"']?\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s&,;}]+)",
+        r"(?i)([\"']?(?:password|passwd|secret|token|api[-_]?key|access[-_]?key|authorization|cookie|session(?:[-_]?id)?|signature|sig)[\"']?\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s&,;}]+)",
         r"\1[REDACTED]",
         text,
     )
