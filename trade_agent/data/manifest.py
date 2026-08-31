@@ -6,17 +6,47 @@ import hashlib
 import json
 from typing import Any
 
-from collections import Counter
+from collections import Counter, defaultdict
 import re
 from pathlib import PurePosixPath
 from copy import deepcopy
+from datetime import datetime, timezone
+from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, field_validator, model_validator
 
 from trade_agent.data.quarantine import QuarantineRecord
 from trade_agent.schemas.source import ChunkRecord, DocumentRecord, FileType, SourceLocator, SourceType, stable_id
 
-METADATA_SCHEMA_VERSION = "task6-source-metadata-v1"
+METADATA_SCHEMA_VERSION = "task7-source-metadata-v2"
+
+
+def _normalize_datetime(value: Any) -> str | None:
+    if value is None:
+        return None
+    parsed = value if isinstance(value, datetime) else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return str(value)
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
+def _normalize_url(value: Any) -> str | None:
+    if value is None:
+        return None
+    parsed = urlsplit(str(value))
+    return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), parsed.path, parsed.query, parsed.fragment))
+
+
+def _normalize_metadata_value(field: str, value: Any) -> Any:
+    if field in {"publish_time", "valid_from", "valid_to", "ingested_at"}:
+        return _normalize_datetime(value)
+    if field in {"source_url", "canonical_url"}:
+        return _normalize_url(value)
+    if field in {"source_weight", "ocr_confidence"} and value is not None:
+        return float(value)
+    if hasattr(value, "value"):
+        return value.value
+    return value
 
 
 def canonical_json(value: Any) -> str:
@@ -232,16 +262,34 @@ class BuildManifest(_FrozenModel):
             if source.source_id != stable_id("source", source.path):
                 raise ValueError("source ID does not match path")
         source_by_id = {item.source_id: item for item in self.sources}
+        quarantine_paths = {item.source_path for item in self.quarantined}
+        source_paths = {item.path for item in self.sources}
+        if not quarantine_paths <= source_paths:
+            raise ValueError("quarantine path does not match a source")
+        quarantine_by_path = Counter(item.source_path for item in self.quarantined)
         documents = {item.document_id: item.restore() for item in self.documents}
         for document in documents.values():
             source = source_by_id.get(document.source_id)
             if source is None or source.source_type != document.source_type.value or source.file_type != document.file_type.value:
                 raise ValueError("document does not match source")
+            if document.document_id != stable_id("doc", document.source_id, document.document_identity):
+                raise ValueError("document ID does not match identity")
+        documents_by_source = Counter(document.source_id for document in documents.values())
+        for source in self.sources:
+            has_quarantine = quarantine_by_path[source.path] > 0
+            if (source.status == "quarantined") != has_quarantine:
+                raise ValueError("source status does not match quarantine records")
+            if source.status == "parsed" and documents_by_source[source.source_id] == 0:
+                raise ValueError("parsed source must have a document")
+        chunks_by_document: dict[str, list[ChunkRecord]] = defaultdict(list)
         for snapshot in self.chunks:
             chunk = snapshot.restore()
+            chunks_by_document[chunk.metadata.document_id].append(chunk)
             document = documents.get(chunk.metadata.document_id)
             if document is None:
                 raise ValueError("chunk does not match document")
+            if chunk.metadata.chunk_id != stable_id("chunk", document.document_id, str(chunk.metadata.chunk_index), chunk.content):
+                raise ValueError("chunk ID does not match index and content")
             if (
                 chunk.metadata.source_type != document.source_type
                 or chunk.metadata.file_type != document.file_type
@@ -278,6 +326,7 @@ class BuildManifest(_FrozenModel):
                 "company_name": attrs.get("company") or attrs.get("supplier") or attrs.get("entity"),
                 "normalized_name": attrs.get("normalized_name"),
                 "country_code": attrs.get("country_code"),
+                "region": attrs.get("region"),
                 "hs_code": attrs.get("hs_code"),
                 "product_name": attrs.get("product_name"),
                 "sku": attrs.get("sku"),
@@ -291,14 +340,33 @@ class BuildManifest(_FrozenModel):
                 "license_scope": attrs.get("license_scope"),
                 "dedupe_cluster_id": attrs.get("dedupe_cluster_id"),
             }
+            unit_confidence = None
+            target_locator = chunk.metadata.source_locator.model_dump(mode="json", exclude_none=True)
+            for unit in document.units:
+                candidate = unit.get("locator")
+                if not isinstance(candidate, dict):
+                    continue
+                try:
+                    normalized = SourceLocator.model_validate(candidate).model_dump(mode="json", exclude_none=True)
+                except Exception:
+                    continue
+                if normalized == target_locator:
+                    if "confidence" in unit:
+                        unit_confidence = unit["confidence"]
+                    break
+            expected["ocr_confidence"] = unit_confidence if unit_confidence is not None else attrs.get("ocr_confidence")
+            expected["ingested_at"] = document.fetched_at
+            expected["source_url"] = document.source_url
+            expected["canonical_url"] = document.canonical_url
             for field, expected_value in expected.items():
-                actual_value = getattr(chunk.metadata, field)
-                if hasattr(actual_value, "value"):
-                    actual_value = actual_value.value
-                elif hasattr(actual_value, "isoformat"):
-                    actual_value = actual_value.isoformat()
+                actual_value = _normalize_metadata_value(field, getattr(chunk.metadata, field))
+                expected_value = _normalize_metadata_value(field, expected_value)
                 if expected_value != actual_value:
                     raise ValueError(f"chunk metadata {field} does not match document")
+        for document_id, chunks in chunks_by_document.items():
+            indices = sorted(chunk.metadata.chunk_index for chunk in chunks)
+            if indices != list(range(len(indices))):
+                raise ValueError(f"chunk indices for {document_id} are not contiguous")
         if len(set(self.document_ids)) != len(self.documents) or len(set(self.chunk_ids)) != len(self.chunks):
             raise ValueError("document and chunk IDs must be unique")
         if len({item.name for item in self.counts_by_source_type}) != len(self.counts_by_source_type) or len({item.name for item in self.counts_by_file_type}) != len(self.counts_by_file_type):

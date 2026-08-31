@@ -58,7 +58,7 @@ def test_canonical_hash_is_order_independent_and_manifest_round_trips() -> None:
 
     assert canonical_hash({"b": [2, 1], "a": "é"}) == canonical_hash({"a": "é", "b": [2, 1]})
     backend = ParserBackends(document_router_version="router", chunk_router_version="chunker", max_tokens=1, overlap_tokens=0, mineru_statuses=("not_attempted",), degraded_components=())
-    fingerprint = {"config_hash": "0" * 64, "parser_backends": backend.model_dump(mode="json"), "metadata_schema_version": "task6-source-metadata-v1", "sources": [], "documents": [], "chunks": [], "quarantined": []}
+    fingerprint = {"config_hash": "0" * 64, "parser_backends": backend.model_dump(mode="json"), "metadata_schema_version": "task7-source-metadata-v2", "sources": [], "documents": [], "chunks": [], "quarantined": []}
     manifest = BuildManifest.model_validate({
         "build_id": "build_" + canonical_hash(fingerprint)[:32],
         "config_hash": "0" * 64,
@@ -88,6 +88,7 @@ def test_snapshots_require_exact_canonical_json_payload() -> None:
 
     document = DocumentRecord(
         document_id="doc-example",
+        document_identity="example",
         source_id="source-example",
         file_type=FileType.HTML,
         source_type=SourceType.OFFICIAL_WEBSITE,
@@ -118,6 +119,7 @@ def test_chunk_snapshot_rejects_reordered_json_even_when_fingerprint_fields_matc
 
     metadata = ChunkMetadata(
         chunk_id="chunk-example",
+        chunk_index=0,
         document_id="doc-example",
         file_type=FileType.HTML,
         source_type=SourceType.OFFICIAL_WEBSITE,
@@ -173,3 +175,22 @@ def test_parser_backend_tuples_are_strict_and_quarantine_copy_revalidates() -> N
     )
     with pytest.raises(ValidationError):
         quarantine.model_copy(update={"diagnostic": "token=secret"})
+
+
+def test_sanitize_diagnostic_redacts_posix_and_windows_host_paths_without_url_damage() -> None:
+    from trade_agent.data.quarantine import QuarantineRecord, sanitize_diagnostic
+
+    diagnostic = (
+        "failed /Users/alice/project/input.pdf and /home/alice/input.pdf "
+        "from /private/var/folders/aa/bb/input.pdf C:\\Users\\alice\\input.pdf "
+        "url=https://safe.example/path"
+    )
+    sanitized = sanitize_diagnostic(diagnostic)
+    assert "/Users/" not in sanitized
+    assert "/home/" not in sanitized
+    assert "/private/var/" not in sanitized
+    assert "C:\\Users\\" not in sanitized
+    assert "https://safe.example/path" in sanitized
+    assert QuarantineRecord(
+        error_code="bad", source_path="input.pdf", parser="router", diagnostic=sanitized
+    )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from math import isfinite
 from typing import Callable
 
 from trade_agent.schemas.source import (
@@ -268,11 +269,30 @@ class ChunkRouter:
         for index, piece in enumerate(selected.split(document)):
             locator = SourceLocator.model_validate(piece.locator)
             content = piece.content
+            unit_confidence = None
+            normalized_locator = locator.model_dump(mode="json", exclude_none=True)
+            for unit in document.units:
+                candidate = unit.get("locator")
+                if not isinstance(candidate, dict):
+                    continue
+                try:
+                    candidate_locator = SourceLocator.model_validate(candidate)
+                except Exception:
+                    continue
+                if candidate_locator.model_dump(mode="json", exclude_none=True) == normalized_locator:
+                    if "confidence" in unit:
+                        unit_confidence = unit["confidence"]
+                    break
+            if unit_confidence is not None:
+                if isinstance(unit_confidence, bool) or not isinstance(unit_confidence, (int, float)) or not isfinite(unit_confidence):
+                    raise ValueError("document unit confidence must be a finite number")
+                unit_confidence = float(unit_confidence)
             entity_id = attrs.get("entity_id")
             if entity_id is not None and not isinstance(entity_id, str):
                 entity_id = str(entity_id)
             metadata = ChunkMetadata(
                 chunk_id=stable_id("chunk", document.document_id, str(index), content),
+                chunk_index=index,
                 document_id=document.document_id,
                 entity_id=entity_id,
                 company_name=attrs.get("company") or attrs.get("supplier") or attrs.get("entity"),
@@ -298,7 +318,7 @@ class ChunkRouter:
                 content_hash=content_sha256(content),
                 parent_document_hash=document.content_hash,
                 language=document.language,
-                ocr_confidence=piece.confidence if piece.confidence is not None else attrs.get("ocr_confidence"),
+                ocr_confidence=unit_confidence if unit_confidence is not None else attrs.get("ocr_confidence"),
                 is_synthetic=document.is_synthetic,
                 license_scope=attrs.get("license_scope"),
                 dedupe_cluster_id=attrs.get("dedupe_cluster_id"),

@@ -8,7 +8,7 @@ from trade_agent.schemas.source import DocumentRecord, FileType, SourceType, con
 def doc(source_type, content, **attributes):
     units = attributes.pop("units", [])
     return DocumentRecord(
-        document_id="doc-test", source_id="source-test", file_type=FileType.JSON,
+        document_id="doc-test", document_identity="test", source_id="source-test", file_type=FileType.JSON,
         source_type=source_type, title="Factory expansion", language="en", content=content,
         content_hash=content_sha256(content), fetched_at=datetime(2026, 8, 30, tzinfo=timezone.utc),
         is_synthetic=True, units=units, attributes={"source_weight": 0.5, "source_weight_version": "task6-v1", **attributes},

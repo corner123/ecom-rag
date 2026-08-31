@@ -217,6 +217,7 @@ class SourceRecord(_StrictBase):
 
 class DocumentRecord(_StrictBase):
     document_id: StrictStr
+    document_identity: StrictStr
     source_id: StrictStr
     file_type: FileType
     source_type: SourceType
@@ -231,7 +232,7 @@ class DocumentRecord(_StrictBase):
     source_url: AnyUrl | None = None
     canonical_url: AnyUrl | None = None
 
-    @field_validator("document_id", "source_id", "title", "language", "content")
+    @field_validator("document_id", "document_identity", "source_id", "title", "language", "content")
     @classmethod
     def nonblank_fields(cls, value: str) -> str:
         return _nonblank(value)
@@ -252,6 +253,7 @@ class DocumentRecord(_StrictBase):
 
 class ChunkMetadata(_StrictBase):
     chunk_id: StrictStr
+    chunk_index: StrictInt = Field(ge=0)
     document_id: StrictStr
     entity_id: StrictStr | None = None
     company_name: StrictStr | None = None

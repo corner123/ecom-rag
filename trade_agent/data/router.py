@@ -551,6 +551,7 @@ class DocumentRouter:
     ) -> DocumentRecord:
         return DocumentRecord(
             document_id=stable_id("doc", source.source_id, identity),
+            document_identity=identity,
             source_id=source.source_id,
             file_type=source.file_type,
             source_type=source.source_type,

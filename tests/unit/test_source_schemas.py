@@ -28,6 +28,7 @@ def locator() -> SourceLocator:
 def metadata(**overrides) -> dict:
     value = {
         "chunk_id": "chk_abc123",
+        "chunk_index": 0,
         "document_id": "doc_abc123",
         "file_type": FileType.HTML,
         "source_type": SourceType.OFFICIAL_WEBSITE,
@@ -127,6 +128,7 @@ def test_synthetic_url_boundary_and_real_public_source():
 def test_document_to_chunk_fixture_round_trips_and_hashes_match():
     document = DocumentRecord(
         document_id="doc_abc123",
+        document_identity="identity",
         source_id="src_demo",
         file_type=FileType.HTML,
         source_type=SourceType.OFFICIAL_WEBSITE,
@@ -185,7 +187,7 @@ def test_numeric_contracts_reject_coercion_and_accept_real_boundary_numbers():
 
 def test_structured_json_rejects_non_json_values_and_non_finite_numbers():
     base = {
-        "document_id": "doc_abc123", "source_id": "src_demo", "file_type": "html",
+        "document_id": "doc_abc123", "document_identity": "identity", "source_id": "src_demo", "file_type": "html",
         "source_type": "official_website", "title": "Products", "language": "en",
         "content": "Acme exports pumps.", "content_hash": content_sha256("Acme exports pumps."),
         "fetched_at": NOW, "is_synthetic": True,
@@ -209,7 +211,7 @@ def test_synthetic_urls_cover_canonical_and_all_url_bearing_records():
         )
     with pytest.raises(ValidationError):
         DocumentRecord(
-            document_id="doc_abc123", source_id="src_demo", file_type="html",
+            document_id="doc_abc123", document_identity="identity", source_id="src_demo", file_type="html",
             source_type="official_website", title="Products", language="en",
             content="x", content_hash=content_sha256("x"), fetched_at=NOW,
             is_synthetic=True, canonical_url="https://evil.invalid/products",
@@ -225,7 +227,7 @@ def test_synthetic_urls_cover_canonical_and_all_url_bearing_records():
 
 def test_model_copy_revalidates_updates_for_nested_contracts():
     document = DocumentRecord(
-        document_id="doc_abc123", source_id="src_demo", file_type="html",
+        document_id="doc_abc123", document_identity="identity", source_id="src_demo", file_type="html",
         source_type="official_website", title="Products", language="en", content="x",
         content_hash=content_sha256("x"), fetched_at=NOW, is_synthetic=True,
     )
@@ -240,7 +242,7 @@ def test_model_copy_revalidates_updates_for_nested_contracts():
 
 def test_every_chunk_metadata_required_field_is_explicit():
     required = {
-        "chunk_id", "document_id", "file_type", "source_type", "source_weight",
+        "chunk_id", "chunk_index", "document_id", "file_type", "source_type", "source_weight",
         "ingested_at", "source_locator", "content_hash", "parent_document_hash",
         "language", "is_synthetic",
     }
@@ -249,3 +251,17 @@ def test_every_chunk_metadata_required_field_is_explicit():
         values.pop(field)
         with pytest.raises(ValidationError):
             ChunkMetadata(**values)
+
+
+def test_document_identity_and_chunk_index_are_required_fields():
+    document_values = {
+        "document_id": "doc_abc123", "source_id": "src_demo", "file_type": FileType.HTML,
+        "source_type": SourceType.OFFICIAL_WEBSITE, "title": "Products", "language": "en",
+        "content": "x", "content_hash": content_sha256("x"), "fetched_at": NOW, "is_synthetic": True,
+    }
+    with pytest.raises(ValidationError):
+        DocumentRecord(**document_values)
+    chunk_values = metadata()
+    chunk_values.pop("chunk_index")
+    with pytest.raises(ValidationError):
+        ChunkMetadata(**chunk_values)

@@ -69,5 +69,7 @@ def sanitize_diagnostic(value: object, limit: int = 240, *, source_path: str | N
     )
     text = re.sub(r"(https?://)[^/@\s]+@", r"\1[REDACTED]@", text)
     text = re.sub(r"([?&][^=&#\s]+)=([^&#\s]*)", r"\1=[REDACTED]", text)
+    text = re.sub(r"(?<![A-Za-z0-9:/])(?:/Users/|/home/|/private/var/|/private/tmp/)[^\s,;)}\]]+", "[HOST_PATH]", text)
+    text = re.sub(r"(?i)(?<![A-Za-z0-9])(?:[A-Z]:\\)[^\s,;)}\]]+", "[HOST_PATH]", text)
     text = text[:limit].strip()
     return text or "[REDACTED]"

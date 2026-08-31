@@ -24,8 +24,8 @@ from trade_agent.data.router import DocumentRouter, SourceInput
 from trade_agent.schemas.source import FileType, SourceType, content_sha256, stable_id
 
 
-DOCUMENT_ROUTER_VERSION = "task6-document-router-v1"
-CHUNK_ROUTER_VERSION = "task6-chunk-router-v1"
+DOCUMENT_ROUTER_VERSION = "task6-document-router-v2"
+CHUNK_ROUTER_VERSION = "task6-chunk-router-v2"
 MAX_FROZEN_MANIFEST_BYTES = 20_000_000
 _URL = TypeAdapter(AnyUrl)
 _EXTENSIONS = {".html": FileType.HTML, ".htm": FileType.HTML, ".md": FileType.MARKDOWN, ".markdown": FileType.MARKDOWN, ".jsonl": FileType.JSONL, ".pdf": FileType.PDF}

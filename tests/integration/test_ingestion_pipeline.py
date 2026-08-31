@@ -10,6 +10,36 @@ import sys
 import pytest
 
 
+def _resign_manifest_payload(payload: dict) -> dict:
+    from trade_agent.data.manifest import canonical_hash
+
+    documents = [json.loads(item["payload"]) for item in payload["documents"]]
+    chunks = [json.loads(item["payload"]) for item in payload["chunks"]]
+    for item in documents:
+        item.pop("fetched_at", None)
+    for item in chunks:
+        item["metadata"].pop("ingested_at", None)
+    fingerprint_value = {
+        "config_hash": payload["config_hash"],
+        "parser_backends": payload["parser_backends"],
+        "metadata_schema_version": payload["metadata_schema_version"],
+        "sources": payload["sources"],
+        "documents": documents,
+        "chunks": chunks,
+        "quarantined": payload["quarantined"],
+    }
+    fingerprint = canonical_hash(fingerprint_value)
+    payload["fingerprint"] = fingerprint
+    payload["build_id"] = "build_" + fingerprint[:32]
+    return payload
+
+
+def _canonicalize_snapshot(payload: dict, collection: str, index: int, value: dict) -> None:
+    from trade_agent.data.manifest import canonical_json
+
+    payload[collection][index]["payload"] = canonical_json(value)
+
+
 def _catalog(tmp_path: Path, *, include_binary: bool = False) -> Path:
     root = tmp_path / "corpus"
     (root / "manifests").mkdir(parents=True)
@@ -112,6 +142,103 @@ def test_demo_cli_builds_all_frozen_records(tmp_path: Path) -> None:
     assert len(reloaded.documents) == 116 and len(reloaded.chunks) == 120
     serialized = output.read_text(encoding="utf-8")
     assert "/Users/" not in serialized and str(Path.cwd().resolve()) not in serialized
+
+
+def test_signed_forged_document_id_is_rejected(tmp_path: Path) -> None:
+    from pydantic import ValidationError
+    from trade_agent.data.manifest import BuildManifest
+    from trade_agent.data.pipeline import IngestionPipeline, SourceCatalog
+
+    result = IngestionPipeline().run(SourceCatalog.from_yaml(_catalog(tmp_path)), tmp_path / "build.json")
+    payload = result.model_dump(mode="json")
+    document = json.loads(payload["documents"][0]["payload"])
+    document["document_id"] = "doc_forged"
+    payload["documents"][0]["document_id"] = "doc_forged"
+    _canonicalize_snapshot(payload, "documents", 0, document)
+    with pytest.raises(ValidationError):
+        BuildManifest.model_validate(_resign_manifest_payload(payload))
+
+
+def test_signed_forged_chunk_id_is_rejected(tmp_path: Path) -> None:
+    from pydantic import ValidationError
+    from trade_agent.data.manifest import BuildManifest
+    from trade_agent.data.pipeline import IngestionPipeline, SourceCatalog
+
+    result = IngestionPipeline().run(SourceCatalog.from_yaml(_catalog(tmp_path)), tmp_path / "build.json")
+    payload = result.model_dump(mode="json")
+    chunk = json.loads(payload["chunks"][0]["payload"])
+    chunk["metadata"]["chunk_id"] = "chunk_forged"
+    payload["chunks"][0]["chunk_id"] = "chunk_forged"
+    _canonicalize_snapshot(payload, "chunks", 0, chunk)
+    with pytest.raises(ValidationError):
+        BuildManifest.model_validate(_resign_manifest_payload(payload))
+
+
+def test_signed_status_and_quarantine_path_invariants_are_rejected(tmp_path: Path) -> None:
+    from pydantic import ValidationError
+    from trade_agent.data.manifest import BuildManifest
+    from trade_agent.data.pipeline import IngestionPipeline, SourceCatalog
+
+    result = IngestionPipeline().run(SourceCatalog.from_yaml(_catalog(tmp_path)), tmp_path / "build.json")
+    payload = result.model_dump(mode="json")
+    payload["sources"][0]["status"] = "quarantined"
+    with pytest.raises(ValidationError):
+        BuildManifest.model_validate(_resign_manifest_payload(payload))
+
+    payload = result.model_dump(mode="json")
+    payload["sources"][0]["status"] = "parsed"
+    payload["quarantined"] = [{"error_code": "scan", "source_path": "site.html", "parser": "router", "diagnostic": "safe"}]
+    with pytest.raises(ValidationError):
+        BuildManifest.model_validate(_resign_manifest_payload(payload))
+
+    payload = result.model_dump(mode="json")
+    payload["quarantined"] = [{"error_code": "ghost", "source_path": "ghost.html", "parser": "router", "diagnostic": "safe"}]
+    with pytest.raises(ValidationError):
+        BuildManifest.model_validate(_resign_manifest_payload(payload))
+
+
+def test_signed_ocr_and_region_inheritance_are_rejected(tmp_path: Path) -> None:
+    from pydantic import ValidationError
+    from trade_agent.data.manifest import BuildManifest
+    from trade_agent.data.pipeline import IngestionPipeline, SourceCatalog
+
+    result = IngestionPipeline().run(SourceCatalog.from_yaml(_catalog(tmp_path)), tmp_path / "build.json")
+    payload = result.model_dump(mode="json")
+    document = json.loads(payload["documents"][0]["payload"])
+    document["units"][0]["confidence"] = 0.25
+    _canonicalize_snapshot(payload, "documents", 0, document)
+    chunk = json.loads(payload["chunks"][0]["payload"])
+    chunk["metadata"]["ocr_confidence"] = 0.9
+    chunk["metadata"]["region"] = "forged-region"
+    _canonicalize_snapshot(payload, "chunks", 0, chunk)
+    with pytest.raises(ValidationError):
+        BuildManifest.model_validate(_resign_manifest_payload(payload))
+
+
+def test_signed_locator_not_in_document_units_is_rejected(tmp_path: Path) -> None:
+    from pydantic import ValidationError
+    from trade_agent.data.manifest import BuildManifest
+    from trade_agent.data.pipeline import IngestionPipeline, SourceCatalog
+
+    result = IngestionPipeline().run(SourceCatalog.from_yaml(_catalog(tmp_path)), tmp_path / "build.json")
+    payload = result.model_dump(mode="json")
+    chunk = json.loads(payload["chunks"][0]["payload"])
+    chunk["metadata"]["source_locator"]["section"] = "forged-section"
+    _canonicalize_snapshot(payload, "chunks", 0, chunk)
+    with pytest.raises(ValidationError):
+        BuildManifest.model_validate(_resign_manifest_payload(payload))
+
+
+def test_signed_equivalent_z_timestamp_is_valid(tmp_path: Path) -> None:
+    from trade_agent.data.manifest import BuildManifest
+    from trade_agent.data.pipeline import IngestionPipeline, SourceCatalog
+
+    result = IngestionPipeline().run(SourceCatalog.from_yaml(_catalog(tmp_path)), tmp_path / "build.json")
+    payload = result.model_dump(mode="json")
+    document = json.loads(payload["documents"][0]["payload"])
+    document["attributes"]["publish_time"] = "2026-08-30T00:00:00Z"
+    _canonicalize_snapshot(payload, "documents", 0, document)
+    assert BuildManifest.model_validate(_resign_manifest_payload(payload))
 
 
 def test_catalog_rule_and_field_order_is_semantic_invariant(tmp_path: Path) -> None:
@@ -260,7 +387,7 @@ def test_frozen_manifest_direct_symlink_is_rejected_before_json_parse(tmp_path: 
     catalog_path = _catalog(tmp_path)
     root = SourceCatalog.from_yaml(catalog_path).corpus_root
     target = tmp_path / "external-manifest.json"
-    target.write_text("not-json", encoding="utf-8")
+    target.write_text(json.dumps({"records": []}), encoding="utf-8")
     manifest = root / "manifests" / "corpus_manifest.json"
     manifest.unlink()
     manifest.symlink_to(target)
@@ -276,7 +403,7 @@ def test_frozen_manifest_symlinked_manifests_ancestor_is_rejected(tmp_path: Path
     root = SourceCatalog.from_yaml(catalog_path).corpus_root
     external = tmp_path / "external-manifests"
     external.mkdir()
-    (external / "corpus_manifest.json").write_text("not-json", encoding="utf-8")
+    (external / "corpus_manifest.json").write_text(json.dumps({"records": []}), encoding="utf-8")
     real_manifests = root / "manifests"
     (real_manifests / "corpus_manifest.json").unlink()
     real_manifests.rmdir()
@@ -292,7 +419,9 @@ def test_frozen_manifest_is_bounded_before_parsing(tmp_path: Path) -> None:
 
     catalog_path = _catalog(tmp_path)
     root = SourceCatalog.from_yaml(catalog_path).corpus_root
-    (root / "manifests" / "corpus_manifest.json").write_bytes(b"{" + b" " * 100 + b"}")
+    (root / "manifests" / "corpus_manifest.json").write_text(
+        json.dumps({"records": [], "padding": "x" * 100}), encoding="utf-8"
+    )
     pipeline = IngestionPipeline(document_router=DocumentRouter(max_bytes=32))
     with pytest.raises(ValueError, match="frozen corpus manifest"):
         pipeline._frozen_records(root, maximum=32)

@@ -209,3 +209,55 @@ canonical sanitizer output, and backend/schema invariants are strict.
 $ uv run pytest tests/unit/test_manifest.py tests/integration/test_ingestion_pipeline.py tests/unit/test_data_router.py -q
 94 passed, 5 third-party SWIG deprecation warnings
 ```
+
+## Review-fix round 4
+
+Persisted identity is now explicit: documents carry the router-owned identity
+used to derive `document_id`, chunks carry strict contiguous `chunk_index`, and
+manifest validation derives both IDs. Source/quarantine paths and parsed versus
+quarantined status are cross-checked. Chunk metadata now inherits region and
+unit-owned OCR confidence, with normalized instant/URL/enum/float comparisons.
+The metadata, router, and chunker versions were bumped to v2. Diagnostics redact
+POSIX and Windows host paths while preserving safe URLs.
+
+Test-first RED evidence:
+
+```text
+$ uv run pytest tests/unit/test_source_schemas.py tests/unit/test_manifest.py tests/integration/test_ingestion_pipeline.py -q -k 'identity or signed_ or sanitize_diagnostic or frozen_manifest or demo_cli'
+6 failed, 5 passed, 33 deselected in 0.53s
+```
+
+The failures were the missing required identity/index fields, accepted signed
+forged chunk IDs and source status, accepted forged OCR/region values, rejected
+equivalent-Z metadata, and unredacted host paths. Signed tests use a reusable
+helper that canonicalizes modified snapshots and recomputes fingerprint/build ID.
+
+GREEN evidence:
+
+```text
+$ uv run pytest tests/unit/test_source_schemas.py tests/unit/test_chunkers.py tests/unit/test_manifest.py tests/integration/test_ingestion_pipeline.py -q
+69 passed in 0.69s
+$ uv run pytest tests/integration/test_ingestion_pipeline.py -q -k 'signed_'
+5 passed, 17 deselected in 0.08s
+$ uv run pytest tests/unit/test_source_schemas.py tests/unit/test_manifest.py tests/unit/test_chunkers.py tests/integration/test_ingestion_pipeline.py -q
+69 passed in 0.69s
+```
+
+Final release verification:
+
+```text
+$ uv run pytest tests/unit -q
+158 passed, 5 third-party SWIG deprecation warnings
+$ uv run pytest tests/integration/test_ingestion_pipeline.py tests/integration/test_corpus_routing.py tests/integration/test_pdf_pipeline.py -q
+41 passed, 5 third-party SWIG deprecation warnings
+$ uv run python -m compileall -q trade_agent scripts tests
+$ uv lock --check
+Resolved 49 packages in 2ms
+$ git diff --check
+passed
+```
+
+The demo remains exactly `74` sources, `116` documents, and `120` chunks with
+one scanned-PDF quarantine. The scan source persists `parser_backend=pymupdf`
+and `degraded=true`; backend state contains `unavailable` and
+`mineru_unavailable`.
