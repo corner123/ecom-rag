@@ -18,6 +18,19 @@ def test_nested_environment_is_loaded(monkeypatch):
     assert settings.environment == "compose"
 
 
+def test_query_password_is_runtime_default_and_migration_values_are_not_loaded(monkeypatch):
+    monkeypatch.delenv("MYSQL__PASSWORD", raising=False)
+    monkeypatch.delenv("MYSQL_APP_PASSWORD", raising=False)
+    monkeypatch.setenv("MYSQL__QUERY_PASSWORD", "query-only")
+    monkeypatch.setenv("MYSQL__MIGRATION_PASSWORD", "migration-only")
+    monkeypatch.setenv("MYSQL__ROOT_PASSWORD", "root-only")
+    settings = Settings.load(runtime="compose")
+    assert settings.mysql.user == "trade_query"
+    assert settings.mysql.password == "query-only"
+    assert not hasattr(settings.mysql, "migration_password")
+    assert not hasattr(settings.mysql, "root_password")
+
+
 def test_limits_are_positive():
     limits = RuntimeLimits(max_graph_steps=12, max_retries=1, max_llm_calls=5)
     assert limits.max_graph_steps == 12

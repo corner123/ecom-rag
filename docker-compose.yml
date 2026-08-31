@@ -11,6 +11,7 @@ services:
       MYSQL_MIGRATION_PASSWORD: ${MYSQL__MIGRATION_PASSWORD:?set MYSQL__MIGRATION_PASSWORD in .env}
       MYSQL_QUERY_PASSWORD: ${MYSQL__QUERY_PASSWORD:?set MYSQL__QUERY_PASSWORD in .env}
     ports: ["127.0.0.1:3306:3306"]
+    volumes: ["mysql_data:/var/lib/mysql"]
     healthcheck:
       test: ["CMD-SHELL", "mysql -h 127.0.0.1 -utrade_migrator -p$${MYSQL_MIGRATION_PASSWORD} -e 'SELECT 1'"]
       interval: 5s
@@ -20,6 +21,7 @@ services:
     image: quay.io/coreos/etcd:v3.5.25
     command: ["/usr/local/bin/etcd", "--advertise-client-urls=http://0.0.0.0:2379", "--listen-client-urls=http://0.0.0.0:2379", "--initial-advertise-peer-urls=http://0.0.0.0:2380", "--listen-peer-urls=http://0.0.0.0:2380", "--initial-cluster=default=http://0.0.0.0:2380"]
     ports: ["127.0.0.1:2379:2379"]
+    volumes: ["etcd_data:/etcd-data"]
     healthcheck:
       test: ["CMD", "etcdctl", "endpoint", "health"]
       interval: 5s
@@ -32,6 +34,7 @@ services:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
     ports: ["127.0.0.1:9000:9000", "127.0.0.1:9001:9001"]
+    volumes: ["minio_data:/data"]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
       interval: 5s
@@ -48,6 +51,7 @@ services:
       MQ_TYPE: woodpecker
     security_opt: ["seccomp:unconfined"]
     ports: ["127.0.0.1:19530:19530", "127.0.0.1:9091:9091"]
+    volumes: ["milvus_data:/var/lib/milvus"]
     depends_on:
       etcd: {condition: service_healthy}
       minio: {condition: service_healthy}
@@ -60,6 +64,7 @@ services:
   redis:
     image: redis:7.4-alpine
     ports: ["127.0.0.1:6379:6379"]
+    volumes: ["redis_data:/data"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -83,3 +88,10 @@ services:
       mysql: {condition: service_healthy}
       milvus: {condition: service_healthy}
       redis: {condition: service_healthy}
+
+volumes:
+  mysql_data:
+  etcd_data:
+  minio_data:
+  milvus_data:
+  redis_data:

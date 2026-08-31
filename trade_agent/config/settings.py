@@ -17,7 +17,9 @@ class MysqlSettings(BaseModel):
     host: str = "mysql"
     port: int = Field(default=3306, ge=1, le=65535)
     database: str = "foreign_trade_db"
-    user: str = "trade_app"
+    # Runtime code is deliberately query-only.  Migration credentials are
+    # supplied only to the one-shot migration/seed commands, never Settings.
+    user: str = "trade_query"
     password: str | None = None
 
     @model_validator(mode="after")
@@ -58,7 +60,23 @@ class Settings(BaseSettings):
     @classmethod
     def load(cls, runtime: Literal["test", "development", "compose"] | None = None) -> "Settings":
         values = {"environment": runtime} if runtime is not None else {}
-        flat_password = os.environ.get("MYSQL_APP_PASSWORD")
-        if flat_password is not None:
-            values["mysql"] = {"password": flat_password}
+        # MYSQL__QUERY_PASSWORD is the canonical runtime credential.  Keep
+        # MYSQL__PASSWORD and MYSQL_APP_PASSWORD as compatibility aliases for
+        # older local tests and development shells.
+        query_password = os.environ.get("MYSQL__QUERY_PASSWORD")
+        legacy_password = os.environ.get("MYSQL__PASSWORD") or os.environ.get("MYSQL_APP_PASSWORD")
+        # An explicit legacy alias wins when present so existing test and
+        # development callers can override the Compose-provided query value.
+        # In the normal compose/development path QUERY_PASSWORD is the only
+        # value and therefore remains the default runtime credential.
+        password = legacy_password if legacy_password is not None else query_password
+        if runtime == "test" and legacy_password is None:
+            # Tests must opt into a password explicitly; never inherit a
+            # developer/Compose secret accidentally.
+            password = None
+        if password is not None:
+            values["mysql"] = {
+                "user": os.environ.get("MYSQL__QUERY_USER", "trade_query"),
+                "password": password,
+            }
         return cls(**values)

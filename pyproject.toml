@@ -37,7 +37,7 @@ integration = [
 trade-intel = "trade_agent.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["trade_agent*"]
+include = ["trade_agent*", "scripts*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

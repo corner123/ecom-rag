@@ -26,6 +26,11 @@ class QuarantineRecord(BaseModel):
     @field_validator("source_path")
     @classmethod
     def safe_relative_path(cls, value: str) -> str:
+        # Persisted locators are canonical POSIX relative paths.  A Windows
+        # drive/UNC path (or even one embedded in a POSIX path) must never be
+        # accepted as a second platform-specific interpretation.
+        if "\\" in value or re.match(r"^[A-Za-z]:[\\/]", value) or value.startswith("//"):
+            raise ValueError("quarantine source_path must use canonical POSIX separators")
         path = Path(value)
         if path.is_absolute() or ".." in path.parts:
             raise ValueError("quarantine source_path must be safe and relative")
