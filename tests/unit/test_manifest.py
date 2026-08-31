@@ -56,13 +56,15 @@ def test_canonical_hash_is_order_independent_and_manifest_round_trips() -> None:
     from trade_agent.data.manifest import BuildManifest, ParserBackends, canonical_hash
 
     assert canonical_hash({"b": [2, 1], "a": "é"}) == canonical_hash({"a": "é", "b": [2, 1]})
+    fingerprint = {"config_hash": "0" * 64, "sources": [], "documents": [], "chunks": [], "quarantined": []}
     manifest = BuildManifest.model_validate({
-        "build_id": "build_0123456789abcdef0123456789abcdef",
+        "build_id": "build_" + canonical_hash(fingerprint)[:32],
         "config_hash": "0" * 64,
         "sources": [], "documents": [], "chunks": [], "quarantined": [],
         "counts_by_source_type": [], "counts_by_file_type": [],
         "parser_backends": ParserBackends(document_router_version="router", chunk_router_version="chunker", max_tokens=1, overlap_tokens=0, mineru_statuses=("not_attempted",), degraded_components=()),
-        "metadata_complete": True,
+        "metadata_complete": False,
+        "fingerprint": __import__("json").dumps(fingerprint, sort_keys=True, separators=(",", ":")),
     })
     assert BuildManifest.model_validate_json(manifest.model_dump_json()) == manifest
     with pytest.raises(Exception):

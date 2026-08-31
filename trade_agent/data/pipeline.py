@@ -44,7 +44,7 @@ class CatalogRule:
     url_pattern: str
 
     def normalized(self) -> dict[str, Any]:
-        return {"source_type": self.source_type.value, "file_types": list(self.file_types), "paths": list(self.paths), "url_pattern": self.url_pattern}
+        return {"source_type": self.source_type.value, "file_types": sorted(self.file_types), "paths": sorted(self.paths), "url_pattern": self.url_pattern}
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,9 +95,7 @@ class SourceCatalog:
         return cls(1, payload["root"], root.resolve(strict=True), payload["synthetic_notice"], tuple(rules))
 
     def normalized(self) -> dict[str, Any]:
-        declared = Path(self.root_declared)
-        root = "." if declared.is_absolute() else self.root_declared.replace("\\", "/")
-        return {"catalog_version": self.catalog_version, "root": root, "synthetic_notice": self.synthetic_notice, "sources": [rule.normalized() for rule in self.sources]}
+        return {"catalog_version": self.catalog_version, "root": "corpus-root", "synthetic_notice": self.synthetic_notice, "sources": sorted((rule.normalized() for rule in self.sources), key=canonical_json)}
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,15 +192,16 @@ class IngestionPipeline:
     @staticmethod
     def _write_atomic(output: Path, value: BuildManifest) -> None:
         output = output.absolute()
-        if output.exists() and (output.is_symlink() or output.is_dir() or not output.is_file()):
+        if output.is_symlink() or (output.exists() and (output.is_dir() or not output.is_file())):
             raise ValueError("output target must be a non-symlink regular file or absent")
         parent = output.parent
         # macOS exposes the system temporary directory as /tmp -> /private/tmp.
         # It is a platform-owned alias, not a caller-controlled output parent.
+        aliases = {Path("/var"): Path("/private/var"), Path("/tmp"): Path("/private/tmp"), Path("/etc"): Path("/private/etc")}
         for ancestor in (parent, *parent.parents):
             if ancestor == Path("/"):
                 break
-            if ancestor.is_symlink() and ancestor != Path("/tmp"):
+            if ancestor.is_symlink() and aliases.get(ancestor) != ancestor.resolve(strict=True):
                 raise ValueError("output parent must not have a symlink ancestor")
         parent.mkdir(parents=True, exist_ok=True)
         descriptor, temporary_name = tempfile.mkstemp(prefix=f".{output.name}.", suffix=".tmp", dir=parent)
@@ -235,7 +234,11 @@ class IngestionPipeline:
             issue = candidate.issue or ("unsupported_file_type" if file_type is None else None) or ("unsafe_source_path" if path is None else None) or ("manifest_record_missing" if record is None else None)
             actual_hash = None
             if issue is None and path is not None:
-                try: actual_hash = self._hash_limited(path, self.document_router.max_bytes)
+                try:
+                    actual_hash = self._hash_limited(path, self.document_router.max_bytes)
+                except ValueError as exc:
+                    issue = "input_too_large"
+                    quarantined.append(self._q(issue, candidate.relative_path, exc))
                 except OSError as exc:
                     issue = "source_unreadable"
                     quarantined.append(self._q(issue, candidate.relative_path, exc))
@@ -279,6 +282,6 @@ class IngestionPipeline:
         for item in fingerprint_chunks:
             item.get("metadata", {}).pop("ingested_at", None)
         fingerprint = {"config_hash": config_hash, "sources": [item.model_dump(mode="json") for item in sources], "documents": fingerprint_documents, "chunks": fingerprint_chunks, "quarantined": [item.model_dump(mode="json") for item in quarantined]}
-        manifest = BuildManifest(build_id="build_" + canonical_hash(fingerprint)[:32], config_hash=config_hash, sources=tuple(sources), documents=document_snapshots, chunks=chunk_snapshots, quarantined=tuple(quarantined), counts_by_source_type=tuple(CountEntry(name=name, count=count) for name, count in sorted(Counter(item.source_type or "unknown" for item in sources).items())), counts_by_file_type=tuple(CountEntry(name=name, count=count) for name, count in sorted(Counter(item.file_type for item in sources).items())), parser_backends=backends, metadata_complete=all(item.metadata.source_locator.raw is not None for item in chunks))
+        manifest = BuildManifest(build_id="build_" + canonical_hash(fingerprint)[:32], config_hash=config_hash, sources=tuple(sources), documents=document_snapshots, chunks=chunk_snapshots, quarantined=tuple(quarantined), counts_by_source_type=tuple(CountEntry(name=name, count=count) for name, count in sorted(Counter(item.source_type or "unknown" for item in sources).items())), counts_by_file_type=tuple(CountEntry(name=name, count=count) for name, count in sorted(Counter(item.file_type for item in sources).items())), parser_backends=backends, metadata_complete=bool(chunks) and all(item.metadata.source_locator.raw is not None for item in chunks), fingerprint=canonical_json(fingerprint))
         self._write_atomic(output, manifest)
         return manifest

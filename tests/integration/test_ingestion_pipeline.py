@@ -6,6 +6,8 @@ from pathlib import Path
 import subprocess
 import sys
 
+import pytest
+
 
 def _catalog(tmp_path: Path, *, include_binary: bool = False) -> Path:
     root = tmp_path / "corpus"
@@ -99,3 +101,51 @@ def test_demo_cli_builds_all_frozen_records(tmp_path: Path) -> None:
     assert summary["status"] == "ok"
     assert len(payload["sources"]) == 74 and len(payload["documents"]) == 116 and len(payload["chunks"]) == 120
     assert payload["quarantined"][0]["source_path"] == "pdf/scanned-regulator-notice.pdf"
+
+
+def test_persisted_manifest_rejects_snapshot_count_and_build_id_tampering(tmp_path: Path) -> None:
+    from pydantic import ValidationError
+    from trade_agent.data.manifest import BuildManifest
+    from trade_agent.data.pipeline import IngestionPipeline, SourceCatalog
+
+    result = IngestionPipeline().run(SourceCatalog.from_yaml(_catalog(tmp_path)), tmp_path / "build.json")
+    payload = result.model_dump(mode="json")
+    payload["chunks"][0]["chunk_id"] = "wrong"
+    with pytest.raises(ValidationError):
+        BuildManifest.model_validate(payload)
+    payload = result.model_dump(mode="json")
+    payload["counts_by_file_type"][0]["count"] = 99
+    with pytest.raises(ValidationError):
+        BuildManifest.model_validate(payload)
+    payload = result.model_dump(mode="json")
+    payload["build_id"] = "build_" + "f" * 32
+    with pytest.raises(ValidationError):
+        BuildManifest.model_validate(payload)
+
+
+def test_oversized_source_is_quarantined_without_aborting_batch(tmp_path: Path) -> None:
+    from trade_agent.data.pipeline import IngestionPipeline, SourceCatalog
+    from trade_agent.data.router import DocumentRouter
+
+    result = IngestionPipeline(document_router=DocumentRouter(max_bytes=1)).run(SourceCatalog.from_yaml(_catalog(tmp_path)), tmp_path / "build.json")
+    assert result.quarantined[0].error_code == "input_too_large"
+    assert result.sources[0].status == "quarantined"
+    assert result.metadata_complete is False
+
+
+def test_dangling_symlink_and_replace_failure_preserve_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from trade_agent.data.pipeline import IngestionPipeline, SourceCatalog
+
+    catalog = SourceCatalog.from_yaml(_catalog(tmp_path))
+    dangling = tmp_path / "dangling.json"
+    dangling.symlink_to(tmp_path / "missing.json")
+    with pytest.raises(ValueError):
+        IngestionPipeline().run(catalog, dangling)
+
+    output = tmp_path / "existing.json"
+    output.write_text("original", encoding="utf-8")
+    monkeypatch.setattr("trade_agent.data.pipeline.os.replace", lambda *_: (_ for _ in ()).throw(OSError("injected")))
+    with pytest.raises(OSError):
+        IngestionPipeline().run(catalog, output)
+    assert output.read_text(encoding="utf-8") == "original"
+    assert not list(tmp_path.glob(".existing.json.*.tmp"))

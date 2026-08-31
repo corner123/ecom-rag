@@ -78,3 +78,29 @@ no host paths or credential assignments appear in production Task 7 files.
 MinerU is unavailable in the exercised environment. The pipeline records the
 reviewed router's exact degradation and retains the scanned regulator PDF as
 an explicit quarantine; it does not claim OCR succeeded.
+
+## Controller follow-up hardening
+
+The persisted-manifest boundary now verifies every snapshot against its
+payload, derives the fingerprint from the restored records with only volatile
+timestamps removed, and requires the build ID to equal that fingerprint hash.
+It rejects changed IDs, content, payloads, counts, completeness flags, and
+duplicate IDs on load. Catalog normalization sorts rules and set-like fields
+and replaces every physical root with the stable `corpus-root` token, while
+duplicate detection remains before normalization.
+
+The source hash remains streaming and bounded; too-large sources now become
+per-source `input_too_large` quarantines. Atomic writing rejects dangling
+targets, preserves the prior output if replacement fails, removes the temp
+file, and accepts only verified macOS platform aliases under `/private`.
+
+Follow-up GREEN:
+
+```text
+$ uv run pytest tests/unit/test_manifest.py tests/integration/test_ingestion_pipeline.py -q
+10 passed in 0.31s
+$ docker compose run --rm --no-deps api pytest tests/unit/test_manifest.py tests/integration/test_ingestion_pipeline.py -q
+10 passed in 0.83s
+$ uv run pytest tests/unit tests/integration/test_ingestion_pipeline.py -q
+158 passed, 5 third-party SWIG deprecation warnings
+```
