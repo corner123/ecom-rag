@@ -69,7 +69,18 @@ def sanitize_diagnostic(value: object, limit: int = 240, *, source_path: str | N
     )
     text = re.sub(r"(https?://)[^/@\s]+@", r"\1[REDACTED]@", text)
     text = re.sub(r"([?&][^=&#\s]+)=([^&#\s]*)", r"\1=[REDACTED]", text)
-    text = re.sub(r"(?<![A-Za-z0-9:/])(?:/Users/|/home/|/private/var/|/private/tmp/)[^\s,;)}\]]+", "[HOST_PATH]", text)
+    protected_urls: dict[str, str] = {}
+
+    def protect_url(match: re.Match[str]) -> str:
+        key = f"__SAFE_URL_{len(protected_urls)}__"
+        protected_urls[key] = match.group(0)
+        return key
+
+    text = re.sub(r"https?://[^\s,;)}\]]+", protect_url, text, flags=re.IGNORECASE)
+    text = re.sub(r"(?<![A-Za-z0-9:/])/(?!/)[^\s,;)}\]]+", "[HOST_PATH]", text)
+    text = re.sub(r"(?i)(?<![A-Za-z0-9])\\\\[^\\/\s]+(?:\\[^\\/\s]+)+", "[HOST_PATH]", text)
     text = re.sub(r"(?i)(?<![A-Za-z0-9])(?:[A-Z]:\\)[^\s,;)}\]]+", "[HOST_PATH]", text)
+    for key, url in protected_urls.items():
+        text = text.replace(key, url)
     text = text[:limit].strip()
     return text or "[REDACTED]"

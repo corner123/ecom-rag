@@ -194,3 +194,23 @@ def test_sanitize_diagnostic_redacts_posix_and_windows_host_paths_without_url_da
     assert QuarantineRecord(
         error_code="bad", source_path="input.pdf", parser="router", diagnostic=sanitized
     )
+
+
+def test_sanitize_diagnostic_redacts_generic_posix_and_unc_paths_idempotently() -> None:
+    from pydantic import ValidationError
+    from trade_agent.data.quarantine import QuarantineRecord, sanitize_diagnostic
+
+    diagnostic = (
+        "files /tmp/private-key.json /etc/passwd /opt/app/x "
+        "\\\\server\\share\\secret https://safe.example/path locator=relative/file.txt"
+    )
+    sanitized = sanitize_diagnostic(diagnostic)
+    assert all(path not in sanitized for path in ("/tmp/", "/etc/", "/opt/", "\\\\server\\"))
+    assert "https://safe.example/path" in sanitized
+    assert "locator=relative/file.txt" in sanitized
+    assert sanitize_diagnostic(sanitized) == sanitized
+    with pytest.raises(ValidationError):
+        QuarantineRecord(error_code="bad", source_path="relative/file.txt", parser="router", diagnostic=diagnostic)
+    record = QuarantineRecord(error_code="bad", source_path="relative/file.txt", parser="router", diagnostic=sanitized)
+    with pytest.raises(ValidationError):
+        record.model_copy(update={"diagnostic": diagnostic})

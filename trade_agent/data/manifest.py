@@ -44,6 +44,10 @@ def _normalize_metadata_value(field: str, value: Any) -> Any:
         return _normalize_url(value)
     if field in {"source_weight", "ocr_confidence"} and value is not None:
         return float(value)
+    if field == "country_code" and isinstance(value, str):
+        return value.upper()
+    if field == "entity_id" and value is not None and not isinstance(value, str):
+        return str(value)
     if hasattr(value, "value"):
         return value.value
     return value

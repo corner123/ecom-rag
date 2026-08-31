@@ -261,3 +261,34 @@ The demo remains exactly `74` sources, `116` documents, and `120` chunks with
 one scanned-PDF quarantine. The scan source persists `parser_backend=pymupdf`
 and `degraded=true`; backend state contains `unavailable` and
 `mineru_unavailable`.
+
+## Review-fix round 5
+
+Generic diagnostic sanitization now protects URLs, redacts arbitrary POSIX
+absolute paths and Windows UNC paths, and remains idempotent for existing
+`[HOST_PATH]` markers. Manifest metadata comparisons normalize country codes to
+uppercase and numeric entity IDs to strings, matching `ChunkMetadata` producer
+normalization without weakening strict input validation.
+
+Test-first RED evidence:
+
+```text
+$ uv run pytest tests/unit/test_manifest.py tests/integration/test_ingestion_pipeline.py -q -k 'generic_posix or pipeline_normalizes'
+2 failed in 0.11s
+```
+
+GREEN and release verification:
+
+```text
+$ uv run pytest tests/unit/test_manifest.py tests/integration/test_ingestion_pipeline.py -q -k 'generic_posix or pipeline_normalizes'
+2 passed, 30 deselected in 0.11s
+$ uv run pytest tests/unit -q
+159 passed, 5 third-party SWIG deprecation warnings in 2.34s
+$ uv run pytest tests/integration/test_ingestion_pipeline.py tests/integration/test_corpus_routing.py tests/integration/test_pdf_pipeline.py -q
+42 passed, 5 third-party SWIG deprecation warnings in 0.70s
+$ uv run python -m compileall -q trade_agent scripts tests
+$ uv lock --check
+Resolved 49 packages in 2ms
+$ git diff --check
+passed
+```

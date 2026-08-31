@@ -241,6 +241,23 @@ def test_signed_equivalent_z_timestamp_is_valid(tmp_path: Path) -> None:
     assert BuildManifest.model_validate(_resign_manifest_payload(payload))
 
 
+def test_pipeline_normalizes_lower_country_and_numeric_entity_id(tmp_path: Path) -> None:
+    from trade_agent.data.manifest import BuildManifest
+    from trade_agent.data.pipeline import IngestionPipeline, SourceCatalog
+
+    catalog_path = _catalog(tmp_path)
+    catalog = SourceCatalog.from_yaml(catalog_path)
+    manifest_path = catalog.corpus_root / "manifests" / "corpus_manifest.json"
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["records"][0]["country_code"] = "cn"
+    payload["records"][0]["entity_id"] = 123
+    manifest_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    result = IngestionPipeline().run(SourceCatalog.from_yaml(catalog_path), tmp_path / "build.json")
+    assert BuildManifest.model_validate_json((tmp_path / "build.json").read_text(encoding="utf-8")) == result
+    chunk = result.chunks[0].restore().metadata
+    assert chunk.country_code == "CN" and chunk.entity_id == "123"
+
+
 def test_catalog_rule_and_field_order_is_semantic_invariant(tmp_path: Path) -> None:
     from trade_agent.data.pipeline import IngestionPipeline, SourceCatalog
 
