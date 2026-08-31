@@ -124,3 +124,19 @@ $ docker compose run --rm --no-deps api pytest tests/unit/test_manifest.py tests
 $ uv run pytest tests/unit -q
 150 passed, 5 third-party SWIG deprecation warnings
 ```
+
+## Reload follow-up
+
+Optional `parser_backend` validation is now null-safe, so quarantined source
+records (including unsupported files) round-trip through `BuildManifest`
+without an `AttributeError`. Source IDs, source/file types, hashes, states,
+and count entry naming/order are validated strictly.
+
+```text
+$ uv run pytest tests/unit/test_manifest.py tests/integration/test_ingestion_pipeline.py -q
+10 passed in 0.36s
+$ docker compose run --rm --no-deps api pytest tests/unit/test_manifest.py tests/integration/test_ingestion_pipeline.py -q
+10 passed in 0.73s
+$ uv run pytest tests/unit -q
+150 passed, 5 third-party SWIG deprecation warnings
+```

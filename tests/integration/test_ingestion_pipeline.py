@@ -50,6 +50,7 @@ def test_same_inputs_produce_same_build_id_and_chunk_ids(tmp_path: Path) -> None
 
 
 def test_unsupported_file_is_counted_not_dropped(tmp_path: Path) -> None:
+    from trade_agent.data.manifest import BuildManifest
     from trade_agent.data.pipeline import IngestionPipeline, SourceCatalog
 
     catalog = SourceCatalog.from_yaml(_catalog(tmp_path, include_binary=True))
@@ -57,6 +58,7 @@ def test_unsupported_file_is_counted_not_dropped(tmp_path: Path) -> None:
 
     assert result.quarantined[0].error_code == "unsupported_file_type"
     assert result.file_type_counts["unsupported"] == 1
+    assert BuildManifest.model_validate_json(result.model_dump_json()) == result
 
 
 def test_tampered_manifest_hash_is_quarantined_and_output_refuses_symlink(tmp_path: Path) -> None:

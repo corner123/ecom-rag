@@ -13,7 +13,7 @@ from pathlib import PurePosixPath
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, field_validator, model_validator
 
 from trade_agent.data.quarantine import QuarantineRecord
-from trade_agent.schemas.source import ChunkRecord, DocumentRecord
+from trade_agent.schemas.source import ChunkRecord, DocumentRecord, FileType, SourceType
 
 METADATA_SCHEMA_VERSION = "task6-source-metadata-v1"
 
@@ -41,11 +41,18 @@ class SourceBuildRecord(_FrozenModel):
     parser_backend: StrictStr | None = None
     degraded: StrictBool = False
 
-    @field_validator("source_id", "path", "file_type", "status", "parser_backend")
+    @field_validator("source_id", "path", "file_type", "status")
     @classmethod
     def nonblank(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("must not be blank")
+        return value
+
+    @field_validator("parser_backend")
+    @classmethod
+    def backend_nonblank_when_present(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("parser backend must not be blank")
         return value
 
     @field_validator("actual_content_hash", "manifest_content_hash")
@@ -59,6 +66,12 @@ class SourceBuildRecord(_FrozenModel):
     def source_consistency(self) -> "SourceBuildRecord":
         if self.status not in {"parsed", "quarantined"}:
             raise ValueError("source status is invalid")
+        if not re.fullmatch(r"source_[0-9a-f]{32}", self.source_id):
+            raise ValueError("source ID must be stable")
+        if self.source_type not in {item.value for item in SourceType}:
+            raise ValueError("source type is unsupported")
+        if self.file_type not in {item.value for item in FileType} | {"unsupported"}:
+            raise ValueError("file type is unsupported")
         if self.path.startswith("/") or ".." in PurePosixPath(self.path).parts:
             raise ValueError("source path must be safe and relative")
         if self.status == "parsed" and (self.actual_content_hash != self.manifest_content_hash or not self.parser_backend):
@@ -69,6 +82,13 @@ class SourceBuildRecord(_FrozenModel):
 class CountEntry(_FrozenModel):
     name: StrictStr
     count: StrictInt = Field(ge=0)
+
+    @field_validator("name")
+    @classmethod
+    def count_name(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("count name must not be blank")
+        return value
 
 
 class ParserBackends(_FrozenModel):
@@ -193,6 +213,10 @@ class BuildManifest(_FrozenModel):
             raise ValueError("source IDs must be unique")
         if len(set(self.document_ids)) != len(self.documents) or len(set(self.chunk_ids)) != len(self.chunks):
             raise ValueError("document and chunk IDs must be unique")
+        if len({item.name for item in self.counts_by_source_type}) != len(self.counts_by_source_type) or len({item.name for item in self.counts_by_file_type}) != len(self.counts_by_file_type):
+            raise ValueError("count names must be unique")
+        if tuple(sorted(item.name for item in self.counts_by_source_type)) != tuple(item.name for item in self.counts_by_source_type) or tuple(sorted(item.name for item in self.counts_by_file_type)) != tuple(item.name for item in self.counts_by_file_type):
+            raise ValueError("count names must be sorted")
         if self.source_type_counts != Counter(item.source_type or "unknown" for item in self.sources):
             raise ValueError("source type counts do not match sources")
         if self.file_type_counts != Counter(item.file_type for item in self.sources):
