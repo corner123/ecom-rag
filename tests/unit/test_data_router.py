@@ -823,3 +823,31 @@ def test_quarantine_record_validates_nonblank_and_sanitizer_removes_paths_and_al
             QuarantineRecord(**values)
     quoted = sanitize_diagnostic('{"password":"hunter2","api_key":"secret"} Authorization: Bearer bearer-token')
     assert "hunter2" not in quoted and "secret" not in quoted and "bearer-token" not in quoted
+
+
+def test_direct_router_quarantine_uses_deterministic_safe_absolute_fallback(tmp_path):
+    from trade_agent.data.router import DocumentRouter
+
+    path = tmp_path / "a" / "b" / "x.html"
+    path.parent.mkdir(parents=True)
+    path.write_text("not html", encoding="utf-8")
+    inp = source("website/section-01.html", FileType.HTML, SourceType.OFFICIAL_WEBSITE).model_copy(update={"path": path})
+    first_router = DocumentRouter()
+    assert first_router.load(inp) == []
+    router = DocumentRouter()
+    router.load(inp)
+    reported = router.quarantines[-1].source_path
+    assert "/Users" not in reported and reported == first_router.quarantines[-1].source_path
+    assert reported.endswith("/x.html")
+
+
+def test_router_quarantine_prefers_explicit_safe_display_path(tmp_path):
+    from trade_agent.data.router import DocumentRouter
+
+    path = tmp_path / "x.html"
+    path.write_text("not html", encoding="utf-8")
+    inp = source("website/section-01.html", FileType.HTML, SourceType.OFFICIAL_WEBSITE).model_copy(update={"path": path, "display_path": "a/b/x.html"})
+    DocumentRouter().load(inp)
+    router = DocumentRouter()
+    router.load(inp)
+    assert router.quarantines[-1].source_path == "a/b/x.html"

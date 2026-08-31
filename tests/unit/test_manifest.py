@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from datetime import datetime, timezone
 
 import pytest
 
@@ -78,3 +79,97 @@ def test_quarantine_diagnostic_redacts_cookie_session_and_signature_assignments(
     diagnostic = sanitize_diagnostic("cookie=abc session_id=def signature=ghi sig=jkl", source_path="relative/file.txt")
     assert "abc" not in diagnostic and "def" not in diagnostic and "ghi" not in diagnostic and "jkl" not in diagnostic
     assert diagnostic.count("[REDACTED]") == 4
+
+
+def test_snapshots_require_exact_canonical_json_payload() -> None:
+    from pydantic import ValidationError
+    from trade_agent.data.manifest import ChunkSnapshot, DocumentSnapshot, canonical_json
+    from trade_agent.schemas.source import DocumentRecord, FileType, SourceType, content_sha256
+
+    document = DocumentRecord(
+        document_id="doc-example",
+        source_id="source-example",
+        file_type=FileType.HTML,
+        source_type=SourceType.OFFICIAL_WEBSITE,
+        title="Example",
+        language="en",
+        content="Evidence",
+        content_hash=content_sha256("Evidence"),
+        fetched_at=datetime(2026, 8, 30, tzinfo=timezone.utc),
+        is_synthetic=True,
+        units=[{"text": "Evidence", "locator": {"section": "Overview", "raw": {"claim": "C1"}}}],
+        source_url="https://example.com/source",
+    )
+    snapshot = DocumentSnapshot.freeze(document)
+    assert snapshot.payload == canonical_json(document.model_dump(mode="json"))
+    payload = json.loads(snapshot.payload)
+    payload["title"] = "Tampered"
+    payload_text = json.dumps(payload, ensure_ascii=False, indent=2)
+    with pytest.raises(ValidationError):
+        DocumentSnapshot.model_validate({"document_id": snapshot.document_id, "payload": payload_text})
+    with pytest.raises(ValidationError):
+        snapshot.model_copy(update={"payload": json.dumps(json.loads(snapshot.payload), ensure_ascii=False)})
+
+
+def test_chunk_snapshot_rejects_reordered_json_even_when_fingerprint_fields_match() -> None:
+    from pydantic import ValidationError
+    from trade_agent.data.manifest import ChunkSnapshot
+    from trade_agent.schemas.source import ChunkMetadata, ChunkRecord, FileType, SourceLocator, SourceType, content_sha256
+
+    metadata = ChunkMetadata(
+        chunk_id="chunk-example",
+        document_id="doc-example",
+        file_type=FileType.HTML,
+        source_type=SourceType.OFFICIAL_WEBSITE,
+        source_weight=0.5,
+        ingested_at=datetime(2026, 8, 30, tzinfo=timezone.utc),
+        source_locator=SourceLocator(section="Overview"),
+        content_hash=content_sha256("Evidence"),
+        parent_document_hash="a" * 64,
+        language="en",
+        is_synthetic=True,
+    )
+    snapshot = ChunkSnapshot.freeze(ChunkRecord(content="Evidence", metadata=metadata))
+    payload = json.loads(snapshot.payload)
+    reordered = "{" + ",".join(f"{json.dumps(key)}:{json.dumps(payload[key], ensure_ascii=False)}" for key in reversed(payload)) + "}"
+    with pytest.raises(ValidationError):
+        ChunkSnapshot.model_validate({"chunk_id": snapshot.chunk_id, "content": snapshot.content, "payload": reordered})
+
+
+def test_build_manifest_rejects_chunk_locator_not_in_document_units(tmp_path: Path) -> None:
+    from pydantic import ValidationError
+    from trade_agent.data.manifest import BuildManifest
+    from trade_agent.data.pipeline import IngestionPipeline, SourceCatalog
+
+    manifest = IngestionPipeline().run(SourceCatalog.from_yaml(_catalog(tmp_path)), tmp_path / "build.json")
+    payload = manifest.model_dump(mode="json")
+    snapshot_payload = json.loads(payload["chunks"][0]["payload"])
+    snapshot_payload["metadata"]["source_locator"]["section"] = "Other"
+    from trade_agent.data.manifest import canonical_json
+    payload["chunks"][0]["payload"] = canonical_json(snapshot_payload)
+    with pytest.raises(ValidationError):
+        BuildManifest.model_validate(payload)
+
+
+def test_parser_backend_tuples_are_strict_and_quarantine_copy_revalidates() -> None:
+    from pydantic import ValidationError
+    from trade_agent.data.manifest import ParserBackends
+    from trade_agent.data.quarantine import QuarantineRecord
+
+    with pytest.raises(ValidationError):
+        ParserBackends(
+            document_router_version="router",
+            chunk_router_version="chunker",
+            max_tokens=10,
+            overlap_tokens=1,
+            mineru_statuses=("available", "available"),
+            degraded_components=(),
+        )
+    quarantine = QuarantineRecord(
+        error_code="bad",
+        source_path="a/file.html",
+        parser="router",
+        diagnostic="safe",
+    )
+    with pytest.raises(ValidationError):
+        quarantine.model_copy(update={"diagnostic": "token=secret"})

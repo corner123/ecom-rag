@@ -29,6 +29,57 @@ $ uv run pytest tests/unit/test_manifest.py tests/integration/test_ingestion_pip
 5 failed in 0.04s
 ```
 
+## Review-fix round 3
+
+The review regressions covered exact canonical snapshot payloads, bounded and
+symlink-safe frozen-manifest loading, truthful scanned-PDF quarantine backend
+state, deep relative quarantine locators, copied-root/catalog determinism,
+output-ancestor safety, injected chunk failure persistence, and document/chunk
+metadata and locator cross-invariants.
+
+Test-first RED evidence:
+
+```text
+$ uv run pytest tests/unit/test_manifest.py tests/integration/test_ingestion_pipeline.py tests/unit/test_data_router.py -q -k 'snapshot or frozen_manifest or deep_relative or chunk_failure or direct_router_quarantine or explicit_safe_display or locator_not_in_document'
+3 failed, 8 passed, 93 deselected in 0.13s
+```
+
+The three intended failures were acceptance of reordered/pretty snapshot JSON,
+acceptance of a tampered chunk locator, and rejection of the new explicit
+display-path field as an extra input. Initial fixture-only errors were corrected
+before recording this RED result.
+
+GREEN and final verification:
+
+```text
+$ uv run pytest tests/unit/test_manifest.py tests/integration/test_ingestion_pipeline.py tests/unit/test_data_router.py -q -k 'snapshot or frozen_manifest or deep_relative or chunk_failure or direct_router_quarantine or explicit_safe_display or locator_not_in_document'
+11 passed, 93 deselected in 0.16s
+
+$ uv run pytest tests/unit/test_manifest.py tests/integration/test_ingestion_pipeline.py -q
+23 passed in 0.56s
+
+$ uv run pytest tests/unit/test_manifest.py tests/integration/test_ingestion_pipeline.py tests/unit/test_data_router.py tests/unit/test_chunkers.py tests/integration/test_pdf_pipeline.py tests/integration/test_corpus_routing.py -q
+146 passed, 5 third-party SWIG deprecation warnings in 0.80s
+
+$ uv run pytest tests/unit -q
+156 passed, 5 third-party SWIG deprecation warnings in 2.30s
+
+$ uv run pytest tests/integration/test_corpus_routing.py tests/integration/test_pdf_pipeline.py tests/integration/test_ingestion_pipeline.py -q
+35 passed, 5 third-party SWIG deprecation warnings in 0.66s
+
+$ uv run python -m compileall -q trade_agent scripts tests
+$ uv lock --check
+Resolved 49 packages in 2ms
+$ git diff --check
+passed
+```
+
+The persisted demo regression remains exactly `74` sources, `116` documents,
+and `120` chunks with one scanned-PDF quarantine. Its source records
+`parser_backend=pymupdf` and `degraded=true`; parser backend state includes
+`mineru_statuses=["unavailable"]` and `mineru_unavailable`, with no `/Users/`
+or repository-root paths in the JSON.
+
 The failures were missing `manifest`/`pipeline` modules and unredacted
 `cookie`, `session_id`, `signature`, and `sig` values.
 

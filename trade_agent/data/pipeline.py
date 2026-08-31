@@ -26,6 +26,7 @@ from trade_agent.schemas.source import FileType, SourceType, content_sha256, sta
 
 DOCUMENT_ROUTER_VERSION = "task6-document-router-v1"
 CHUNK_ROUTER_VERSION = "task6-chunk-router-v1"
+MAX_FROZEN_MANIFEST_BYTES = 20_000_000
 _URL = TypeAdapter(AnyUrl)
 _EXTENSIONS = {".html": FileType.HTML, ".htm": FileType.HTML, ".md": FileType.MARKDOWN, ".markdown": FileType.MARKDOWN, ".jsonl": FileType.JSONL, ".pdf": FileType.PDF}
 
@@ -164,10 +165,41 @@ class IngestionPipeline:
         return path
 
     @staticmethod
-    def _frozen_records(root: Path) -> dict[str, dict[str, Any]]:
+    def _manifest_path(root: Path) -> Path:
         try:
-            data = json.loads((root / "manifests" / "corpus_manifest.json").read_text(encoding="utf-8"))["records"]
-        except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
+            root_resolved = root.resolve(strict=True)
+            manifest_dir = root / "manifests"
+            manifest_path = manifest_dir / "corpus_manifest.json"
+            if root.is_symlink() or not root.is_dir():
+                raise ValueError
+            if manifest_dir.is_symlink() or not manifest_dir.is_dir():
+                raise ValueError
+            if manifest_path.is_symlink() or not manifest_path.is_file():
+                raise ValueError
+            if not manifest_path.resolve(strict=True).is_relative_to(root_resolved):
+                raise ValueError
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise ValueError("frozen corpus manifest is unreadable") from exc
+        return manifest_path
+
+    def _frozen_records(self, root: Path, *, maximum: int | None = None) -> dict[str, dict[str, Any]]:
+        limit = MAX_FROZEN_MANIFEST_BYTES if maximum is None else maximum
+        if type(limit) is not int or limit <= 0:
+            raise ValueError("frozen corpus manifest is unreadable")
+        try:
+            manifest_path = self._manifest_path(root)
+            if manifest_path.stat().st_size > limit:
+                raise ValueError("frozen corpus manifest exceeds size limit")
+            chunks: list[bytes] = []
+            total = 0
+            with manifest_path.open("rb") as handle:
+                while block := handle.read(min(1024 * 1024, limit + 1 - total)):
+                    total += len(block)
+                    if total > limit:
+                        raise ValueError("frozen corpus manifest exceeds size limit")
+                    chunks.append(block)
+            data = json.loads(b"".join(chunks).decode("utf-8"))["records"]
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             raise ValueError("frozen corpus manifest is unreadable") from exc
         records: dict[str, dict[str, Any]] = {}
         for item in data:
@@ -268,14 +300,57 @@ class IngestionPipeline:
                 continue
             assert path is not None and record is not None and file_type is not None and actual_hash is not None
             try:
-                source = SourceInput(path=path, file_type=file_type, source_type=candidate.rule.source_type, source_id=source_id, title=record.get("expected_entity", candidate.relative_path), language="en", fetched_at=datetime.fromisoformat(record["ingested_at"]), is_synthetic=record["is_synthetic"], source_url=candidate.rule.url_pattern.replace("*", quote(Path(candidate.relative_path).stem, safe="")), publish_time=datetime.fromisoformat(record["publish_time"]), valid_from=datetime.fromisoformat(record["valid_from"]), valid_to=datetime.fromisoformat(record["valid_to"]) if record.get("valid_to") else None, manifest_attributes={key: value for key, value in record.items() if key not in {"path", "content_hash", "file_type", "source_type", "is_synthetic", "ingested_at", "publish_time", "valid_from", "valid_to", "expected_entity"}})
+                source = SourceInput(
+                    path=path,
+                    display_path=candidate.relative_path,
+                    file_type=file_type,
+                    source_type=candidate.rule.source_type,
+                    source_id=source_id,
+                    title=record.get("expected_entity", candidate.relative_path),
+                    language="en",
+                    fetched_at=datetime.fromisoformat(record["ingested_at"]),
+                    is_synthetic=record["is_synthetic"],
+                    source_url=candidate.rule.url_pattern.replace(
+                        "*", quote(Path(candidate.relative_path).stem, safe="")
+                    ),
+                    publish_time=datetime.fromisoformat(record["publish_time"]),
+                    valid_from=datetime.fromisoformat(record["valid_from"]),
+                    valid_to=datetime.fromisoformat(record["valid_to"])
+                    if record.get("valid_to")
+                    else None,
+                    manifest_attributes={
+                        key: value
+                        for key, value in record.items()
+                        if key
+                        not in {
+                            "path",
+                            "content_hash",
+                            "file_type",
+                            "source_type",
+                            "is_synthetic",
+                            "ingested_at",
+                            "publish_time",
+                            "valid_from",
+                            "valid_to",
+                            "expected_entity",
+                        }
+                    },
+                )
             except (KeyError, TypeError, ValueError) as exc:
                 quarantined.append(self._q("manifest_record_invalid", candidate.relative_path, exc))
                 sources.append(SourceBuildRecord(source_id=source_id, path=candidate.relative_path, source_type=candidate.rule.source_type.value, file_type=file_type.value, actual_content_hash=actual_hash, manifest_content_hash=record.get("content_hash"), status="quarantined"))
                 continue
             before = len(self.document_router.quarantines)
             routed = self.document_router.load(source)
-            own_q = [QuarantineRecord(error_code=item.error_code.lower(), source_path=candidate.relative_path, parser=item.parser, diagnostic=item.diagnostic) for item in self.document_router.quarantines[before:]]
+            own_q = [
+                QuarantineRecord(
+                    error_code=item.error_code.lower(),
+                    source_path=candidate.relative_path,
+                    parser=item.parser,
+                    diagnostic=item.diagnostic,
+                )
+                for item in self.document_router.quarantines[before:]
+            ]
             quarantined.extend(own_q)
             documents.extend(routed)
             chunk_failed = False
@@ -284,13 +359,53 @@ class IngestionPipeline:
                 except Exception as exc:
                     chunk_failed = True
                     quarantined.append(self._q("chunk_failed", candidate.relative_path, exc, "chunker"))
-            parser = next((str(item.attributes["parser"]) for item in routed if item.attributes.get("parser")), "document_router")
-            sources.append(SourceBuildRecord(source_id=source_id, path=candidate.relative_path, source_type=candidate.rule.source_type.value, file_type=file_type.value, actual_content_hash=actual_hash, manifest_content_hash=record.get("content_hash"), status="quarantined" if own_q or chunk_failed else "parsed", parser_backend=parser, degraded=any(item.attributes.get("degraded_components") for item in routed)))
+            parser = next(
+                (str(item.attributes["parser"]) for item in routed if item.attributes.get("parser")),
+                own_q[-1].parser if own_q else "document_router",
+            )
+            sources.append(
+                SourceBuildRecord(
+                    source_id=source_id,
+                    path=candidate.relative_path,
+                    source_type=candidate.rule.source_type.value,
+                    file_type=file_type.value,
+                    actual_content_hash=actual_hash,
+                    manifest_content_hash=record.get("content_hash"),
+                    status="quarantined" if own_q or chunk_failed else "parsed",
+                    parser_backend=parser,
+                    degraded=bool(own_q)
+                    or chunk_failed
+                    or any(item.attributes.get("degraded_components") for item in routed),
+                )
+            )
         sources.sort(key=lambda item: item.path)
         documents.sort(key=lambda item: item.document_id)
         chunks.sort(key=lambda item: item.metadata.chunk_id)
         quarantined.sort(key=lambda item: (item.source_path, item.error_code, item.parser, item.diagnostic))
-        backends = ParserBackends(document_router_version=DOCUMENT_ROUTER_VERSION, chunk_router_version=CHUNK_ROUTER_VERSION, max_tokens=self.chunk_router.by[SourceType.B2B].max_tokens, overlap_tokens=self.chunk_router.by[SourceType.B2B].overlap_tokens, mineru_statuses=tuple(sorted({str(item.attributes["mineru_status"]) for item in documents if item.attributes.get("mineru_status")}) or ["not_attempted"]), degraded_components=tuple(sorted({str(component) for item in documents for component in item.attributes.get("degraded_components", [])})))
+        mineru_statuses = {
+            str(item.attributes["mineru_status"])
+            for item in documents
+            if item.attributes.get("mineru_status")
+        }
+        degraded_components = {
+            str(component)
+            for item in documents
+            for component in item.attributes.get("degraded_components", [])
+        }
+        for item in quarantined:
+            match = re.search(r"mineru_status=([a-z_]+)", item.diagnostic)
+            if match:
+                status = match.group(1)
+                mineru_statuses.add(status)
+                degraded_components.add(f"mineru_{status}")
+        backends = ParserBackends(
+            document_router_version=DOCUMENT_ROUTER_VERSION,
+            chunk_router_version=CHUNK_ROUTER_VERSION,
+            max_tokens=self.chunk_router.by[SourceType.B2B].max_tokens,
+            overlap_tokens=self.chunk_router.by[SourceType.B2B].overlap_tokens,
+            mineru_statuses=tuple(sorted(mineru_statuses or {"not_attempted"})),
+            degraded_components=tuple(sorted(degraded_components)),
+        )
         config_hash = canonical_hash({"catalog": catalog.normalized(), "router": {"version": DOCUMENT_ROUTER_VERSION, "max_bytes": self.document_router.max_bytes, "max_documents": self.document_router.max_documents}, "chunker": backends.model_dump(mode="json"), "metadata_schema_version": METADATA_SCHEMA_VERSION})
         document_snapshots = tuple(DocumentSnapshot.freeze(item) for item in documents)
         chunk_snapshots = tuple(ChunkSnapshot.freeze(item) for item in chunks)

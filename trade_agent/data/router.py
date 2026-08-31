@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from copy import deepcopy
 from datetime import datetime
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from pydantic import (
@@ -238,6 +239,7 @@ class SourceInput(BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
     path: Path
+    display_path: StrictStr | None = None
     file_type: FileType
     source_type: SourceType
     source_id: StrictStr
@@ -277,6 +279,16 @@ class SourceInput(BaseModel):
         if value is not None and not value.strip():
             raise ValueError("must not be blank")
         return value
+
+    @field_validator("display_path")
+    @classmethod
+    def safe_display_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        path = PurePosixPath(value)
+        if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+            raise ValueError("display_path must be safe and relative")
+        return path.as_posix()
 
     @model_validator(mode="after")
     def ranges_and_attrs(self) -> "SourceInput":
@@ -343,7 +355,7 @@ class DocumentRouter:
 
     def _quarantine(self, code: str, source: SourceInput, parser: str, diagnostic: object) -> list[DocumentRecord]:
         # Persisted quarantine paths must not disclose host filesystem layout.
-        source_path = (Path(source.path.parent.name) / source.path.name).as_posix()
+        source_path = self._quarantine_path(source)
         self.quarantines.append(
             QuarantineRecord(
                 error_code=code,
@@ -353,6 +365,18 @@ class DocumentRouter:
             )
         )
         return []
+
+    @staticmethod
+    def _quarantine_path(source: SourceInput) -> str:
+        if source.display_path is not None:
+            return source.display_path
+        candidate = source.path.as_posix()
+        if not source.path.is_absolute():
+            path = PurePosixPath(candidate)
+            if not path.is_absolute() and all(part not in {"", ".", ".."} for part in path.parts):
+                return path.as_posix()
+        digest = hashlib.sha256(candidate.encode("utf-8")).hexdigest()[:16]
+        return (PurePosixPath("external") / digest / source.path.name).as_posix()
 
     def load(self, source: SourceInput) -> list[DocumentRecord]:
         try:
@@ -777,6 +801,7 @@ def probe_manifest(corpus_root: Path, manifest_path: Path) -> dict[str, Any]:
             publish_time=datetime.fromisoformat(record["publish_time"]),
             valid_from=datetime.fromisoformat(record["valid_from"]),
             manifest_attributes={key: value for key, value in record.items() if key not in {"path", "file_type", "source_type", "is_synthetic"}},
+            display_path=record["path"],
         )
         documents += len(router.load(source))
     return {

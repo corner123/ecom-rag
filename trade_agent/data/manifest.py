@@ -14,7 +14,7 @@ from copy import deepcopy
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, field_validator, model_validator
 
 from trade_agent.data.quarantine import QuarantineRecord
-from trade_agent.schemas.source import ChunkRecord, DocumentRecord, FileType, SourceType, stable_id
+from trade_agent.schemas.source import ChunkRecord, DocumentRecord, FileType, SourceLocator, SourceType, stable_id
 
 METADATA_SCHEMA_VERSION = "task6-source-metadata-v1"
 
@@ -135,7 +135,10 @@ class DocumentSnapshot(_FrozenModel):
 
     @model_validator(mode="after")
     def matches_payload(self) -> "DocumentSnapshot":
-        if self.restore().document_id != self.document_id:
+        restored = self.restore()
+        if self.payload != canonical_json(restored.model_dump(mode="json")):
+            raise ValueError("document snapshot payload must be canonical JSON")
+        if restored.document_id != self.document_id:
             raise ValueError("document snapshot ID does not match payload")
         return self
 
@@ -156,6 +159,8 @@ class ChunkSnapshot(_FrozenModel):
     @model_validator(mode="after")
     def matches_payload(self) -> "ChunkSnapshot":
         record = self.restore()
+        if self.payload != canonical_json(record.model_dump(mode="json")):
+            raise ValueError("chunk snapshot payload must be canonical JSON")
         if record.metadata.chunk_id != self.chunk_id or record.content != self.content:
             raise ValueError("chunk snapshot fields do not match payload")
         return self
@@ -235,8 +240,65 @@ class BuildManifest(_FrozenModel):
         for snapshot in self.chunks:
             chunk = snapshot.restore()
             document = documents.get(chunk.metadata.document_id)
-            if document is None or chunk.metadata.source_type != document.source_type or chunk.metadata.file_type != document.file_type or chunk.metadata.parent_document_hash != document.content_hash or chunk.metadata.language != document.language or chunk.metadata.is_synthetic != document.is_synthetic or str(chunk.metadata.source_url) != str(document.source_url) or str(chunk.metadata.canonical_url) != str(document.canonical_url):
+            if document is None:
                 raise ValueError("chunk does not match document")
+            if (
+                chunk.metadata.source_type != document.source_type
+                or chunk.metadata.file_type != document.file_type
+                or chunk.metadata.parent_document_hash != document.content_hash
+                or chunk.metadata.language != document.language
+                or chunk.metadata.is_synthetic != document.is_synthetic
+                or str(chunk.metadata.source_url) != str(document.source_url)
+                or str(chunk.metadata.canonical_url) != str(document.canonical_url)
+                or chunk.metadata.ingested_at != document.fetched_at
+            ):
+                raise ValueError("chunk does not match document")
+            locators = []
+            for unit in document.units:
+                raw_locator = unit.get("locator")
+                if isinstance(raw_locator, dict):
+                    try:
+                        locators.append(
+                            canonical_json(
+                                SourceLocator.model_validate(raw_locator).model_dump(
+                                    mode="json", exclude_none=True
+                                )
+                            )
+                        )
+                    except Exception:
+                        continue
+            chunk_locator = canonical_json(
+                chunk.metadata.source_locator.model_dump(mode="json", exclude_none=True)
+            )
+            if chunk_locator not in locators:
+                raise ValueError("chunk locator does not match document units")
+            attrs = document.attributes
+            expected = {
+                "entity_id": attrs.get("entity_id"),
+                "company_name": attrs.get("company") or attrs.get("supplier") or attrs.get("entity"),
+                "normalized_name": attrs.get("normalized_name"),
+                "country_code": attrs.get("country_code"),
+                "hs_code": attrs.get("hs_code"),
+                "product_name": attrs.get("product_name"),
+                "sku": attrs.get("sku"),
+                "source_weight": attrs.get("source_weight", 0.5),
+                "fact_type": attrs.get("fact_type"),
+                "publish_time": attrs.get("publish_time"),
+                "valid_from": attrs.get("valid_from"),
+                "valid_to": attrs.get("valid_to"),
+                "raw_record_id": attrs.get("raw_record_id"),
+                "aggregation_info": attrs.get("aggregation_info"),
+                "license_scope": attrs.get("license_scope"),
+                "dedupe_cluster_id": attrs.get("dedupe_cluster_id"),
+            }
+            for field, expected_value in expected.items():
+                actual_value = getattr(chunk.metadata, field)
+                if hasattr(actual_value, "value"):
+                    actual_value = actual_value.value
+                elif hasattr(actual_value, "isoformat"):
+                    actual_value = actual_value.isoformat()
+                if expected_value != actual_value:
+                    raise ValueError(f"chunk metadata {field} does not match document")
         if len(set(self.document_ids)) != len(self.documents) or len(set(self.chunk_ids)) != len(self.chunks):
             raise ValueError("document and chunk IDs must be unique")
         if len({item.name for item in self.counts_by_source_type}) != len(self.counts_by_source_type) or len({item.name for item in self.counts_by_file_type}) != len(self.counts_by_file_type):
