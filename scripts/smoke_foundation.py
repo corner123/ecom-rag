@@ -219,25 +219,29 @@ def _probe_mysql(settings: Settings) -> dict[str, Any]:
     if settings.mysql.user != "trade_query":
         raise ValueError("runtime database user must be trade_query")
     engine = create_engine(database_url_from_environment(role="query"), pool_pre_ping=True)
-    with engine.connect() as connection:
-        version = str(connection.scalar(text("SELECT VERSION()")))
-        live_schema = _live_schema(connection)
-        if live_schema["tables"] != sorted(EXPECTED_TABLES):
-            raise ValueError("unexpected MySQL table set")
-        expected_schema = _expected_schema()
-        if live_schema != expected_schema:
-            raise ValueError("MySQL schema contract drift")
-        counts = {table: int(connection.scalar(text(f"SELECT COUNT(*) FROM `{table}`"))) for table in EXPECTED_TABLES}
-        months = int(connection.scalar(text("SELECT COUNT(DISTINCT DATE_FORMAT(trade_date, '%Y-%m')) FROM trade_records")))
-        bundle = generate_trade_seed(SEED)
-        _, seed_hash = _seed_snapshot(connection, bundle)
-        synthetic_flags = {
-            "companies": int(connection.scalar(text("SELECT COUNT(*) FROM companies WHERE is_synthetic = 1"))) == counts["companies"],
-            "data_sources": int(connection.scalar(text("SELECT COUNT(*) FROM data_sources WHERE is_synthetic = 1"))) == counts["data_sources"],
-            "trade_record_ids": int(connection.scalar(text("SELECT COUNT(*) FROM trade_records WHERE raw_record_id LIKE 'SYN-%'"))) == counts["trade_records"],
-        }
-        if not all(synthetic_flags.values()):
-            raise ValueError("database synthetic flags are incomplete")
+    try:
+        with engine.connect() as connection:
+            version = str(connection.scalar(text("SELECT VERSION()")))
+            live_schema = _live_schema(connection)
+            if live_schema["tables"] != sorted(EXPECTED_TABLES):
+                raise ValueError("unexpected MySQL table set")
+            expected_schema = _expected_schema()
+            if live_schema != expected_schema:
+                raise ValueError("MySQL schema contract drift")
+            counts = {table: int(connection.scalar(text(f"SELECT COUNT(*) FROM `{table}`"))) for table in EXPECTED_TABLES}
+            months = int(connection.scalar(text("SELECT COUNT(DISTINCT DATE_FORMAT(trade_date, '%Y-%m')) FROM trade_records")))
+            bundle = generate_trade_seed(SEED)
+            _, seed_hash = _seed_snapshot(connection, bundle)
+            synthetic_flags = {
+                "companies": int(connection.scalar(text("SELECT COUNT(*) FROM companies WHERE is_synthetic = 1"))) == counts["companies"],
+                "data_sources": int(connection.scalar(text("SELECT COUNT(*) FROM data_sources WHERE is_synthetic = 1"))) == counts["data_sources"],
+                "trade_record_ids": int(connection.scalar(text("SELECT COUNT(*) FROM trade_records WHERE raw_record_id LIKE 'SYN-%'"))) == counts["trade_records"],
+            }
+            if not all(synthetic_flags.values()):
+                raise ValueError("database synthetic flags are incomplete")
+    except Exception:
+        engine.dispose()
+        raise
     return {"engine": engine, "version": version, "schema": live_schema, "schema_fingerprint": canonical_hash(live_schema), "counts": counts, "months": months, "seed_hash": seed_hash, "synthetic_flags": synthetic_flags, "before_counts": counts.copy()}
 
 
@@ -289,21 +293,6 @@ def _probe_milvus(settings: Settings) -> dict[str, Any]:
         if callable(close):
             close()
     return {"ready": True, "live": str(version), "collections": sorted(str(item) for item in collections)}
-
-
-def _probe_services(settings: Settings) -> dict[str, Any]:
-    redis_state = _probe_redis(settings)
-    milvus_state = _probe_milvus(settings)
-    etcd_host = __import__("os").environ.get("ETCD__HOST", "etcd")
-    etcd_port = int(__import__("os").environ.get("ETCD__PORT", "2379"))
-    etcd_health = _http_json(etcd_host, etcd_port, "/health")
-    etcd_version = _http_json(etcd_host, etcd_port, "/version")
-    if str(etcd_health.get("health", "")).lower() not in {"true", "ok"}:
-        raise RuntimeError("etcd health is not ready")
-    minio_host = __import__("os").environ.get("MINIO__HOST", "minio")
-    minio_port = int(__import__("os").environ.get("MINIO__PORT", "9000"))
-    _http_ok(minio_host, minio_port, "/minio/health/live")
-    return {"redis": redis_state, "milvus": milvus_state, "etcd": {"ready": True, "live": etcd_version}, "minio": {"ready": True, "live": "healthy"}}
 
 
 def _file_hashes(root: Path, *, exclude: set[str] | None = None) -> dict[str, str]:

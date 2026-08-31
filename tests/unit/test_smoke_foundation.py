@@ -115,3 +115,25 @@ def test_corpus_temp_directory_is_removed_after_success_and_exception(monkeypatc
     with pytest.raises(RuntimeError):
         smoke._run_corpus_in_temp()
     assert list(tmp_path.glob("trade-foundation-smoke-*")) == []
+
+
+def test_mysql_probe_disposes_engine_when_connection_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    import scripts.smoke_foundation as smoke
+
+    class FakeEngine:
+        disposed = False
+
+        def connect(self):
+            raise RuntimeError("synthetic connection failure")
+
+        def dispose(self):
+            self.disposed = True
+
+    engine = FakeEngine()
+    monkeypatch.setattr(smoke, "create_engine", lambda *args, **kwargs: engine)
+    monkeypatch.setattr(smoke, "database_url_from_environment", lambda role: "mysql://query")
+    settings = type("SettingsStub", (), {"mysql": type("MySQLStub", (), {"user": "trade_query"})()})()
+
+    with pytest.raises(RuntimeError, match="connection failure"):
+        smoke._probe_mysql(settings)
+    assert engine.disposed is True

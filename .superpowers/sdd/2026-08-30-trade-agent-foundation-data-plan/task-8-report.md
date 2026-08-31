@@ -53,7 +53,7 @@ committed. Real Compose dependencies started healthy. Migration and seed were
 run as transient commands with the migration password only on those commands.
 
 ```text
-$ docker compose run --rm --no-deps -e MYSQL__MIGRATION_PASSWORD=… api \
+$ docker compose run --rm --no-deps -e MYSQL__MIGRATION_PASSWORD api \
   pytest tests/unit tests/contract/test_compose_contract.py \
   tests/integration/test_mysql_schema.py tests/integration/test_ingestion_pipeline.py \
   tests/integration/test_pdf_pipeline.py -q
@@ -150,3 +150,7 @@ The etcd service command now includes the real `--data-dir=/etcd-data` and its
 `etcd_data:/etcd-data` volume is covered by the static contract. The unique
 project was cleaned with `docker compose -p task8review20260901 down -v`; the
 pre-existing `foreign-trade-agent_*` volumes were left untouched.
+
+The follow-up unit test also proves that a MySQL connection failure disposes
+the created engine, and the obsolete combined service probe was removed so
+each service remains independently staged and redacted.
