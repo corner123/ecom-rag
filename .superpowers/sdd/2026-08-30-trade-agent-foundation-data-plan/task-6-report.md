@@ -176,3 +176,96 @@ claimed. Fake-runner tests exercise argv safety, timeout/nonzero/no-output/malfo
 statuses and every output precedence branch. In the actual host/image environment, text
 PDFs degrade explicitly to PyMuPDF and the image-only scanned PDF quarantines rather than
 inventing OCR text.
+
+## Fix round 3: physical media sniff boundary (2026-08-31)
+
+The review finding was reproduced before changing production code. The old router used
+`mimetypes.guess_type(path.name)`, which derives a type from the extension already checked,
+and only sniffed a PDF prefix plus a narrow HTML regular expression. SVG/XML and printable
+archive-like bytes named `.md` therefore reached the Markdown parser.
+
+RED command and exact result:
+
+```text
+$ uv run pytest tests/unit/test_data_router.py -q -k 'content_sniffer or content_media_mismatch or angle_bracket_prose'
+15 failed, 3 passed, 46 deselected in 0.20s
+```
+
+The repair replaces extension-derived MIME guessing with the inspectable public
+`MediaKind` / `sniff_media_kind(raw)` physical boundary. The router calls it only after the
+existing bounded `max_bytes + 1` read, so it performs no extra file read. It classifies PDF,
+HTML, JSON, JSONL, generated profiles, ordinary Unicode text, XML/SVG, common archive
+signatures, image signatures, and invalid binary/control-byte input. Signature checks run
+before UTF-8 text classification. JSON-looking input stays in a structured kind even if its
+syntax is malformed, preserving the existing parser-owned `MALFORMED_JSON` result for a
+matching declaration while preventing a Markdown declaration from accepting it. Generated
+profiles are recognized by their physical profile marker set; generic JSON under a declared
+profile remains parser-owned for the existing typed shape validation.
+
+Each declared physical file type has a small compatibility set. PDF and HTML accept only
+their own media; Markdown accepts only text; structured declarations admit their own
+structured kind plus ordinary malformed text so syntax/shape failures keep their stable
+parser codes. Every identified cross-media mismatch now quarantines as
+`FILE_TYPE_MISMATCH`. Extension and source/file-matrix checks remain separate.
+
+The adversarial tests cover SVG/XML, archive/image/binary payloads renamed `.md`, PDF/HTML/
+JSON/profile cross-declarations, legitimate Markdown angle-bracket prose and fenced markup,
+an over-64-KiB JSON document renamed `.md`, block-root HTML fragments, and Markdown starting
+with natural-language `BM ...`. Weak BMP and ICO prefixes require their bounded structural
+header checks, rather than accepting two or four magic bytes alone. XML/SVG uses bounded
+regular-expression root detection rather than an XML parser.
+
+Initial GREEN command and exact result:
+
+```text
+$ uv run pytest tests/unit/test_data_router.py -q -k 'content_sniffer or content_media_mismatch or angle_bracket_prose'
+18 passed, 46 deselected in 0.11s
+```
+
+The additional large-JSON / HTML-fragment / weak-BMP focused baseline exposed the remaining
+hardening boundaries before their final implementation:
+
+```text
+$ uv run pytest tests/unit/test_data_router.py -q -k 'large_json_content or div_root_html or bm_prose or bounded_physical_media'
+3 failed, 11 passed, 54 deselected in 0.14s
+```
+
+Final focused GREEN result for that command:
+
+```text
+14 passed, 54 deselected in 0.07s
+```
+
+Final verification freshly run after the completed repair:
+
+```text
+$ uv run pytest tests/unit/test_data_router.py -q -k 'content_sniffer or content_media_mismatch or angle_bracket_prose or large_json_content or div_root_html or bm_prose'
+26 passed, 46 deselected in 0.13s
+
+$ uv run pytest tests/unit/test_data_router.py tests/unit/test_chunkers.py tests/integration/test_pdf_pipeline.py tests/integration/test_corpus_routing.py -q
+114 passed, 5 third-party SWIG deprecation warnings in 0.51s
+
+$ uv run pytest tests/unit -q
+136 passed, 5 third-party SWIG deprecation warnings in 2.23s
+
+$ MYSQL__ROOT_PASSWORD=<process-local> MYSQL__MIGRATION_PASSWORD=<process-local> MYSQL__QUERY_PASSWORD=<process-local> MINIO_ROOT_PASSWORD=<process-local> docker compose config --quiet
+$ ... docker compose build api
+Image foreign-trade-agent-api Built
+$ ... docker compose run --rm --no-deps api pytest tests/unit/test_data_router.py tests/unit/test_chunkers.py tests/integration/test_pdf_pipeline.py tests/integration/test_corpus_routing.py -q
+114 passed in 0.89s
+
+$ uv run python -m compileall -q trade_agent tests
+$ uv lock --check
+Resolved 49 packages in 2ms
+$ git diff --check
+$ rg -n -i '<high-confidence secret patterns>' trade_agent/data/router.py tests/unit/test_data_router.py
+(no matches)
+$ rg -n '<absolute-host-path pattern>' trade_agent/data/router.py tests/unit/test_data_router.py
+(no matches)
+```
+
+The API-image run used process-local random Compose secrets, no dependency services, and
+its temporary network was removed with `docker compose down --remove-orphans`. The real
+MySQL lifecycle was not rerun because this scoped change does not alter Compose settings,
+database images, migrations, seed code, ORM models, or the live database path; the existing
+successful real-MySQL evidence above remains the relevant lifecycle evidence.

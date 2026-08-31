@@ -231,13 +231,12 @@ def test_stat_and_bounded_read_enforce_size_even_if_stat_lies(tmp_path, monkeypa
     assert router.quarantines[-1].error_code == "INPUT_TOO_LARGE"
 
 
-def test_mime_disagreement_is_rejected_even_when_extension_matches(tmp_path, monkeypatch):
-    import trade_agent.data.router as router_module
+def test_content_media_disagreement_is_rejected_even_when_extension_matches(tmp_path):
+    from trade_agent.data.router import DocumentRouter
 
     path = tmp_path / "products.json"
-    path.write_text('{"products":[]}', encoding="utf-8")
-    monkeypatch.setattr(router_module.mimetypes, "guess_type", lambda _: ("text/html", None))
-    router = router_module.DocumentRouter()
+    path.write_text("<!doctype html><html><body><p>Not a product feed</p></body></html>", encoding="utf-8")
+    router = DocumentRouter()
     inp = source("b2b/products.json", FileType.JSON, SourceType.B2B).model_copy(update={"path": path})
     assert router.load(inp) == []
     assert router.quarantines[-1].error_code == "FILE_TYPE_MISMATCH"
@@ -254,6 +253,112 @@ def test_html_signature_allows_leading_comments_before_real_markup(tmp_path):
 
 
 @pytest.mark.parametrize(
+    ("payload", "expected_kind"),
+    [
+        (b"%PDF-1.7\n", "pdf"),
+        (b"<!doctype html><html><body><p>Evidence</p></body></html>", "html"),
+        (b'{"products": []}', "json"),
+        (b'{"post_id":"P"}\n{"post_id":"Q"}\n', "jsonl"),
+        (b'{"company":"Example","company_id":1,"country_code":"CN","hs_code":"010121","calendar_month":"2026-08","aggregation_grain":"month"}', "generated_profile"),
+        (b"# Heading\n\nAngle-bracket prose: <not-a-tag> and `x < y`.\n", "text"),
+        (b"<?xml version='1.0'?><svg xmlns='http://www.w3.org/2000/svg'><text>Not markdown</text></svg>", "xml_or_svg"),
+        (b"<catalog><item>Not markdown</item></catalog>", "xml_or_svg"),
+        (b"PK\x03\x04archive", "archive"),
+        (b"\x89PNG\r\n\x1a\nimage", "image"),
+        (b"BM" + (54).to_bytes(4, "little") + b"\x00" * 8 + (40).to_bytes(4, "little") + b"\x00" * 36, "image"),
+        (b"\x00\x00\x01\x00\x01\x00" + b"\x00" * 16, "image"),
+        (b"\x00\x01\x02\x03", "binary"),
+    ],
+)
+def test_content_sniffer_classifies_bounded_physical_media(payload, expected_kind):
+    """Fails if a new physical format can silently enter a text parser."""
+    from trade_agent.data.router import sniff_media_kind
+
+    assert sniff_media_kind(payload).value == expected_kind
+
+
+@pytest.mark.parametrize(
+    ("name", "payload", "file_type", "source_type"),
+    [
+        ("asset.md", b"<?xml version='1.0'?><svg xmlns='http://www.w3.org/2000/svg'><text>Not markdown</text></svg>", FileType.MARKDOWN, SourceType.OFFICIAL_WEBSITE),
+        ("asset.md", b"PK\x03\x04archive", FileType.MARKDOWN, SourceType.OFFICIAL_WEBSITE),
+        ("asset.md", b"\x89PNG\r\n\x1a\nimage", FileType.MARKDOWN, SourceType.OFFICIAL_WEBSITE),
+        ("asset.md", b"\x00\x01\x02\x03", FileType.MARKDOWN, SourceType.OFFICIAL_WEBSITE),
+        ("asset.html", b"%PDF-1.7\n", FileType.HTML, SourceType.OFFICIAL_WEBSITE),
+        ("asset.json", b"<!doctype html><html><body><p>Evidence</p></body></html>", FileType.JSON, SourceType.B2B),
+        ("asset.html", b'{"products": []}', FileType.HTML, SourceType.OFFICIAL_WEBSITE),
+        ("asset.md", b'{"products": []}', FileType.MARKDOWN, SourceType.OFFICIAL_WEBSITE),
+        ("asset.json", b'{"company":"Example","company_id":1,"country_code":"CN","hs_code":"010121","calendar_month":"2026-08","aggregation_grain":"month"}', FileType.JSON, SourceType.B2B),
+    ],
+)
+def test_content_media_mismatch_quarantines_before_the_declared_parser(tmp_path, name, payload, file_type, source_type):
+    """Fails if a disguised physical type reaches a different declared parser."""
+    from trade_agent.data.router import DocumentRouter
+
+    path = tmp_path / name
+    path.write_bytes(payload)
+    router = DocumentRouter()
+    inp = source("website/methodology.md", file_type, source_type).model_copy(update={"path": path})
+
+    assert router.load(inp) == []
+    assert router.quarantines[-1].error_code == "FILE_TYPE_MISMATCH"
+
+
+def test_markdown_with_angle_bracket_prose_and_fenced_markup_is_still_routed(tmp_path):
+    """Fails if XML/HTML sniffing treats ordinary Markdown punctuation as markup."""
+    from trade_agent.data.router import DocumentRouter
+
+    path = tmp_path / "legitimate.md"
+    path.write_text(
+        "# Notes\n\nUse <supplier@example.test> and write `x < y`.\n\n"
+        "```html\n<svg><text>Example code, not a document.</text></svg>\n```\n",
+        encoding="utf-8",
+    )
+    inp = source("website/methodology.md", FileType.MARKDOWN, SourceType.OFFICIAL_WEBSITE).model_copy(update={"path": path})
+
+    docs = DocumentRouter().load(inp)
+    assert len(docs) == 1
+    assert "<supplier@example.test>" in docs[0].content
+    assert "<svg><text>Example code, not a document.</text></svg>" in docs[0].content
+
+
+def test_large_json_content_cannot_be_renamed_as_markdown(tmp_path):
+    """Fails if a sniff prefix truncates a JSON document into ordinary text."""
+    from trade_agent.data.router import DocumentRouter
+
+    path = tmp_path / "disguised.md"
+    path.write_text('{"products":[],"padding":"' + "x" * 70_000 + '"}', encoding="utf-8")
+    inp = source("website/methodology.md", FileType.MARKDOWN, SourceType.OFFICIAL_WEBSITE).model_copy(update={"path": path})
+    router = DocumentRouter(max_bytes=80_000)
+
+    assert router.load(inp) == []
+    assert router.quarantines[-1].error_code == "FILE_TYPE_MISMATCH"
+
+
+def test_div_root_html_fragment_remains_a_supported_html_document(tmp_path):
+    """Fails if content validation narrows established fragment-root HTML support."""
+    from trade_agent.data.router import DocumentRouter
+
+    path = tmp_path / "fragment.html"
+    path.write_text("<div><h1>Catalog</h1><p>Evidence</p></div>", encoding="utf-8")
+    inp = source("website/section-01.html", FileType.HTML, SourceType.OFFICIAL_WEBSITE).model_copy(update={"path": path})
+
+    assert [(doc.title, doc.content) for doc in DocumentRouter().load(inp)] == [("Catalog", "Evidence")]
+
+
+def test_markdown_starting_with_bm_prose_is_not_a_bmp_image(tmp_path):
+    """Fails if a weak two-byte bitmap prefix rejects ordinary Markdown text."""
+    from trade_agent.data.router import DocumentRouter
+
+    path = tmp_path / "bm-prose.md"
+    path.write_text("BM exporters discuss current shipment schedules.", encoding="utf-8")
+    inp = source("website/methodology.md", FileType.MARKDOWN, SourceType.OFFICIAL_WEBSITE).model_copy(update={"path": path})
+
+    docs = DocumentRouter().load(inp)
+    assert [doc.content for doc in docs] == ["BM exporters discuss current shipment schedules."]
+
+
+@pytest.mark.parametrize(
     ("name", "payload", "file_type", "source_type", "code"),
     [
         ("wrong.pdf", b"not a pdf", FileType.PDF, SourceType.REGULATOR, "FILE_TYPE_MISMATCH"),
@@ -261,7 +366,7 @@ def test_html_signature_allows_leading_comments_before_real_markup(tmp_path):
         ("wrong.json", b"<html><p>x</p></html>", FileType.JSON, SourceType.B2B, "FILE_TYPE_MISMATCH"),
         ("bad.json", b"not json", FileType.JSON, SourceType.B2B, "MALFORMED_JSON"),
         ("bad.jsonl", b'{"post_id":', FileType.JSONL, SourceType.SOCIAL, "MALFORMED_JSON"),
-        ("bad.md", b"\xff\xfe", FileType.MARKDOWN, SourceType.OFFICIAL_WEBSITE, "TEXT_DECODE_FAILED"),
+        ("bad.md", b"\xff\xfe", FileType.MARKDOWN, SourceType.OFFICIAL_WEBSITE, "FILE_TYPE_MISMATCH"),
     ],
 )
 def test_file_type_mismatch_and_parse_failures_have_specific_codes(tmp_path, name, payload, file_type, source_type, code):

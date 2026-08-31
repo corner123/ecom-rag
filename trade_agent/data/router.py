@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import json
-import mimetypes
 import re
 from copy import deepcopy
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -51,14 +51,6 @@ _EXTENSIONS = {
     FileType.PDF: {".pdf"},
     FileType.GENERATED_PROFILE: {".json"},
 }
-_MIME_TYPES = {
-    FileType.HTML: {"text/html", None},
-    FileType.MARKDOWN: {"text/markdown", "text/plain", None},
-    FileType.JSON: {"application/json", None},
-    FileType.JSONL: {"application/json", "application/x-ndjson", None},
-    FileType.PDF: {"application/pdf", None},
-    FileType.GENERATED_PROFILE: {"application/json", None},
-}
 _PAIRS = {
     SourceType.OFFICIAL_WEBSITE: {FileType.HTML, FileType.MARKDOWN},
     SourceType.B2B: {FileType.JSON, FileType.HTML},
@@ -68,7 +60,14 @@ _PAIRS = {
     SourceType.CUSTOMS_PROFILE: {FileType.GENERATED_PROFILE},
 }
 _URL = TypeAdapter(AnyUrl)
-_HTML_SIGNATURE = re.compile(rb"(?is)(?:<!doctype\s+html|<html\b|<head\b|<body\b|<(?:h[1-6]|p|section|article|aside|table)\b)")
+_HTML_DOCUMENT = re.compile(
+    r"(?is)^\s*(?:<!--.*?-->\s*)*(?:<!doctype\s+html\b|<(?:html|head|body|main|article|section|h[1-6]|p|div|nav|aside|table|ul|ol|dl|header|footer|blockquote|pre)\b)"
+)
+_XML_OR_SVG_DOCUMENT = re.compile(
+    r"(?is)^\s*(?:<!--.*?-->\s*)*(?:(?:<\?xml\b|<!doctype\s+(?!html\b)|<svg\b).*|"
+    r"<(?P<root>[A-Za-z_][\w:.-]*)(?:\s+[^<>]*)?(?:/>|>.*?</(?P=root)\s*>))\s*$"
+)
+_PROFILE_MARKERS = frozenset({"company", "company_id", "country_code", "hs_code", "calendar_month", "aggregation_grain"})
 _HS_CODE = re.compile(r"^[0-9]{4,10}$")
 _MONTH = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 _SYSTEM_ATTRIBUTE_KEYS = {
@@ -76,6 +75,119 @@ _SYSTEM_ATTRIBUTE_KEYS = {
     "source_weight", "source_weight_version", "fact_type", "publish_time", "published_at",
     "valid_from", "valid_to", "license_scope", "aggregation_info", "ocr_confidence",
     "source_payload",
+}
+
+
+class MediaKind(str, Enum):
+    """Physical media categories accepted by the bounded router sniff."""
+
+    PDF = "pdf"
+    HTML = "html"
+    JSON = "json"
+    JSONL = "jsonl"
+    GENERATED_PROFILE = "generated_profile"
+    TEXT = "text"
+    XML_OR_SVG = "xml_or_svg"
+    ARCHIVE = "archive"
+    IMAGE = "image"
+    BINARY = "binary"
+
+
+_ARCHIVE_SIGNATURES = (
+    b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08", b"\x1f\x8b", b"BZh", b"\xfd7zXZ\x00",
+    b"7z\xbc\xaf\x27\x1c", b"Rar!\x1a\x07\x00", b"Rar!\x1a\x07\x01\x00",
+)
+_IMAGE_SIGNATURES = (
+    b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a", b"II*\x00", b"MM\x00*",
+)
+
+
+def _is_archive(raw: bytes) -> bool:
+    return raw.startswith(_ARCHIVE_SIGNATURES) or (len(raw) >= 262 and raw[257:262] == b"ustar")
+
+
+def _is_image(raw: bytes) -> bool:
+    if raw.startswith(_IMAGE_SIGNATURES) or (raw.startswith(b"RIFF") and raw[8:12] == b"WEBP"):
+        return True
+    if raw.startswith(b"BM") and len(raw) >= 26:
+        declared_size = int.from_bytes(raw[2:6], "little")
+        dib_size = int.from_bytes(raw[14:18], "little")
+        return 26 <= declared_size <= len(raw) and dib_size >= 12
+    if raw.startswith(b"\x00\x00\x01\x00") and len(raw) >= 6:
+        image_count = int.from_bytes(raw[4:6], "little")
+        return 1 <= image_count <= 10_000 and len(raw) >= 6 + image_count * 16
+    return False
+
+
+def _json_media_kind(text: str) -> MediaKind:
+    """Classify only unambiguous JSON records; malformed JSON stays parser-owned."""
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if len(lines) > 1:
+            try:
+                first = json.loads(lines[0])
+            except json.JSONDecodeError:
+                pass
+            else:
+                if isinstance(first, dict):
+                    return MediaKind.JSONL
+        # A malformed JSON candidate is still physically JSON-like.  Keeping
+        # it in this family makes Markdown reject it while the declared JSON
+        # parser retains responsibility for its MALFORMED_JSON diagnosis.
+        return MediaKind.JSONL if '"post_id"' in text else MediaKind.JSON
+    if isinstance(value, dict):
+        if _PROFILE_MARKERS.issubset(value):
+            return MediaKind.GENERATED_PROFILE
+        if "post_id" in value:
+            # A single JSONL record is byte-identical to a JSON object; its
+            # social record shape is the only deterministic discriminator.
+            return MediaKind.JSONL
+    return MediaKind.JSON
+
+
+def sniff_media_kind(raw: bytes) -> MediaKind:
+    """Return a deterministic physical-media kind from bounded ingress bytes.
+
+    This is deliberately a media boundary, not a replacement for JSON or
+    business-shape parsing.  Text that is merely malformed remains available
+    to the declared structured parser so it can report its stable typed error.
+    ``DocumentRouter`` supplies only the already bounded ``max_bytes + 1``
+    read, and this function performs no filesystem I/O.
+    """
+    sample = raw
+    if sample.startswith(b"%PDF"):
+        return MediaKind.PDF
+    if _is_archive(sample):
+        return MediaKind.ARCHIVE
+    if _is_image(sample):
+        return MediaKind.IMAGE
+    try:
+        text = sample.decode("utf-8")
+    except UnicodeDecodeError:
+        return MediaKind.BINARY
+    if "\x00" in text or any(ord(char) < 32 and char not in "\t\n\r\f" for char in text):
+        return MediaKind.BINARY
+
+    stripped = text.lstrip("\ufeff")
+    if _HTML_DOCUMENT.match(stripped):
+        return MediaKind.HTML
+    if _XML_OR_SVG_DOCUMENT.match(stripped):
+        return MediaKind.XML_OR_SVG
+    if stripped.lstrip().startswith(("{", "[")):
+        return _json_media_kind(stripped)
+    return MediaKind.TEXT
+
+
+_MEDIA_COMPATIBILITY = {
+    FileType.PDF: {MediaKind.PDF},
+    FileType.HTML: {MediaKind.HTML},
+    FileType.MARKDOWN: {MediaKind.TEXT},
+    # Text is admitted here only to retain parser-owned malformed-JSON errors.
+    FileType.JSON: {MediaKind.JSON, MediaKind.TEXT},
+    FileType.JSONL: {MediaKind.JSONL, MediaKind.TEXT},
+    FileType.GENERATED_PROFILE: {MediaKind.GENERATED_PROFILE, MediaKind.JSON, MediaKind.TEXT},
 }
 
 
@@ -215,20 +327,16 @@ class DocumentRouter:
 
         if source.path.suffix.lower() not in _EXTENSIONS[source.file_type]:
             return self._quarantine("FILE_TYPE_MISMATCH", source, "router", "extension conflicts with declared file type")
-        guessed, _ = mimetypes.guess_type(source.path.name)
-        if guessed not in _MIME_TYPES[source.file_type]:
-            return self._quarantine("FILE_TYPE_MISMATCH", source, "router", "MIME conflicts with declared file type")
         if source.file_type not in _PAIRS.get(source.source_type, set()):
             return self._quarantine("UNSUPPORTED_SOURCE_FILE_PAIR", source, "router", "declared source/file pair is not supported")
-        if source.file_type is FileType.PDF and not raw.startswith(b"%PDF"):
-            return self._quarantine("FILE_TYPE_MISMATCH", source, "pdf", "PDF signature missing")
-        if source.file_type is not FileType.PDF and raw.startswith(b"%PDF"):
-            return self._quarantine("FILE_TYPE_MISMATCH", source, "router", "PDF signature conflicts with declared file type")
-        looks_html = bool(_HTML_SIGNATURE.search(raw[:4096]))
-        if source.file_type is FileType.HTML and not looks_html:
-            return self._quarantine("FILE_TYPE_MISMATCH", source, "html", "HTML signature missing")
-        if source.file_type in {FileType.JSON, FileType.JSONL, FileType.GENERATED_PROFILE, FileType.MARKDOWN} and looks_html:
-            return self._quarantine("FILE_TYPE_MISMATCH", source, "router", "HTML signature conflicts with declared file type")
+        media_kind = sniff_media_kind(raw)
+        if media_kind not in _MEDIA_COMPATIBILITY[source.file_type]:
+            return self._quarantine(
+                "FILE_TYPE_MISMATCH",
+                source,
+                "router",
+                f"content media {media_kind.value} conflicts with declared {source.file_type.value}",
+            )
 
         try:
             if source.file_type is FileType.PDF:
