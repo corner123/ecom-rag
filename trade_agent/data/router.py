@@ -60,13 +60,23 @@ _PAIRS = {
     SourceType.CUSTOMS_PROFILE: {FileType.GENERATED_PROFILE},
 }
 _URL = TypeAdapter(AnyUrl)
-_HTML_DOCUMENT = re.compile(
-    r"(?is)^\s*(?:<!--.*?-->\s*)*(?:<!doctype\s+html\b|<(?:html|head|body|main|article|section|h[1-6]|p|div|nav|aside|table|ul|ol|dl|header|footer|blockquote|pre)\b)"
+_XML_MISC = r"(?:<!--.*?-->|<\?(?!xml\b).*?\?>)"
+_MARKUP_PREAMBLE = rf"\s*(?P<xml><\?xml\b.*?\?>\s*)?(?:{_XML_MISC}\s*)*"
+_MARKUP_ROOT = re.compile(
+    rf"(?is)^{_MARKUP_PREAMBLE}(?:<!doctype\s+(?P<doctype>[A-Za-z_][\w:.-]*)[^>]*>\s*)?"
+    r"<(?P<root>[A-Za-z_][\w:.-]*)(?=[\s/>])"
 )
-_XML_OR_SVG_DOCUMENT = re.compile(
-    r"(?is)^\s*(?:<!--.*?-->\s*)*(?:(?:<\?xml\b|<!doctype\s+(?!html\b)|<svg\b).*|"
-    r"<(?P<root>[A-Za-z_][\w:.-]*)(?:\s+[^<>]*)?(?:/>|>.*?</(?P=root)\s*>))\s*$"
+_MARKUP_DOCTYPE = re.compile(rf"(?is)^{_MARKUP_PREAMBLE}<!doctype\s+(?P<doctype>[A-Za-z_][\w:.-]*)\b")
+_SINGLE_ROOT_DOCUMENT = re.compile(
+    rf"(?is)^{_MARKUP_PREAMBLE}(?:<!doctype\s+[A-Za-z_][\w:.-]*[^>]*>\s*)?"
+    rf"<(?P<root>[A-Za-z_][\w:.-]*)(?:\s+[^<>]*)?(?:/>|>.*?</(?P=root)\s*>)(?:\s*{_XML_MISC})*\s*$"
 )
+_XML_DECLARATION = re.compile(r"(?is)^\s*(?:<!--.*?-->\s*)*<\?xml\b")
+_HTML_DOCUMENT_ROOTS = frozenset(
+    {"html", "head", "body", "main", "article", "section", "p", "div", "nav", "aside", "table", "ul", "ol", "dl", "header", "footer", "blockquote", "pre"}
+    | {f"h{level}" for level in range(1, 7)}
+)
+_MARKDOWN_INLINE_HTML_ROOTS = frozenset({"em", "strong", "a", "code", "span"})
 _PROFILE_MARKERS = frozenset({"company", "company_id", "country_code", "hs_code", "calendar_month", "aggregation_grain"})
 _HS_CODE = re.compile(r"^[0-9]{4,10}$")
 _MONTH = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
@@ -147,6 +157,40 @@ def _json_media_kind(text: str) -> MediaKind:
     return MediaKind.JSON
 
 
+def _local_markup_name(name: str) -> str:
+    return name.rsplit(":", 1)[-1].lower()
+
+
+def _markup_media_kind(text: str) -> MediaKind | None:
+    """Classify a bounded leading markup prolog and root.
+
+    Complete single-root syntax is ambiguous with Markdown raw HTML.  Only
+    common inline elements are kept as Markdown text; generic roots remain
+    fail-closed XML, while an XHTML ``html`` root wins over its XML prolog.
+    """
+    root_match = _MARKUP_ROOT.match(text)
+    if root_match:
+        root = _local_markup_name(root_match.group("root"))
+        doctype = root_match.group("doctype")
+        if (doctype and _local_markup_name(doctype) == "html") or root == "html":
+            return MediaKind.HTML
+        if root_match.group("xml") or doctype:
+            return MediaKind.XML_OR_SVG
+        if root in _HTML_DOCUMENT_ROOTS:
+            return MediaKind.HTML
+        if root in _MARKDOWN_INLINE_HTML_ROOTS and _SINGLE_ROOT_DOCUMENT.match(text):
+            return MediaKind.TEXT
+        if root == "svg" or _SINGLE_ROOT_DOCUMENT.match(text):
+            return MediaKind.XML_OR_SVG
+
+    doctype_match = _MARKUP_DOCTYPE.match(text)
+    if doctype_match:
+        return MediaKind.HTML if _local_markup_name(doctype_match.group("doctype")) == "html" else MediaKind.XML_OR_SVG
+    if _XML_DECLARATION.match(text):
+        return MediaKind.XML_OR_SVG
+    return None
+
+
 def sniff_media_kind(raw: bytes) -> MediaKind:
     """Return a deterministic physical-media kind from bounded ingress bytes.
 
@@ -171,10 +215,9 @@ def sniff_media_kind(raw: bytes) -> MediaKind:
         return MediaKind.BINARY
 
     stripped = text.lstrip("\ufeff")
-    if _HTML_DOCUMENT.match(stripped):
-        return MediaKind.HTML
-    if _XML_OR_SVG_DOCUMENT.match(stripped):
-        return MediaKind.XML_OR_SVG
+    markup_kind = _markup_media_kind(stripped)
+    if markup_kind is not None:
+        return markup_kind
     if stripped.lstrip().startswith(("{", "[")):
         return _json_media_kind(stripped)
     return MediaKind.TEXT

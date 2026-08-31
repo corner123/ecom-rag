@@ -269,3 +269,88 @@ its temporary network was removed with `docker compose down --remove-orphans`. T
 MySQL lifecycle was not rerun because this scoped change does not alter Compose settings,
 database images, migrations, seed code, ORM models, or the live database path; the existing
 successful real-MySQL evidence above remains the relevant lifecycle evidence.
+
+## Fix round 4: XHTML and Markdown inline-HTML roots (2026-08-31)
+
+The reviewer reproductions were confirmed directly against the round-3 base before tests
+or production code changed: both valid XHTML beginning with an XML declaration and the
+standalone Markdown line `<em>Legitimate Markdown inline HTML</em>` returned
+`xml_or_svg`. The generic single-root expression had no semantic distinction between an
+XHTML root, Markdown-compatible inline HTML, and an arbitrary XML root.
+
+The initial regression tests exercise the real sniffer and `DocumentRouter` boundary.
+They include the exact two reviewer cases, XHTML with an XML declaration, leading comment,
+default XHTML namespace, and mixed tag/declaration case, plus standalone `em`, `strong`,
+`a`, `code`, and `span` Markdown. Generic `invoice` XML and SVG remain negative Markdown
+cases. Initial RED was:
+
+```text
+$ uv run pytest tests/unit/test_data_router.py -q -k 'xhtml_prolog or known_inline_html_root or generic_xml_and_svg_roots'
+8 failed, 2 passed, 72 deselected in 0.16s
+```
+
+The repair performs bounded prolog/root classification over the bytes already read by the
+router; it adds no filesystem I/O and does not weaken the byte limit. An optional XML
+declaration, XML comments/processing instructions, optional doctype, and the root name are
+classified case-insensitively. An HTML doctype or local `html` root is HTML even when an
+XML declaration precedes it. Established block HTML roots remain HTML documents/fragments.
+An XML declaration on a non-HTML root, a non-HTML doctype, SVG, and any other complete
+single-root document remain `xml_or_svg`.
+
+Raw HTML is valid Markdown, so a complete single-root form is unavoidably ambiguous without
+parsing the caller's declared type first. The conservative compromise is an explicit set of
+common inline roots (`em`, `strong`, `a`, `code`, and `span`) that remain text only when no
+XML declaration or doctype claims an XML document. This does not admit block HTML, SVG, or
+arbitrary XML as Markdown. Multiple inline elements mixed with Markdown text also remain
+text rather than being forced into the single-root decision.
+
+A follow-up robustness RED demonstrated that legal XML trailing material could otherwise
+evade the complete-root check:
+
+```text
+$ uv run pytest tests/unit/test_data_router.py -q -k 'known_inline_html_root or generic_xml_and_svg_roots'
+1 failed, 8 passed, 75 deselected in 0.13s
+```
+
+The bounded root expression now admits leading/trailing XML comments and non-declaration
+processing instructions when deciding whether a generic root is an XML document. The final
+combined GREEN result was:
+
+```text
+$ uv run pytest tests/unit/test_data_router.py -q -k 'xhtml_prolog or known_inline_html_root or generic_xml_and_svg_roots'
+12 passed, 72 deselected in 0.08s
+```
+
+Fresh verification after the final classifier change:
+
+```text
+$ uv run pytest tests/unit/test_data_router.py tests/unit/test_chunkers.py tests/integration/test_pdf_pipeline.py tests/integration/test_corpus_routing.py -q
+126 passed, 5 third-party SWIG deprecation warnings in 0.46s
+
+$ uv run pytest tests/unit -q
+148 passed, 5 third-party SWIG deprecation warnings in 2.09s
+
+corpus probe: 74 manifest records -> 116 documents -> 120 chunks; one explicit
+SCANNED_PDF_OCR_UNAVAILABLE quarantine for scanned-regulator-notice.pdf
+
+$ docker compose config --quiet
+$ docker compose build api
+Image foreign-trade-agent-api Built
+$ docker compose run --rm --no-deps api pytest tests/unit/test_data_router.py -q -k '<round-4 slice>'
+12 passed, 72 deselected in 0.19s
+$ docker compose run --rm --no-deps api pytest tests/unit/test_data_router.py tests/unit/test_chunkers.py tests/integration/test_pdf_pipeline.py tests/integration/test_corpus_routing.py -q
+126 passed in 0.85s
+
+$ uv run python -m compileall -q trade_agent tests
+$ uv lock --check
+Resolved 49 packages in 2ms
+$ git diff --check
+changed-line high-confidence secret scan: passed
+changed-line absolute /Users and /home path scan: passed
+```
+
+Compose used process-local non-production values, and `docker compose down --remove-orphans`
+removed its temporary network; no project containers or networks remained. The real MySQL
+lifecycle was not rerun because this pure in-memory sniff-classifier change does not touch
+Compose settings, database images, migrations, seed logic, ORM models, or database access.
+The previously ledgered session/signature sanitizer minor remains deferred and unchanged.

@@ -278,6 +278,86 @@ def test_content_sniffer_classifies_bounded_physical_media(payload, expected_kin
 
 
 @pytest.mark.parametrize(
+    ("payload", "expected_title", "expected_content"),
+    [
+        (
+            b'<?xml version="1.0"?><html><body><h1>Heading</h1><p>Evidence</p></body></html>',
+            "Heading",
+            "Evidence",
+        ),
+        (
+            b'<?xml version="1.0"?>\n<!-- generated -->\n'
+            b'<html xmlns="http://www.w3.org/1999/xhtml"><body><h1>Namespaced</h1><p>Evidence</p></body></html>',
+            "Namespaced",
+            "Evidence",
+        ),
+        (
+            b'<?XML version="1.0"?>\n<!-- generated -->\n'
+            b'<HTML XMLNS="http://www.w3.org/1999/xhtml"><BODY><H1>Uppercase</H1><P>Evidence</P></BODY></HTML>',
+            "Uppercase",
+            "Evidence",
+        ),
+    ],
+)
+def test_xhtml_prolog_and_html_root_route_as_declared_html(tmp_path, payload, expected_title, expected_content):
+    """Fails if an XML prolog hides the XHTML root from physical HTML classification."""
+    from trade_agent.data.router import DocumentRouter, sniff_media_kind
+
+    path = tmp_path / "document.html"
+    path.write_bytes(payload)
+    inp = source("website/section-01.html", FileType.HTML, SourceType.OFFICIAL_WEBSITE).model_copy(update={"path": path})
+
+    assert sniff_media_kind(payload).value == "html"
+    assert [(doc.title, doc.content) for doc in DocumentRouter().load(inp)] == [(expected_title, expected_content)]
+
+
+@pytest.mark.parametrize(
+    "markup",
+    [
+        "<em>Legitimate Markdown inline HTML</em>",
+        "<strong>Strong Markdown evidence</strong>",
+        '<a href="https://supplier.example">Linked Markdown evidence</a>',
+        "<code>inline_code()</code>",
+        '<span data-kind="evidence">Spanned Markdown evidence</span>',
+        "<em>First inline element</em> and <strong>second inline element</strong>",
+    ],
+)
+def test_known_inline_html_root_remains_valid_markdown(tmp_path, markup):
+    """Fails if a complete Markdown-compatible inline element is treated as generic XML."""
+    from trade_agent.data.router import DocumentRouter, sniff_media_kind
+
+    payload = markup.encode()
+    path = tmp_path / "inline.md"
+    path.write_bytes(payload)
+    inp = source("website/methodology.md", FileType.MARKDOWN, SourceType.OFFICIAL_WEBSITE).model_copy(update={"path": path})
+
+    assert sniff_media_kind(payload).value == "text"
+    assert [doc.content for doc in DocumentRouter().load(inp)] == [markup]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"<invoice><id>42</id></invoice>",
+        b"<invoice><id>42</id></invoice><!-- trailing comment --><?audit complete?>",
+        b'<svg xmlns="http://www.w3.org/2000/svg"><text>Not Markdown</text></svg>',
+    ],
+)
+def test_generic_xml_and_svg_roots_remain_rejected_for_markdown(tmp_path, payload):
+    """Fails if the inline-HTML allowance broadens to arbitrary XML-like roots."""
+    from trade_agent.data.router import DocumentRouter, sniff_media_kind
+
+    path = tmp_path / "disguised.md"
+    path.write_bytes(payload)
+    router = DocumentRouter()
+    inp = source("website/methodology.md", FileType.MARKDOWN, SourceType.OFFICIAL_WEBSITE).model_copy(update={"path": path})
+
+    assert sniff_media_kind(payload).value == "xml_or_svg"
+    assert router.load(inp) == []
+    assert router.quarantines[-1].error_code == "FILE_TYPE_MISMATCH"
+
+
+@pytest.mark.parametrize(
     ("name", "payload", "file_type", "source_type"),
     [
         ("asset.md", b"<?xml version='1.0'?><svg xmlns='http://www.w3.org/2000/svg'><text>Not markdown</text></svg>", FileType.MARKDOWN, SourceType.OFFICIAL_WEBSITE),
