@@ -8,9 +8,11 @@ from pydantic import ValidationError
 
 from trade_agent.index.contracts import EmbeddingContract
 from trade_agent.index.embeddings import (
+    ARTIFACT_MANIFEST_SHA256,
     BGE_M3_DIMENSION,
     BGE_M3_REVISION,
     BgeEmbeddingManager,
+    TRUSTED_ARTIFACTS,
 )
 
 
@@ -29,6 +31,16 @@ class FakeEncoder:
         return np.repeat(rows, BGE_M3_DIMENSION, axis=1)
 
 
+class FalseyFakeEncoder(FakeEncoder):
+    def __bool__(self) -> bool:
+        return False
+
+
+@pytest.fixture(autouse=True)
+def deterministic_test_environment(monkeypatch) -> None:
+    monkeypatch.setenv("TEST_EMBEDDING_PROVIDER", "deterministic")
+
+
 @pytest.fixture
 def encoder() -> FakeEncoder:
     return FakeEncoder()
@@ -39,7 +51,9 @@ def manager(encoder: FakeEncoder) -> BgeEmbeddingManager:
     return BgeEmbeddingManager(test_encoder=encoder, test_mode=True, batch_size=1)
 
 
-def test_embeddings_are_normalized_and_record_a_versioned_contract(manager: BgeEmbeddingManager) -> None:
+def test_embeddings_are_normalized_and_record_a_versioned_contract(
+    manager: BgeEmbeddingManager,
+) -> None:
     vectors = manager.embed_documents(["HS 850440 charger", "采购增长"])
     query = manager.embed_query("采购增长客户")
 
@@ -48,17 +62,16 @@ def test_embeddings_are_normalized_and_record_a_versioned_contract(manager: BgeE
     assert query.shape == (BGE_M3_DIMENSION,)
     np.testing.assert_allclose(np.linalg.norm(vectors, axis=1), 1.0, atol=1e-5)
     np.testing.assert_allclose(np.linalg.norm(query), 1.0, atol=1e-5)
-    assert manager.contract.provider == "test-fake"
-    assert manager.contract.model_name == "BAAI/bge-m3"
-    assert manager.contract.revision == BGE_M3_REVISION
-    assert manager.contract.requested_revision == BGE_M3_REVISION
-    assert manager.contract.resolved_revision == BGE_M3_REVISION
+    assert manager.contract.provider == "deterministic-test"
+    assert manager.contract.is_production is False
     assert manager.contract.dimension == BGE_M3_DIMENSION
     assert manager.contract.normalized is True
     assert manager.contract.dtype == "float32"
 
 
-def test_manager_is_lazy_batches_documents_and_keeps_query_semantics_explicit(encoder: FakeEncoder) -> None:
+def test_manager_is_lazy_batches_documents_and_keeps_query_semantics_explicit(
+    encoder: FakeEncoder,
+) -> None:
     manager = BgeEmbeddingManager(test_encoder=encoder, test_mode=True, batch_size=1)
 
     assert encoder.calls == []
@@ -121,9 +134,43 @@ def test_embed_query_rejects_malformed_encoder_output(invalid_output: np.ndarray
         manager.embed_query("question")
 
 
-def test_test_encoder_requires_explicit_test_mode() -> None:
+@pytest.mark.parametrize("test_mode,test_encoder", [(True, None), (False, FakeEncoder())])
+def test_test_mode_and_test_encoder_must_be_strictly_paired(test_mode, test_encoder) -> None:
     with pytest.raises(ValueError, match="test_mode"):
-        BgeEmbeddingManager(test_encoder=FakeEncoder())
+        BgeEmbeddingManager(test_encoder=test_encoder, test_mode=test_mode)
+
+
+def test_test_encoder_presence_is_not_inferred_from_its_truthiness() -> None:
+    manager = BgeEmbeddingManager(test_encoder=FalseyFakeEncoder(), test_mode=True)
+
+    assert manager.embed_query("HS 850440").shape == (BGE_M3_DIMENSION,)
+
+
+@pytest.mark.parametrize("test_mode", [None, 0, 1, "true"])
+def test_test_mode_requires_a_real_boolean(test_mode: object) -> None:
+    with pytest.raises(TypeError, match="boolean"):
+        BgeEmbeddingManager(
+            test_encoder=FakeEncoder(), test_mode=test_mode  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize("provider", [None, "", "hash", "sentence-transformers"])
+def test_test_encoder_requires_explicit_deterministic_test_environment(
+    monkeypatch, provider
+) -> None:
+    if provider is None:
+        monkeypatch.delenv("TEST_EMBEDDING_PROVIDER", raising=False)
+    else:
+        monkeypatch.setenv("TEST_EMBEDDING_PROVIDER", provider)
+    with pytest.raises(ValueError, match="TEST_EMBEDDING_PROVIDER"):
+        BgeEmbeddingManager(test_encoder=FakeEncoder(), test_mode=True)
+
+
+def test_production_manager_cannot_override_the_pinned_identity() -> None:
+    with pytest.raises(ValueError, match="production"):
+        BgeEmbeddingManager(model_name="BAAI/bge-small-zh-v1.5")
+    with pytest.raises(ValueError, match="production"):
+        BgeEmbeddingManager(revision="0" * 40)
 
 
 def test_embedding_contract_rejects_floating_revisions_and_wrong_bge_m3_dimension() -> None:
@@ -137,6 +184,52 @@ def test_embedding_contract_rejects_floating_revisions_and_wrong_bge_m3_dimensio
             normalized=True,
             dtype="float32",
             library_version="3.4.1",
+            artifact_manifest_sha256=ARTIFACT_MANIFEST_SHA256,
+            verified_artifact_count=len(TRUSTED_ARTIFACTS),
+        )
+
+
+def test_embedding_contract_only_accepts_exact_production_or_explicit_test_identity() -> None:
+    production = EmbeddingContract(
+        provider="sentence-transformers",
+        model_name="BAAI/bge-m3",
+        requested_revision=BGE_M3_REVISION,
+        resolved_revision=BGE_M3_REVISION,
+        dimension=BGE_M3_DIMENSION,
+        normalized=True,
+        dtype="float32",
+        library_version="3.4.1",
+        artifact_manifest_sha256=ARTIFACT_MANIFEST_SHA256,
+        verified_artifact_count=len(TRUSTED_ARTIFACTS),
+    )
+    assert production.is_production is True
+    production.require_production()
+
+    with pytest.raises(ValidationError):
+        EmbeddingContract(
+            provider="sentence-transformers",
+            model_name="other",
+            requested_revision=BGE_M3_REVISION,
+            resolved_revision=BGE_M3_REVISION,
+            dimension=BGE_M3_DIMENSION,
+            normalized=True,
+            dtype="float32",
+            library_version="3.4.1",
+            artifact_manifest_sha256=ARTIFACT_MANIFEST_SHA256,
+            verified_artifact_count=len(TRUSTED_ARTIFACTS),
+        )
+    with pytest.raises(ValidationError):
+        EmbeddingContract(
+            provider="deterministic-test",
+            model_name="BAAI/bge-m3",
+            requested_revision=BGE_M3_REVISION,
+            resolved_revision=BGE_M3_REVISION,
+            dimension=BGE_M3_DIMENSION,
+            normalized=True,
+            dtype="float32",
+            library_version="test",
+            artifact_manifest_sha256=ARTIFACT_MANIFEST_SHA256,
+            verified_artifact_count=len(TRUSTED_ARTIFACTS),
         )
     with pytest.raises(ValidationError, match="1024"):
         EmbeddingContract(
@@ -148,4 +241,65 @@ def test_embedding_contract_rejects_floating_revisions_and_wrong_bge_m3_dimensio
             normalized=True,
             dtype="float32",
             library_version="3.4.1",
+            artifact_manifest_sha256=ARTIFACT_MANIFEST_SHA256,
+            verified_artifact_count=len(TRUSTED_ARTIFACTS),
         )
+
+
+@pytest.mark.parametrize(
+    ("manifest_sha256", "artifact_count"),
+    [("1" * 64, len(TRUSTED_ARTIFACTS)), (ARTIFACT_MANIFEST_SHA256, 1)],
+)
+def test_production_contract_requires_the_exact_trusted_artifact_manifest(
+    manifest_sha256: str, artifact_count: int
+) -> None:
+    with pytest.raises(ValidationError, match="trusted artifact manifest"):
+        EmbeddingContract(
+            provider="sentence-transformers",
+            model_name="BAAI/bge-m3",
+            requested_revision=BGE_M3_REVISION,
+            resolved_revision=BGE_M3_REVISION,
+            dimension=BGE_M3_DIMENSION,
+            normalized=True,
+            dtype="float32",
+            library_version="3.4.1",
+            artifact_manifest_sha256=manifest_sha256,
+            verified_artifact_count=artifact_count,
+        )
+
+
+def test_deterministic_contract_cannot_satisfy_a_production_consumer(
+    manager: BgeEmbeddingManager,
+) -> None:
+    manager.embed_query("HS 850440")
+
+    with pytest.raises(ValueError, match="production"):
+        manager.contract.require_production()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("dimension", BGE_M3_DIMENSION - 1),
+        ("normalized", False),
+        ("artifact_manifest_sha256", "1" * 64),
+        ("verified_artifact_count", 1),
+    ],
+)
+def test_deterministic_contract_has_a_strict_test_only_identity(field: str, value: object) -> None:
+    values = {
+        "provider": "deterministic-test",
+        "model_name": "deterministic-test",
+        "requested_revision": "0" * 40,
+        "resolved_revision": "0" * 40,
+        "dimension": BGE_M3_DIMENSION,
+        "normalized": True,
+        "dtype": "float32",
+        "library_version": "deterministic-test-v1",
+        "artifact_manifest_sha256": "0" * 64,
+        "verified_artifact_count": 0,
+    }
+    values[field] = value
+
+    with pytest.raises(ValidationError, match="test-only identity"):
+        EmbeddingContract.model_validate(values)

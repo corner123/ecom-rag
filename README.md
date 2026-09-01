@@ -98,12 +98,18 @@ generation, and evaluation are later scopes.
 Retrieval uses `BAAI/bge-m3` at immutable revision
 `5617a9f61b028005a4858fdac845db406aefb181` (1024 dimensions). The API keeps
 only model artifacts in the named `model_cache` volume; it does not receive
-the MySQL root or migration secrets. The snapshot intentionally excludes the
-duplicate ONNX and image assets, while retaining the SentenceTransformer,
-tokenizer, configuration, and PyTorch model files.
+the MySQL root or migration secrets. A committed allowlist identifies the ten
+dense SentenceTransformer, tokenizer, configuration, and PyTorch runtime files.
+Each load verifies their byte sizes and SHA256 digests before constructing the
+model. Online loads additionally compare the pinned revision and Git/LFS file
+metadata with Hugging Face. README/image assets, duplicate ONNX weights, and
+the unused ColBERT/sparse heads are excluded; unrelated cache extras are never
+counted as trusted artifacts.
 
 After building the API image, run the non-fake smoke command. It emits one
-safe JSON line containing the resolved revision and vector checks:
+safe JSON line containing the resolved revision, artifact-manifest identity,
+and vector checks. A deterministic test encoder is rejected by this public
+smoke rather than being reported as a production pass:
 
 ```bash
 docker compose --env-file .env run --rm --no-deps api python -m scripts.smoke_embeddings

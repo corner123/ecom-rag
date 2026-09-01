@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from contextlib import redirect_stderr, redirect_stdout
+import io
 import json
 import os
 import sys
+from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
@@ -61,27 +64,41 @@ def run_embedding_smoke(manager: BgeEmbeddingManager | None = None) -> dict[str,
         ["HS 850440 chargers exported to Europe", "采购增长客户需要核验海关月度贸易画像"]
     )
     query = manager.embed_query("查询 HS 850440 采购增长客户")
+    contract = manager.contract.require_production()
     return {
         "status": "ok",
-        "contract": manager.contract.model_dump(mode="json"),
+        "contract": contract.model_dump(mode="json"),
         "snapshot_bytes": manager.snapshot_size_bytes,
         "documents": _vector_summary(documents),
         "query": _vector_summary(query),
     }
 
 
-def main() -> int:
-    try:
-        from huggingface_hub.utils import disable_progress_bars
+def _failure(error_name: str, *, exit_code: int) -> int:
+    print(
+        json.dumps({"status": "failed", "error": error_name}, sort_keys=True),
+        file=sys.stderr,
+    )
+    return exit_code
 
-        disable_progress_bars()
-        summary = run_embedding_smoke()
-        if summary["contract"]["provider"] != "sentence-transformers":
-            raise RuntimeError("real sentence-transformers provider was not used")
+
+def main(argv: Sequence[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments:
+        return _failure("UsageError", exit_code=2)
+
+    try:
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            from huggingface_hub.utils import disable_progress_bars
+
+            disable_progress_bars()
+            summary = run_embedding_smoke()
+            if summary["contract"]["provider"] != "sentence-transformers":
+                raise RuntimeError("real sentence-transformers provider was not used")
+            payload = json.dumps(summary, ensure_ascii=False, sort_keys=True)
     except Exception as error:  # The command intentionally emits no exception text or paths.
-        print(json.dumps({"status": "failed", "error": type(error).__name__}, sort_keys=True))
-        return 1
-    print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
+        return _failure(type(error).__name__, exit_code=1)
+    print(payload)
     return 0
 
 

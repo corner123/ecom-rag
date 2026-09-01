@@ -36,6 +36,12 @@ htmlcov/
 .worktrees/
 scripts/fetch_docs.sh
 data/sources/catalog.local.yaml
+# Hugging Face model-card images must stay in the external model cache.  Root
+# image ignores intentionally do not hide the nested synthetic corpus assets.
+/*.jpg
+/*.jpeg
+/*.png
+/*.webp
 *.safetensors
 *.pt
 *.pth

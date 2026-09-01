@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
+import hashlib
 from importlib.metadata import version
+import json
+import os
 from pathlib import Path
 from threading import RLock
 from typing import Any, Protocol
@@ -15,15 +19,28 @@ from .contracts import EmbeddingContract
 BGE_M3_MODEL = "BAAI/bge-m3"
 BGE_M3_REVISION = "5617a9f61b028005a4858fdac845db406aefb181"
 BGE_M3_DIMENSION = 1024
-MODEL_SNAPSHOT_IGNORE_PATTERNS = (
-    "onnx/**",
-    "imgs/**",
-    "*.onnx*",
-)
+TEST_EMBEDDING_PROVIDER = "TEST_EMBEDDING_PROVIDER"
+_TEST_REVISION = "0" * 40
+_MANIFEST_PATH = Path(__file__).with_name("bge_m3_artifact_manifest.json")
+_MANIFEST = json.loads(_MANIFEST_PATH.read_text(encoding="utf-8"))
+_CANONICAL_MANIFEST = json.dumps(_MANIFEST, sort_keys=True, separators=(",", ":"))
+ARTIFACT_MANIFEST_SHA256 = hashlib.sha256(_CANONICAL_MANIFEST.encode("utf-8")).hexdigest()
+TRUSTED_ARTIFACTS = tuple(_MANIFEST["files"])
+TRUSTED_ARTIFACT_PATHS = tuple(item["path"] for item in TRUSTED_ARTIFACTS)
 
 
 class Encoder(Protocol):
     def encode(self, texts: Sequence[str], **kwargs: Any) -> Any: ...
+
+
+@dataclass(frozen=True)
+class VerifiedEmbeddingSnapshot:
+    """Content-authenticated local artifacts for one resolved model revision."""
+
+    resolved_revision: str
+    trusted_bytes: int
+    artifact_manifest_sha256: str
+    artifact_count: int
 
 
 class BgeEmbeddingManager:
@@ -53,8 +70,12 @@ class BgeEmbeddingManager:
             raise ValueError("batch_size must be at least one")
         if max_characters < 1:
             raise ValueError("max_characters must be at least one")
-        if test_encoder is not None and not test_mode:
-            raise ValueError("test_encoder requires explicit test_mode=True")
+        if not isinstance(test_mode, bool):
+            raise TypeError("test_mode must be a boolean")
+        if test_mode != (test_encoder is not None):
+            raise ValueError("test_mode and test_encoder must be supplied together")
+        if test_mode and os.environ.get(TEST_EMBEDDING_PROVIDER) != "deterministic":
+            raise ValueError("TEST_EMBEDDING_PROVIDER=deterministic is required for a test encoder")
         if not test_mode and (model_name != BGE_M3_MODEL or revision != BGE_M3_REVISION):
             raise ValueError("production embeddings must use the pinned BAAI/bge-m3 revision")
 
@@ -69,7 +90,7 @@ class BgeEmbeddingManager:
         self._test_mode = test_mode
         self._encoder: Encoder | None = None
         self._contract: EmbeddingContract | None = None
-        self._snapshot_size_bytes: int | None = None
+        self._verified_snapshot: VerifiedEmbeddingSnapshot | None = None
         self._lock = RLock()
 
     @property
@@ -82,7 +103,9 @@ class BgeEmbeddingManager:
     def snapshot_size_bytes(self) -> int | None:
         """Downloaded snapshot byte count, without exposing its local path."""
 
-        return self._snapshot_size_bytes
+        if self._verified_snapshot is None:
+            return None
+        return self._verified_snapshot.trusted_bytes
 
     def embed_documents(self, texts: Sequence[str]) -> np.ndarray:
         validated = self._validate_documents(texts)
@@ -108,9 +131,11 @@ class BgeEmbeddingManager:
             self._encoder = self._test_encoder
             return self._encoder
 
-        from huggingface_hub import snapshot_download
+        from huggingface_hub import HfApi, snapshot_download
         from sentence_transformers import SentenceTransformer
 
+        if not self.local_files_only:
+            self._verify_official_metadata(HfApi())
         snapshot_path = Path(
             snapshot_download(
                 repo_id=self.model_name,
@@ -118,14 +143,10 @@ class BgeEmbeddingManager:
                 revision=self.revision,
                 cache_dir=str(self.cache_folder) if self.cache_folder is not None else None,
                 local_files_only=self.local_files_only,
-                ignore_patterns=MODEL_SNAPSHOT_IGNORE_PATTERNS,
+                allow_patterns=TRUSTED_ARTIFACT_PATHS,
             )
         )
-        if snapshot_path.name != self.revision:
-            raise ValueError("model cache snapshot does not match requested immutable revision")
-        self._snapshot_size_bytes = sum(
-            entry.stat().st_size for entry in snapshot_path.rglob("*") if entry.is_file()
-        )
+        self._verified_snapshot = self._verify_snapshot(snapshot_path)
         self._encoder = SentenceTransformer(
             str(snapshot_path),
             revision=self.revision,
@@ -164,17 +185,35 @@ class BgeEmbeddingManager:
         return normalized
 
     def _record_contract(self, dimension: int) -> None:
-        provider = "test-fake" if self._test_encoder is not None else "sentence-transformers"
-        library_version = "test-fake" if self._test_encoder is not None else version("sentence-transformers")
+        if self._test_encoder is not None:
+            provider = "deterministic-test"
+            model_name = "deterministic-test"
+            requested_revision = _TEST_REVISION
+            resolved_revision = _TEST_REVISION
+            library_version = "deterministic-test-v1"
+            manifest_sha256 = "0" * 64
+            artifact_count = 0
+        else:
+            if self._verified_snapshot is None:
+                raise RuntimeError("production vectors require a verified model snapshot")
+            provider = "sentence-transformers"
+            model_name = self.model_name
+            requested_revision = self.revision
+            resolved_revision = self._verified_snapshot.resolved_revision
+            library_version = version("sentence-transformers")
+            manifest_sha256 = self._verified_snapshot.artifact_manifest_sha256
+            artifact_count = self._verified_snapshot.artifact_count
         observed = EmbeddingContract(
             provider=provider,
-            model_name=self.model_name,
-            requested_revision=self.revision,
-            resolved_revision=self.revision,
+            model_name=model_name,
+            requested_revision=requested_revision,
+            resolved_revision=resolved_revision,
             dimension=dimension,
             normalized=True,
             dtype="float32",
             library_version=library_version,
+            artifact_manifest_sha256=manifest_sha256,
+            verified_artifact_count=artifact_count,
         )
         if self._contract is not None and self._contract != observed:
             raise ValueError("embedding contract changed after initial observation")
@@ -195,3 +234,76 @@ class BgeEmbeddingManager:
         if len(text) > self.max_characters:
             raise ValueError(f"{field} text exceeds the configured maximum length")
         return text
+
+    def _verify_official_metadata(self, api: Any) -> None:
+        info = api.model_info(self.model_name, revision=self.revision, files_metadata=True)
+        if info.sha != self.revision:
+            raise ValueError("Hugging Face resolved revision does not match the pinned revision")
+        by_path = {item.rfilename: item for item in info.siblings}
+        for expected in TRUSTED_ARTIFACTS:
+            sibling = by_path.get(expected["path"])
+            if sibling is None or sibling.size != expected["size"]:
+                raise ValueError(
+                    "Hugging Face metadata does not match the trusted artifact manifest"
+                )
+            lfs_sha = getattr(getattr(sibling, "lfs", None), "sha256", None)
+            if "lfs_sha256" in expected:
+                if lfs_sha != expected["lfs_sha256"]:
+                    raise ValueError(
+                        "Hugging Face LFS checksum does not match the trusted artifact manifest"
+                    )
+            elif getattr(sibling, "blob_id", None) != expected["blob_id"]:
+                raise ValueError(
+                    "Hugging Face blob metadata does not match the trusted artifact manifest"
+                )
+
+    def _verify_snapshot(self, snapshot_path: Path) -> VerifiedEmbeddingSnapshot:
+        if snapshot_path.name != self.revision or snapshot_path.parent.name != "snapshots":
+            raise ValueError("model cache snapshot does not match requested immutable revision")
+        repository_root = snapshot_path.parent.parent
+        blobs_root = repository_root / "blobs"
+        trusted_bytes = 0
+        for expected in TRUSTED_ARTIFACTS:
+            artifact = snapshot_path / expected["path"]
+            if not artifact.exists() or not artifact.is_file():
+                raise ValueError("model snapshot is missing a required trusted artifact")
+            resolved_artifact = artifact.resolve(strict=True)
+            if artifact.is_symlink():
+                if not _is_within(resolved_artifact, blobs_root):
+                    raise ValueError(
+                        "model snapshot contains a symlink outside the trusted blob store"
+                    )
+            elif not _is_within(resolved_artifact, snapshot_path):
+                raise ValueError(
+                    "model snapshot contains an intermediate symlink outside the snapshot"
+                )
+            size, digest = _sha256_file(artifact)
+            if size != expected["size"] or digest != expected["sha256"]:
+                raise ValueError(
+                    "model snapshot artifact checksum does not match the trusted manifest"
+                )
+            trusted_bytes += size
+        return VerifiedEmbeddingSnapshot(
+            resolved_revision=snapshot_path.name,
+            trusted_bytes=trusted_bytes,
+            artifact_manifest_sha256=ARTIFACT_MANIFEST_SHA256,
+            artifact_count=len(TRUSTED_ARTIFACTS),
+        )
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root.resolve(strict=True))
+    except ValueError:
+        return False
+    return True
+
+
+def _sha256_file(path: Path) -> tuple[int, str]:
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            size += len(chunk)
+            digest.update(chunk)
+    return size, digest.hexdigest()

@@ -4,41 +4,66 @@ Base: `c687a04`
 
 ## RED / GREEN
 
-- RED: `tests/unit/test_embeddings.py` initially failed at collection because
-  `trade_agent.index` did not exist. The new settings assertions then failed
-  against the former `bge-small` defaults; the Compose cache contract failed
-  because the API had no model-cache volume; and the smoke test failed because
-  its module did not exist.
-- GREEN: the focused suite passed `40` tests with `1` integration test
-  deselected. It covers lazy batching, strict text and vector validation,
-  explicit test-only fake injection, immutable SHA contracts, BGE-M3 1024-D
-  enforcement, cache configuration, Compose cache isolation, and safe smoke
-  output.
+- Initial RED: `tests/unit/test_embeddings.py` failed at collection because
+  `trade_agent.index` did not exist. Settings, Compose cache, and smoke tests
+  then failed against the former unpinned implementation.
+- Review RED: regression tests reproduced the unsafe test-provider path,
+  forgeable production contracts, snapshot-directory-only provenance, public
+  fake smoke success, and unsafe CLI output. New filesystem tests exercised
+  missing/non-regular artifacts, symlink escape, wrong size, wrong SHA256,
+  cache extras, and official metadata mismatches before the fixes were made.
+- Final focused GREEN: `59 passed` for embedding contracts, artifact security,
+  and smoke CLI behavior.
+- Host non-model regression GREEN: `293 passed, 7 deselected`.
 
-## Implementation evidence
+## Production identity and artifact provenance
 
-- Default production embedding: `BAAI/bge-m3` at
-  `5617a9f61b028005a4858fdac845db406aefb181`; expected and observed dense
-  dimension: `1024`.
-- Future reranker configuration is pinned to `BAAI/bge-reranker-v2-m3` at
-  `953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e`.
-- `snapshot_download` excludes `onnx/**`, `imgs/**`, and `*.onnx*`; it retains
-  the SentenceTransformer configuration/modules, tokenizer, and PyTorch
-  weights. The downloaded model artifact set was `2,295,564,334` bytes
-  (about `2.14 GiB`) and took about `13 minutes` over the available network.
-- Host and Linux-container smokes ran offline after the initial download. The
-  container used a read-only bind of the complete Hugging Face cache layout;
-  no Compose named volume was created, changed, or removed.
+- Production is only `BAAI/bge-m3` at immutable revision
+  `5617a9f61b028005a4858fdac845db406aefb181`, dense dimension `1024`, normalized
+  `float32`, provider `sentence-transformers`.
+- The committed dense-runtime allowlist contains exactly ten required
+  SentenceTransformer/config/tokenizer/PyTorch files. It excludes README and
+  image assets, ONNX duplicates, `colbert_linear.pt`, and `sparse_linear.pt`.
+- Each allowlisted file records byte size and SHA256. Large LFS files also
+  record and verify the official Hugging Face LFS SHA256; small files record
+  official Git blob IDs and SHA256 measured from the trusted pinned snapshot.
+- Online initialization checks `HfApi.model_info(..., files_metadata=True)`
+  against the pinned revision and manifest. Every online or offline load then
+  streams all ten local files through size and SHA256 verification before
+  `SentenceTransformer` is constructed. Missing/non-regular files and symlinks
+  escaping the repository blob store fail closed.
+- Canonical manifest SHA256:
+  `3a862f1d0a8543acc13e9faa5e6d6d1f916ee609b264960be8337e6ba509856b`.
+  Verified dense runtime bytes: `2,293,315,801`. Extra cache files remain
+  allowed but are never trusted, hashed into the manifest, or counted.
+- No model weight is committed to Git.
 
-## Real model smoke summary
+## Test-provider and smoke boundaries
 
-```json
-{"contract":{"dimension":1024,"dtype":"float32","library_version":"3.4.1","model_name":"BAAI/bge-m3","normalized":true,"provider":"sentence-transformers","requested_revision":"5617a9f61b028005a4858fdac845db406aefb181","resolved_revision":"5617a9f61b028005a4858fdac845db406aefb181"},"documents":{"finite":true,"normalized":true,"shape":[2,1024]},"query":{"finite":true,"normalized":true,"shape":[1024]},"snapshot_bytes":2295564334,"status":"ok"}
-```
+- `test_mode=True` and `test_encoder` are strictly paired and require the
+  process environment value `TEST_EMBEDDING_PROVIDER=deterministic`.
+- Test contracts use provider/model `deterministic-test`, zero revisions and
+  manifest identity, and cannot satisfy `require_production()`.
+- Production construction rejects every model/revision override.
+- The public smoke calls `require_production()`; a deterministic encoder can
+  no longer return `status=ok`.
+- Invalid CLI arguments return exit `2`; runtime/serialization failures return
+  exit `1`. Failure stdout is empty and stderr is exactly one safe JSON line
+  without exception messages, arguments, secrets, or local paths.
 
-The host offline run completed in about `4.9s`; the Linux container run,
-including model load and embedding, completed in about `10.4s`. Both use
-Python `3.12.14`, `sentence-transformers 3.4.1`, `torch 2.6.0`, and
-`transformers 4.48.3`.
+## Real-model verification
 
-No secrets or local absolute paths are recorded here.
+- Host cached/offline model test: `1 passed in 5.14s` on the final implementation.
+- Host cached/offline public smoke: production contract, finite normalized
+  document shape `[2,1024]`, query shape `[1024]`, status `ok`.
+- Official Hugging Face metadata verification: passed against the pinned
+  revision and all ten manifest records.
+- Rebuilt Linux image: `trade-agent-embedding-smoke:latest`.
+- Linux public smoke ran with `--network none` and a read-only Hugging Face hub
+  cache mounted at `/model-cache`: status `ok`, exact production contract,
+  finite normalized vectors, and the same trusted byte count.
+- Linux cached/offline model test: `1 passed in 11.51s` on the rebuilt image.
+- Built wheel contains the committed artifact manifest as package data.
+
+The host and image use `sentence-transformers 3.4.1`, `torch 2.6.0`, and
+`transformers 4.48.3`. No secrets or local absolute paths are recorded here.
