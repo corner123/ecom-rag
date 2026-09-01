@@ -31,6 +31,15 @@ def test_compose_api_receives_only_query_database_secret() -> None:
     assert not any("ROOT_PASSWORD" in key or "MIGRATION_PASSWORD" in key for key in api_environment)
 
 
+def test_compose_api_persists_only_the_model_cache_for_embedding_weights() -> None:
+    compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
+    api = compose["services"]["api"]
+
+    assert "model_cache:/model-cache" in api["volumes"]
+    assert "model_cache" in compose["volumes"]
+    assert api["environment"]["MODELS__EMBEDDING_CACHE_DIR"] == "/model-cache"
+
+
 def test_etcd_persists_to_the_declared_data_directory() -> None:
     compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
     etcd = compose["services"]["etcd"]

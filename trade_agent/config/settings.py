@@ -1,8 +1,9 @@
 """Typed, environment-driven settings for the local trade-agent stack."""
 from __future__ import annotations
 import os
+import re
 from typing import Literal
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _PLACEHOLDERS = {"change-me", "replace-me", "password", "secret", ""}
@@ -39,9 +40,34 @@ class RedisSettings(BaseModel):
     database: int = Field(default=0, ge=0, le=15)
 
 class ModelSettings(BaseModel):
-    embedding_model: str = "BAAI/bge-small-zh-v1.5"
-    reranker_model: str = "BAAI/bge-reranker-base"
+    embedding_model: str = "BAAI/bge-m3"
+    embedding_revision: str = "5617a9f61b028005a4858fdac845db406aefb181"
+    embedding_device: str = "cpu"
+    embedding_batch_size: int = Field(default=16, gt=0, le=256)
+    embedding_cache_dir: str | None = None
+    embedding_offline: bool = False
+    reranker_model: str = "BAAI/bge-reranker-v2-m3"
+    reranker_revision: str = "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e"
     generation_provider: str = "deterministic"
+
+    @field_validator("embedding_revision", "reranker_revision")
+    @classmethod
+    def immutable_model_revision(cls, value: str) -> str:
+        if not re.fullmatch(r"[0-9a-f]{40}", value):
+            raise ValueError("model revision must be an immutable 40-character lowercase SHA")
+        return value
+
+    @model_validator(mode="after")
+    def pin_retrieval_models(self) -> "ModelSettings":
+        if self.embedding_model != "BAAI/bge-m3" or self.embedding_revision != "5617a9f61b028005a4858fdac845db406aefb181":
+            raise ValueError("production embedding settings must use pinned BAAI/bge-m3")
+        if self.reranker_model != "BAAI/bge-reranker-v2-m3" or self.reranker_revision != "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e":
+            raise ValueError("production reranker settings must use the pinned BGE reranker")
+        if not self.embedding_device.strip():
+            raise ValueError("embedding device must not be blank")
+        if self.embedding_cache_dir is not None and not self.embedding_cache_dir.strip():
+            raise ValueError("embedding cache directory must not be blank")
+        return self
 
 class RuntimeLimits(BaseModel):
     max_graph_steps: int = Field(default=12, gt=0, le=50)
@@ -49,7 +75,9 @@ class RuntimeLimits(BaseModel):
     max_llm_calls: int = Field(default=5, ge=0, le=10)
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_nested_delimiter="__", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_nested_delimiter="__", env_ignore_empty=True, extra="ignore"
+    )
     environment: Literal["test", "development", "compose"] = "development"
     mysql: MysqlSettings = Field(default_factory=MysqlSettings)
     milvus: MilvusSettings = MilvusSettings()

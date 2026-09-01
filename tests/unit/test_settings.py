@@ -1,6 +1,6 @@
 import pytest
 
-from trade_agent.config.settings import RuntimeLimits, Settings
+from trade_agent.config.settings import ModelSettings, RuntimeLimits, Settings
 
 
 def test_settings_reject_placeholder_password(monkeypatch):
@@ -53,3 +53,27 @@ def test_missing_mysql_password_is_rejected(monkeypatch):
     monkeypatch.delenv("MYSQL__PASSWORD", raising=False)
     with pytest.raises(ValueError, match="required|placeholder"):
         Settings.load(runtime="test")
+
+
+def test_model_settings_pin_bge_m3_and_expose_embedding_runtime_controls():
+    models = ModelSettings()
+
+    assert models.embedding_model == "BAAI/bge-m3"
+    assert models.embedding_revision == "5617a9f61b028005a4858fdac845db406aefb181"
+    assert models.reranker_model == "BAAI/bge-reranker-v2-m3"
+    assert models.reranker_revision == "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e"
+    assert models.embedding_device == "cpu"
+    assert models.embedding_batch_size > 0
+    assert models.embedding_offline is False
+
+
+def test_model_settings_reject_floating_embedding_revision():
+    with pytest.raises(ValueError, match="immutable"):
+        ModelSettings(embedding_revision="main")
+
+
+def test_empty_embedding_cache_environment_is_ignored(monkeypatch):
+    monkeypatch.setenv("MYSQL__QUERY_PASSWORD", "query-only")
+    monkeypatch.setenv("MODELS__EMBEDDING_CACHE_DIR", "")
+
+    assert Settings.load(runtime="compose").models.embedding_cache_dir is None

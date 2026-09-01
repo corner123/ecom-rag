@@ -6,7 +6,7 @@
 
 **Architecture:** Each immutable build owns one Milvus collection and one BM25 artifact keyed by identical `chunk_id` values. A typed retrieval plan compiles metadata filters before ANN, runs dense and sparse retrieval concurrently, fuses ranks with auditable source/fact priors, reranks bounded candidates, then normalizes entities and facts before returning Evidence candidates.
 
-**Tech Stack:** pymilvus 2.6.17, Milvus 2.6.22, BAAI/bge-small-zh-v1.5, BAAI/bge-reranker-base, sentence-transformers, rank-bm25, Pydantic v2, NumPy, pytest.
+**Tech Stack:** pymilvus 2.6.17, Milvus 2.6.22, `BAAI/bge-m3` at revision `5617a9f61b028005a4858fdac845db406aefb181`, `BAAI/bge-reranker-v2-m3` at revision `953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e`, sentence-transformers, rank-bm25, Pydantic v2, NumPy, pytest.
 
 **Spec:** `docs/superpowers/specs/2026-08-29-foreign-trade-agent-overhaul-design.md`
 
@@ -41,7 +41,8 @@ def test_embeddings_are_normalized_and_dimension_is_discovered(manager):
     vectors = manager.embed_documents(["HS 850440 charger", "采购增长"])
     assert vectors.shape == (2, manager.contract.dimension)
     np.testing.assert_allclose(np.linalg.norm(vectors, axis=1), 1.0, atol=1e-5)
-    assert manager.contract.model_name == "BAAI/bge-small-zh-v1.5"
+    assert manager.contract.model_name == "BAAI/bge-m3"
+    assert manager.contract.revision == "5617a9f61b028005a4858fdac845db406aefb181"
 ```
 
 - [ ] **Step 2: Verify failure**
@@ -65,7 +66,7 @@ class BgeEmbeddingManager:
         return np.asarray(vectors, dtype=np.float32)
 ```
 
-Model revision and observed dimension are persisted in the build contract. Hash/test embeddings may exist only behind an explicit `TEST_EMBEDDING_PROVIDER=deterministic` setting and never satisfy Milvus smoke or final evaluation.
+Model revision and observed dimension are persisted in the build contract. The production/default contract is the pinned `BAAI/bge-m3` revision above and its observed dense dimension must be 1024. Hash/test embeddings may exist only behind an explicit `TEST_EMBEDDING_PROVIDER=deterministic` setting and never satisfy Milvus smoke or final evaluation. A real-model smoke must load the pinned weights, embed multilingual trade text, prove finite normalized vectors, and record the resolved local snapshot/commit; a fake or deterministic provider cannot make that smoke pass.
 
 - [ ] **Step 4: Run tests**
 
@@ -347,7 +348,7 @@ Expected: FAIL because reranker is absent.
 
 - [ ] **Step 3: Implement bounded cross-encoder reranking**
 
-Only the profile's bounded fused candidates reach the model. Stable tie-breaking uses pre-rerank order. A strict profile raises `RerankerUnavailable`; a permissive profile returns explicit degraded results.
+Only the profile's bounded fused candidates reach the pinned `BAAI/bge-reranker-v2-m3` revision above. Stable tie-breaking uses pre-rerank order. A strict profile raises `RerankerUnavailable`; a permissive profile returns explicit degraded results.
 
 - [ ] **Step 4: Run tests with fake and real model smoke**
 

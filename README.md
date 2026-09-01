@@ -92,3 +92,19 @@ MinerU is unavailable; the smoke output records this degradation truthfully.
 This task verifies only foundation services, schema/seed, synthetic corpus,
 ingestion, and manifests. Retrieval, SQL-agent orchestration, answer
 generation, and evaluation are later scopes.
+
+## Pinned embedding smoke
+
+Retrieval uses `BAAI/bge-m3` at immutable revision
+`5617a9f61b028005a4858fdac845db406aefb181` (1024 dimensions). The API keeps
+only model artifacts in the named `model_cache` volume; it does not receive
+the MySQL root or migration secrets. The snapshot intentionally excludes the
+duplicate ONNX and image assets, while retaining the SentenceTransformer,
+tokenizer, configuration, and PyTorch model files.
+
+After building the API image, run the non-fake smoke command. It emits one
+safe JSON line containing the resolved revision and vector checks:
+
+```bash
+docker compose --env-file .env run --rm --no-deps api python -m scripts.smoke_embeddings
+```
