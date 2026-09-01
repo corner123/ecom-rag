@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 from pydantic import ValidationError
 
+import trade_agent.index.contracts as embedding_contracts
 from trade_agent.index.contracts import EmbeddingContract
 from trade_agent.index.embeddings import (
     ARTIFACT_MANIFEST_SHA256,
@@ -34,6 +35,20 @@ class FakeEncoder:
 class FalseyFakeEncoder(FakeEncoder):
     def __bool__(self) -> bool:
         return False
+
+
+def _attested_production_contract() -> EmbeddingContract:
+    return embedding_contracts._issue_verified_production_contract(
+        model_name="BAAI/bge-m3",
+        requested_revision=BGE_M3_REVISION,
+        resolved_revision=BGE_M3_REVISION,
+        dimension=BGE_M3_DIMENSION,
+        normalized=True,
+        dtype="float32",
+        library_version="3.4.1",
+        artifact_manifest_sha256=ARTIFACT_MANIFEST_SHA256,
+        verified_artifact_count=len(TRUSTED_ARTIFACTS),
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -189,7 +204,7 @@ def test_embedding_contract_rejects_floating_revisions_and_wrong_bge_m3_dimensio
         )
 
 
-def test_embedding_contract_only_accepts_exact_production_or_explicit_test_identity() -> None:
+def test_direct_production_fields_are_valid_identity_but_not_live_attestation() -> None:
     production = EmbeddingContract(
         provider="sentence-transformers",
         model_name="BAAI/bge-m3",
@@ -202,8 +217,78 @@ def test_embedding_contract_only_accepts_exact_production_or_explicit_test_ident
         artifact_manifest_sha256=ARTIFACT_MANIFEST_SHA256,
         verified_artifact_count=len(TRUSTED_ARTIFACTS),
     )
+    assert production.provider == "sentence-transformers"
+    assert production.is_production is False
+    with pytest.raises(ValueError, match="verified production"):
+        production.require_production()
+
+
+def test_attested_production_contract_and_unchanged_copy_are_accepted() -> None:
+    production = _attested_production_contract()
+
     assert production.is_production is True
-    production.require_production()
+    assert production.require_production() is production
+    copied = production.model_copy()
+    assert copied.is_production is True
+    copied.require_production()
+    same_value_update = production.model_copy(update={"dimension": BGE_M3_DIMENSION})
+    assert same_value_update.is_production is True
+    same_value_update.require_production()
+
+
+def test_dumped_or_revalidated_production_identity_loses_live_attestation() -> None:
+    production = _attested_production_contract()
+
+    reconstructed = EmbeddingContract.model_validate(production.model_dump(mode="python"))
+    revalidated_instance = EmbeddingContract.model_validate(production)
+
+    assert reconstructed.is_production is False
+    assert revalidated_instance is not production
+    assert revalidated_instance.is_production is False
+    for contract in (reconstructed, revalidated_instance):
+        with pytest.raises(ValueError, match="verified production"):
+            contract.require_production()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("provider", "deterministic-test"),
+        ("model_name", "BAAI/other"),
+        ("requested_revision", "0" * 40),
+        ("resolved_revision", "0" * 40),
+        ("dimension", BGE_M3_DIMENSION - 1),
+        ("normalized", False),
+        ("dtype", "float64"),
+        ("library_version", "changed"),
+        ("artifact_manifest_sha256", "1" * 64),
+        ("verified_artifact_count", len(TRUSTED_ARTIFACTS) - 1),
+        ("unexpected_field", "not part of the production schema"),
+    ],
+)
+def test_any_production_contract_field_mutation_invalidates_attestation(
+    field: str, value: object
+) -> None:
+    mutated = _attested_production_contract().model_copy(update={field: value})
+
+    assert mutated.is_production is False
+    with pytest.raises(ValueError, match="verified production"):
+        mutated.require_production()
+
+
+def test_changing_only_fake_provider_cannot_forge_production(
+    manager: BgeEmbeddingManager,
+) -> None:
+    manager.embed_query("HS 850440")
+
+    forged = manager.contract.model_copy(update={"provider": "sentence-transformers"})
+
+    assert forged.is_production is False
+    with pytest.raises(ValueError, match="verified production"):
+        forged.require_production()
+
+
+def test_embedding_contract_rejects_other_production_and_test_identities() -> None:
 
     with pytest.raises(ValidationError):
         EmbeddingContract(

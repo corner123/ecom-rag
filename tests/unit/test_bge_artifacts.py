@@ -1,12 +1,169 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 import trade_agent.index.embeddings as embeddings
+
+
+def _manifest_document() -> dict[str, object]:
+    return json.loads(embeddings._MANIFEST_PATH.read_text(encoding="utf-8"))
+
+
+def test_trusted_manifest_loader_accepts_the_committed_package_data() -> None:
+    manifest = embeddings._load_trusted_manifest(embeddings._MANIFEST_PATH)
+
+    assert manifest["schema_version"] == 1
+    assert manifest["model_name"] == embeddings.BGE_M3_MODEL
+    assert manifest["revision"] == embeddings.BGE_M3_REVISION
+    assert len(manifest["files"]) == 10
+
+
+def test_trusted_manifest_loader_rejects_altered_canonical_json(tmp_path: Path) -> None:
+    manifest = _manifest_document()
+    manifest["files"][0]["size"] += 1  # type: ignore[index]
+    altered = tmp_path / "bge_m3_artifact_manifest.json"
+    altered.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="trusted manifest digest"):
+        embeddings._load_trusted_manifest(altered)
+
+
+def test_trusted_manifest_loader_rejects_duplicate_json_keys(tmp_path: Path) -> None:
+    original = embeddings._MANIFEST_PATH.read_text(encoding="utf-8")
+    duplicate = original.replace(
+        '"schema_version":1',
+        '"schema_version":1,"schema_version":1',
+        1,
+    )
+    altered = tmp_path / "bge_m3_artifact_manifest.json"
+    altered.write_text(duplicate, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="duplicate JSON key"):
+        embeddings._load_trusted_manifest(altered)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("schema_version", 2, "schema_version"),
+        ("model_name", "BAAI/other", "model_name"),
+        ("revision", "0" * 40, "revision"),
+    ],
+)
+def test_manifest_schema_rejects_wrong_identity(
+    field: str, value: object, message: str
+) -> None:
+    manifest = _manifest_document()
+    manifest[field] = value
+
+    with pytest.raises(ValueError, match=message):
+        embeddings._validate_manifest_schema(manifest)
+
+
+def test_manifest_schema_requires_the_exact_artifact_count() -> None:
+    manifest = _manifest_document()
+    manifest["files"].pop()  # type: ignore[union-attr]
+
+    with pytest.raises(ValueError, match="exactly 10"):
+        embeddings._validate_manifest_schema(manifest)
+
+
+@pytest.mark.parametrize(
+    "unsafe_path",
+    [
+        "/absolute/config.json",
+        "../config.json",
+        "nested/../config.json",
+        "nested//config.json",
+        "nested/./config.json",
+        "nested\\config.json",
+        "",
+        "nested/\x00config.json",
+    ],
+)
+def test_manifest_schema_rejects_unsafe_posix_paths(unsafe_path: str) -> None:
+    manifest = _manifest_document()
+    manifest["files"][0]["path"] = unsafe_path  # type: ignore[index]
+
+    with pytest.raises(ValueError, match="safe relative POSIX path"):
+        embeddings._validate_manifest_schema(manifest)
+
+
+def test_manifest_schema_rejects_duplicate_artifact_paths() -> None:
+    manifest = _manifest_document()
+    first_path = manifest["files"][0]["path"]  # type: ignore[index]
+    manifest["files"][1]["path"] = first_path  # type: ignore[index]
+
+    with pytest.raises(ValueError, match="unique"):
+        embeddings._validate_manifest_schema(manifest)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ({"size": True}, "size"),
+        ({"size": 0}, "size"),
+        ({"sha256": "bad"}, "sha256"),
+        ({"blob_id": "bad"}, "blob_id"),
+        ({"unexpected": "field"}, "fields"),
+    ],
+)
+def test_manifest_schema_rejects_invalid_artifact_fields(
+    mutation: dict[str, object], message: str
+) -> None:
+    manifest = _manifest_document()
+    manifest["files"][0].update(mutation)  # type: ignore[index]
+
+    with pytest.raises(ValueError, match=message):
+        embeddings._validate_manifest_schema(manifest)
+
+
+@pytest.mark.parametrize("lineage", ["both", "neither"])
+def test_manifest_schema_requires_exactly_one_blob_or_lfs_identity(lineage: str) -> None:
+    manifest = _manifest_document()
+    artifact = manifest["files"][0]  # type: ignore[index]
+    if lineage == "both":
+        artifact["lfs_sha256"] = "1" * 64
+    else:
+        artifact.pop("blob_id")
+
+    with pytest.raises(ValueError, match="exactly one"):
+        embeddings._validate_manifest_schema(manifest)
+
+
+def test_manifest_failure_precedes_snapshot_download_and_model_construction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest = _manifest_document()
+    manifest["files"][0]["size"] += 1  # type: ignore[index]
+    altered = tmp_path / "bge_m3_artifact_manifest.json"
+    altered.write_text(json.dumps(manifest), encoding="utf-8")
+    called = {"download": False, "model": False}
+
+    def forbidden_download(*args: object, **kwargs: object) -> str:
+        called["download"] = True
+        return "/untrusted/snapshot"
+
+    def forbidden_model(*args: object, **kwargs: object) -> object:
+        called["model"] = True
+        return object()
+
+    import huggingface_hub
+    import sentence_transformers
+
+    monkeypatch.setattr(embeddings, "_MANIFEST_PATH", altered)
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", forbidden_download)
+    monkeypatch.setattr(sentence_transformers, "SentenceTransformer", forbidden_model)
+
+    with pytest.raises(ValueError, match="trusted manifest digest"):
+        embeddings.BgeEmbeddingManager(local_files_only=True).embed_query("HS 850440")
+
+    assert called == {"download": False, "model": False}
 
 
 def _snapshot_with_one_trusted_file(

@@ -5,16 +5,18 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 import hashlib
+import hmac
 from importlib.metadata import version
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import re
 from threading import RLock
 from typing import Any, Protocol
 
 import numpy as np
 
-from .contracts import EmbeddingContract
+from .contracts import EmbeddingContract, _issue_verified_production_contract
 
 BGE_M3_MODEL = "BAAI/bge-m3"
 BGE_M3_REVISION = "5617a9f61b028005a4858fdac845db406aefb181"
@@ -22,9 +24,105 @@ BGE_M3_DIMENSION = 1024
 TEST_EMBEDDING_PROVIDER = "TEST_EMBEDDING_PROVIDER"
 _TEST_REVISION = "0" * 40
 _MANIFEST_PATH = Path(__file__).with_name("bge_m3_artifact_manifest.json")
-_MANIFEST = json.loads(_MANIFEST_PATH.read_text(encoding="utf-8"))
-_CANONICAL_MANIFEST = json.dumps(_MANIFEST, sort_keys=True, separators=(",", ":"))
-ARTIFACT_MANIFEST_SHA256 = hashlib.sha256(_CANONICAL_MANIFEST.encode("utf-8")).hexdigest()
+_EXPECTED_ARTIFACT_MANIFEST_SHA256 = (
+    "3a862f1d0a8543acc13e9faa5e6d6d1f916ee609b264960be8337e6ba509856b"
+)
+_EXPECTED_ARTIFACT_COUNT = 10
+_MANIFEST_KEYS = {"schema_version", "model_name", "revision", "files"}
+_ARTIFACT_COMMON_KEYS = {"path", "size", "sha256"}
+_LOWER_SHA256 = re.compile(r"[0-9a-f]{64}")
+_LOWER_GIT_BLOB = re.compile(r"[0-9a-f]{40}")
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    document: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in document:
+            raise ValueError("trusted manifest contains a duplicate JSON key")
+        document[key] = value
+    return document
+
+
+def _is_safe_relative_posix_path(value: object) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    if "\\" in value or "//" in value or any(ord(character) < 32 for character in value):
+        return False
+    path = PurePosixPath(value)
+    return (
+        not path.is_absolute()
+        and path.as_posix() == value
+        and all(part not in {"", ".", ".."} for part in path.parts)
+    )
+
+
+def _validate_manifest_schema(document: object) -> None:
+    if not isinstance(document, dict) or set(document) != _MANIFEST_KEYS:
+        raise ValueError("trusted manifest has invalid top-level fields")
+    if type(document["schema_version"]) is not int or document["schema_version"] != 1:
+        raise ValueError("trusted manifest schema_version must be exactly 1")
+    if document["model_name"] != BGE_M3_MODEL:
+        raise ValueError("trusted manifest model_name does not match BAAI/bge-m3")
+    if document["revision"] != BGE_M3_REVISION:
+        raise ValueError("trusted manifest revision does not match the pinned revision")
+    files = document["files"]
+    if not isinstance(files, list) or len(files) != _EXPECTED_ARTIFACT_COUNT:
+        raise ValueError("trusted manifest must contain exactly 10 artifacts")
+
+    paths: set[str] = set()
+    for artifact in files:
+        if not isinstance(artifact, dict):
+            raise ValueError("trusted manifest artifact must be an object")
+        has_blob = "blob_id" in artifact
+        has_lfs = "lfs_sha256" in artifact
+        if has_blob == has_lfs:
+            raise ValueError("trusted manifest artifact requires exactly one blob or LFS identity")
+        lineage_key = "blob_id" if has_blob else "lfs_sha256"
+        if set(artifact) != _ARTIFACT_COMMON_KEYS | {lineage_key}:
+            raise ValueError("trusted manifest artifact has invalid fields")
+
+        path = artifact["path"]
+        if not _is_safe_relative_posix_path(path):
+            raise ValueError("trusted manifest path must be a safe relative POSIX path")
+        if path in paths:
+            raise ValueError("trusted manifest artifact paths must be unique")
+        paths.add(path)
+
+        size = artifact["size"]
+        if type(size) is not int or size <= 0:
+            raise ValueError("trusted manifest artifact size must be a positive integer")
+        sha256 = artifact["sha256"]
+        if not isinstance(sha256, str) or not _LOWER_SHA256.fullmatch(sha256):
+            raise ValueError("trusted manifest artifact sha256 is invalid")
+        lineage = artifact[lineage_key]
+        lineage_pattern = _LOWER_GIT_BLOB if has_blob else _LOWER_SHA256
+        if not isinstance(lineage, str) or not lineage_pattern.fullmatch(lineage):
+            raise ValueError(f"trusted manifest artifact {lineage_key} is invalid")
+
+
+def _load_trusted_manifest(path: Path) -> dict[str, Any]:
+    try:
+        document = json.loads(
+            path.read_text(encoding="utf-8"),
+            object_pairs_hook=_reject_duplicate_json_keys,
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("trusted manifest package data is unreadable") from error
+    canonical_json = json.dumps(
+        document,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    observed_digest = hashlib.sha256(canonical_json).hexdigest()
+    if not hmac.compare_digest(observed_digest, _EXPECTED_ARTIFACT_MANIFEST_SHA256):
+        raise ValueError("trusted manifest digest does not match the embedded trust anchor")
+    _validate_manifest_schema(document)
+    return document
+
+
+_MANIFEST = _load_trusted_manifest(_MANIFEST_PATH)
+ARTIFACT_MANIFEST_SHA256 = _EXPECTED_ARTIFACT_MANIFEST_SHA256
 TRUSTED_ARTIFACTS = tuple(_MANIFEST["files"])
 TRUSTED_ARTIFACT_PATHS = tuple(item["path"] for item in TRUSTED_ARTIFACTS)
 
@@ -131,6 +229,8 @@ class BgeEmbeddingManager:
             self._encoder = self._test_encoder
             return self._encoder
 
+        _load_trusted_manifest(_MANIFEST_PATH)
+
         from huggingface_hub import HfApi, snapshot_download
         from sentence_transformers import SentenceTransformer
 
@@ -203,18 +303,21 @@ class BgeEmbeddingManager:
             library_version = version("sentence-transformers")
             manifest_sha256 = self._verified_snapshot.artifact_manifest_sha256
             artifact_count = self._verified_snapshot.artifact_count
-        observed = EmbeddingContract(
-            provider=provider,
-            model_name=model_name,
-            requested_revision=requested_revision,
-            resolved_revision=resolved_revision,
-            dimension=dimension,
-            normalized=True,
-            dtype="float32",
-            library_version=library_version,
-            artifact_manifest_sha256=manifest_sha256,
-            verified_artifact_count=artifact_count,
-        )
+        contract_fields = {
+            "model_name": model_name,
+            "requested_revision": requested_revision,
+            "resolved_revision": resolved_revision,
+            "dimension": dimension,
+            "normalized": True,
+            "dtype": "float32",
+            "library_version": library_version,
+            "artifact_manifest_sha256": manifest_sha256,
+            "verified_artifact_count": artifact_count,
+        }
+        if provider == "sentence-transformers":
+            observed = _issue_verified_production_contract(**contract_fields)
+        else:
+            observed = EmbeddingContract(provider=provider, **contract_fields)
         if self._contract is not None and self._contract != observed:
             raise ValueError("embedding contract changed after initial observation")
         self._contract = observed

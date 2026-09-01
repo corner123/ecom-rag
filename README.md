@@ -101,10 +101,19 @@ only model artifacts in the named `model_cache` volume; it does not receive
 the MySQL root or migration secrets. A committed allowlist identifies the ten
 dense SentenceTransformer, tokenizer, configuration, and PyTorch runtime files.
 Each load verifies their byte sizes and SHA256 digests before constructing the
-model. Online loads additionally compare the pinned revision and Git/LFS file
-metadata with Hugging Face. README/image assets, duplicate ONNX weights, and
-the unused ColBERT/sparse heads are excluded; unrelated cache extras are never
-counted as trusted artifacts.
+model. Before any download or model construction, the installed manifest's
+canonical JSON must also match the hard-coded trust anchor and its strict
+schema/path rules. Online loads additionally compare the pinned revision and
+Git/LFS file metadata with Hugging Face. README/image assets, duplicate ONNX
+weights, and the unused ColBERT/sparse heads are excluded; unrelated cache
+extras are never counted as trusted artifacts.
+
+`EmbeddingContract.model_dump()` deliberately persists only portable identity
+fields. It does not persist the process-local production attestation. Consumers
+that write a real vector index must use the live contract returned by a
+content-verified `BgeEmbeddingManager` and call `require_production()`; loading
+the same pinned-looking fields from JSON is not proof that this process verified
+the model bytes.
 
 After building the API image, run the non-fake smoke command. It emits one
 safe JSON line containing the resolved revision, artifact-manifest identity,
