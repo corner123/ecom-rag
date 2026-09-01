@@ -10,17 +10,30 @@ data. It is not customer, company, customs, or production data.
 ## Safe local foundation run
 
 The example file is a field checklist only; do not source it as shell code.
-Copy it for Compose variable names, edit non-secret host/model fields, and do
-not commit `.env`; secrets below are still entered interactively:
+Copy it for Compose variable names, edit only non-secret host/model fields, and
+do not commit `.env`. Never put a secret in `.env`; the shell exports below
+override its placeholder values without writing secrets to a file:
 
 ```bash
+set -eu
 cp .env.example .env
-$EDITOR .env
-read -r -s -p 'MySQL root password: ' MYSQL__ROOT_PASSWORD; printf '\n' >&2
-read -r -s -p 'MySQL migration password: ' MYSQL__MIGRATION_PASSWORD; printf '\n' >&2
-read -r -s -p 'MySQL query password: ' MYSQL__QUERY_PASSWORD; printf '\n' >&2
-read -r -s -p 'MinIO root password: ' MINIO_ROOT_PASSWORD; printf '\n' >&2
+if [ -n "${EDITOR:-}" ]; then
+  "$EDITOR" .env
+fi
+export MYSQL__ROOT_PASSWORD="$(python3 -c 'import getpass; print(getpass.getpass("MySQL root password: "))')"
+export MYSQL__MIGRATION_PASSWORD="$(python3 -c 'import getpass; print(getpass.getpass("MySQL migration password: "))')"
+export MYSQL__QUERY_PASSWORD="$(python3 -c 'import getpass; print(getpass.getpass("MySQL query password: "))')"
+export MINIO_ROOT_PASSWORD="$(python3 -c 'import getpass; print(getpass.getpass("MinIO root password: "))')"
+: "${MYSQL__ROOT_PASSWORD:?MYSQL__ROOT_PASSWORD must be non-empty}"
+: "${MYSQL__MIGRATION_PASSWORD:?MYSQL__MIGRATION_PASSWORD must be non-empty}"
+: "${MYSQL__QUERY_PASSWORD:?MYSQL__QUERY_PASSWORD must be non-empty}"
+: "${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be non-empty}"
 export MYSQL__ROOT_PASSWORD MYSQL__MIGRATION_PASSWORD MYSQL__QUERY_PASSWORD MINIO_ROOT_PASSWORD
+
+cleanup_foundation_secrets() {
+  unset MYSQL__ROOT_PASSWORD MYSQL__MIGRATION_PASSWORD MYSQL__QUERY_PASSWORD MINIO_ROOT_PASSWORD
+}
+trap cleanup_foundation_secrets EXIT
 ```
 
 Start exactly the five foundation dependencies (ports are loopback-only):

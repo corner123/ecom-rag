@@ -154,3 +154,39 @@ pre-existing `foreign-trade-agent_*` volumes were left untouched.
 The follow-up unit test also proves that a MySQL connection failure disposes
 the created engine, and the obsolete combined service probe was removed so
 each service remains independently staged and redacted.
+
+## Final P2 remediation evidence
+
+The CLI help boundary was tested RED first: both `-h` and `--help` previously
+returned argparse's help text with exit 0. The parser now disables argparse's
+built-in help option, so help and unknown arguments produce exactly one sorted
+JSON object on stderr (`status=error`, `stage=arguments`, `error=ArgumentError`)
+with empty stdout and exit 2. POSIX, Windows drive-letter, and UNC/secret-like
+unknown argument regression cases remain covered.
+
+README secret setup now works in both Bash and zsh. Each secret is obtained by
+`python3 -c` calling `getpass.getpass`; no read-based prompt flags, `.env` sourcing, secret
+file write, or secret-valued argv expansion is used. Four non-empty parameter
+assertions run before Compose commands, with `set -eu` making failures stop;
+an EXIT trap clears the process-local values if Compose or any later command
+fails. The optional editor invocation is guarded for shells with no `EDITOR`.
+The contract test executes the setup in both shells with a mocked prompt and
+checks that each exported value is the simulated value rather than the
+`.env.example` placeholder, without printing that value.
+
+```text
+$ uv run pytest tests/unit tests/contract -q -m 'not integration'
+188 passed, 1 deselected, 5 warnings
+
+$ uv run python -m compileall -q trade_agent scripts tests
+$ uv lock --check
+Resolved 49 packages in 2ms
+$ git diff --check
+passed
+```
+
+Compose precedence was verified using `.env.example` as the `--env-file` and
+process-local non-secret proof values in the shell: `docker compose config`
+resolved the shell values for MySQL root/migration/query and API query fields,
+and the check emitted only `precedence=ok`. This confirms exported secrets
+override the field-list placeholders while remaining out of files and argv.

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import os
+import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -38,8 +42,37 @@ def test_readme_does_not_source_env_or_expand_secret_values_in_argv() -> None:
     readme = Path("README.md").read_text(encoding="utf-8")
     assert "source .env" not in readme
     assert ". ./.env" not in readme
-    assert 'MYSQL__MIGRATION_PASSWORD="$' not in readme
+    assert re.search(r"\bread[^\n]*-p", readme) is None
+    assert '-e MYSQL__MIGRATION_PASSWORD="$' not in readme
     assert "-e MYSQL__MIGRATION_PASSWORD" in readme
+    assert "getpass.getpass" in readme
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+def test_readme_secret_setup_runs_in_bash_and_zsh_without_env_placeholders(shell: str, tmp_path: Path) -> None:
+    shell_path = shutil.which(shell)
+    assert shell_path is not None, f"required shell is unavailable: {shell}"
+    readme = Path("README.md").read_text(encoding="utf-8")
+    setup = readme.split("```bash", 1)[1].split("```", 1)[0]
+    setup = setup.replace("$EDITOR .env", ":")
+    shutil.copyfile(".env.example", tmp_path / ".env.example")
+    script = """
+python3() { printf '%s\\n' 'simulated-secret'; }
+""" + setup + """
+test "$MYSQL__ROOT_PASSWORD" = 'simulated-secret'
+test "$MYSQL__MIGRATION_PASSWORD" = 'simulated-secret'
+test "$MYSQL__QUERY_PASSWORD" = 'simulated-secret'
+test "$MINIO_ROOT_PASSWORD" = 'simulated-secret'
+printf '%s\\n' ready
+"""
+    result = subprocess.run(
+        [shell_path, "-c", script], cwd=tmp_path, env={"PATH": os.environ["PATH"]},
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "ready"
+    assert "simulated-secret" not in result.stdout
+    assert "replace-with-" not in result.stdout
 
 
 @pytest.mark.integration

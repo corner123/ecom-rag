@@ -86,6 +86,19 @@ def test_cli_unknown_argument_is_redacted_without_usage_or_echo(unsafe_value: st
     assert "usage:" not in result.stderr
 
 
+@pytest.mark.parametrize("flag", ["-h", "--help"])
+def test_cli_help_is_a_redacted_argument_error(flag: str) -> None:
+    repo = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        [sys.executable, "-m", "scripts.smoke_foundation", flag],
+        cwd=repo, capture_output=True, text=True,
+    )
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert json.loads(result.stderr) == {"error": "ArgumentError", "stage": "arguments", "status": "error"}
+    assert "usage:" not in result.stderr
+
+
 def test_corpus_resource_root_is_independent_of_cwd(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from scripts.smoke_foundation import _repo_root, _resource_path
 

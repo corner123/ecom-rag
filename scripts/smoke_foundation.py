@@ -424,7 +424,7 @@ def run_foundation_smoke(*, settings: Settings | None = None) -> dict[str, Any]:
 
 
 def main() -> int:
-    parser = _SafeArgumentParser(description="Verify the synthetic trade-agent foundation.")
+    parser = _SafeArgumentParser(description="Verify the synthetic trade-agent foundation.", add_help=False)
     try:
         parser.parse_args()
         print(json.dumps(run_foundation_smoke(), ensure_ascii=False, sort_keys=True, separators=(",", ":")))
