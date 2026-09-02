@@ -1,23 +1,27 @@
-"""Immutable contracts for vectors written to a retrieval build."""
+"""Immutable embedding identity contracts for retrieval index builds."""
 
 from __future__ import annotations
 
 import hmac
+from importlib.metadata import version
 import json
 import re
 import secrets
 from typing import Literal
+import weakref
 
 from pydantic import (
     BaseModel,
     ConfigDict,
+    PrivateAttr,
     StrictBool,
     StrictInt,
     StrictStr,
-    PrivateAttr,
     field_validator,
     model_validator,
 )
+
+from .provenance import VerifiedEmbeddingSnapshot, _require_verified_snapshot
 
 _FULL_SHA = re.compile(r"[0-9a-f]{40}")
 _BGE_M3_MODEL = "BAAI/bge-m3"
@@ -30,7 +34,41 @@ _BGE_M3_ARTIFACT_COUNT = 10
 _TEST_REVISION = "0" * 40
 _TEST_MANIFEST_SHA256 = "0" * 64
 _TEST_LIBRARY_VERSION = "deterministic-test-v1"
-_PRODUCTION_ATTESTATION_KEY = secrets.token_bytes(32)
+
+
+class _ContractToken:
+    __slots__ = ("mac", "__weakref__")
+
+    def __init__(self, mac: bytes) -> None:
+        self.mac = mac
+
+
+class _ContractAttestor:
+    """Issue copy-preserving tokens whose HMAC binds every public field."""
+
+    def __init__(self) -> None:
+        self._key = secrets.token_bytes(32)
+        self._tokens: dict[int, weakref.ReferenceType[_ContractToken]] = {}
+
+    def issue(self, payload: bytes) -> _ContractToken:
+        token = _ContractToken(hmac.digest(self._key, payload, "sha256"))
+        identity = id(token)
+
+        def discard(reference: weakref.ReferenceType[_ContractToken]) -> None:
+            if self._tokens.get(identity) is reference:
+                self._tokens.pop(identity, None)
+
+        self._tokens[identity] = weakref.ref(token, discard)
+        return token
+
+    def verifies(self, token: object | None, payload: bytes) -> bool:
+        if type(token) is not _ContractToken:
+            return False
+        reference = self._tokens.get(id(token))
+        if reference is None or reference() is not token:
+            return False
+        expected = hmac.digest(self._key, payload, "sha256")
+        return hmac.compare_digest(token.mac, expected)
 
 
 class EmbeddingContract(BaseModel):
@@ -43,7 +81,7 @@ class EmbeddingContract(BaseModel):
         revalidate_instances="always",
     )
 
-    _production_attestation: bytes | None = PrivateAttr(default=None)
+    _production_attestation: object | None = PrivateAttr(default=None)
 
     provider: Literal["sentence-transformers", "deterministic-test"]
     model_name: StrictStr
@@ -92,7 +130,7 @@ class EmbeddingContract(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def verify_identity(self) -> "EmbeddingContract":
+    def verify_identity(self) -> EmbeddingContract:
         if self.provider == "sentence-transformers":
             if (self.model_name, self.requested_revision, self.resolved_revision) != (
                 _BGE_M3_MODEL,
@@ -139,18 +177,9 @@ class EmbeddingContract(BaseModel):
 
     @property
     def is_production(self) -> bool:
-        if self.provider != "sentence-transformers":
-            return False
-        attestation = self._production_attestation
-        if not isinstance(attestation, bytes):
-            return False
-        try:
-            expected = _production_attestation(self)
-        except (TypeError, ValueError):
-            return False
-        return hmac.compare_digest(attestation, expected)
+        return _is_live_production_contract(self)
 
-    def require_production(self) -> "EmbeddingContract":
+    def require_production(self) -> EmbeddingContract:
         if not self.is_production:
             raise ValueError("a live verified production embedding contract is required")
         return self
@@ -166,10 +195,7 @@ def _canonical_contract_payload(contract: EmbeddingContract) -> bytes:
     public_schema = set(EmbeddingContract.model_fields)
     if set(contract.__dict__) != public_schema:
         raise ValueError("embedding contract instance does not match the complete public schema")
-    public_fields = {
-        field_name: getattr(contract, field_name)
-        for field_name in public_schema
-    }
+    public_fields = {field_name: getattr(contract, field_name) for field_name in public_schema}
     validated = EmbeddingContract.model_validate(public_fields)
     canonical = json.dumps(
         validated.model_dump(mode="json"),
@@ -180,39 +206,48 @@ def _canonical_contract_payload(contract: EmbeddingContract) -> bytes:
     return canonical.encode("utf-8")
 
 
-def _production_attestation(contract: EmbeddingContract) -> bytes:
-    return hmac.digest(
-        _PRODUCTION_ATTESTATION_KEY,
-        _canonical_contract_payload(contract),
-        "sha256",
-    )
+def _build_contract_authority() -> tuple[object, object]:
+    attestor = _ContractAttestor()
+    contract_payload = _canonical_contract_payload
+    installed_version = version
+    require_snapshot = _require_verified_snapshot
+
+    def issue_contract(
+        *,
+        receipt: VerifiedEmbeddingSnapshot,
+    ) -> EmbeddingContract:
+        verified = require_snapshot(receipt)
+        contract = EmbeddingContract(
+            provider="sentence-transformers",
+            model_name=verified.model_name,
+            requested_revision=verified.requested_revision,
+            resolved_revision=verified.resolved_revision,
+            dimension=_BGE_M3_DIMENSION,
+            normalized=True,
+            dtype="float32",
+            library_version=installed_version("sentence-transformers"),
+            artifact_manifest_sha256=verified.artifact_manifest_sha256,
+            verified_artifact_count=verified.artifact_count,
+        )
+        contract._production_attestation = attestor.issue(
+            contract_payload(contract)
+        )
+        return contract
+
+    def is_live_contract(contract: EmbeddingContract) -> bool:
+        if contract.provider != "sentence-transformers":
+            return False
+        try:
+            payload = contract_payload(contract)
+        except (AttributeError, TypeError, ValueError):
+            return False
+        return attestor.verifies(contract._production_attestation, payload)
+
+    return issue_contract, is_live_contract
 
 
-def _issue_verified_production_contract(
-    *,
-    model_name: str,
-    requested_revision: str,
-    resolved_revision: str,
-    dimension: int,
-    normalized: bool,
-    dtype: Literal["float32"],
-    library_version: str,
-    artifact_manifest_sha256: str,
-    verified_artifact_count: int,
-) -> EmbeddingContract:
-    """Issue a process-local attestation after the manager verifies model bytes."""
-
-    contract = EmbeddingContract(
-        provider="sentence-transformers",
-        model_name=model_name,
-        requested_revision=requested_revision,
-        resolved_revision=resolved_revision,
-        dimension=dimension,
-        normalized=normalized,
-        dtype=dtype,
-        library_version=library_version,
-        artifact_manifest_sha256=artifact_manifest_sha256,
-        verified_artifact_count=verified_artifact_count,
-    )
-    contract._production_attestation = _production_attestation(contract)
-    return contract
+(
+    _issue_verified_production_contract,
+    _is_live_production_contract,
+) = _build_contract_authority()
+del _build_contract_authority

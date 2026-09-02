@@ -108,12 +108,35 @@ Git/LFS file metadata with Hugging Face. README/image assets, duplicate ONNX
 weights, and the unused ColBERT/sparse heads are excluded; unrelated cache
 extras are never counted as trusted artifacts.
 
+The manifest loader returns frozen artifact values. One freshly loaded,
+process-attested manifest is passed explicitly through metadata checks,
+download allow-patterns, and local file verification; exported observation
+tuples are not security inputs. After all required paths, sizes, and SHA256
+values pass, only those ten files are exposed to SentenceTransformer through a
+private verified runtime view. Cache extras—including alternate weights,
+indexes, or adapter configuration—cannot become loader inputs. The exact view
+is fully hashed both before and immediately after model construction; only the
+post-load check can issue a live process-local snapshot receipt and activate
+manager state. A persistent in-place cache mutation during construction
+therefore fails closed and cleans the view. The production contract factory
+accepts only that receipt and derives every production identity/invariant field
+internally rather than accepting caller-supplied values.
+
+This pre/post integrity check is not a model-deserialization sandbox. It
+prevents production authority from being issued for bytes that remain changed
+at the post-load check, but it cannot undo loader side effects or detect an
+adversarial same-process writer that changes bytes and restores them entirely
+between the two hashes. The runtime also disables remote model code; stronger
+same-process attacker isolation would require sealed immutable storage and a
+separate restricted loader process.
+
 `EmbeddingContract.model_dump()` deliberately persists only portable identity
 fields. It does not persist the process-local production attestation. Consumers
 that write a real vector index must use the live contract returned by a
 content-verified `BgeEmbeddingManager` and call `require_production()`; loading
 the same pinned-looking fields from JSON is not proof that this process verified
-the model bytes.
+the model bytes. Likewise, directly constructing, copying, replacing, or
+deserializing a snapshot receipt cannot recreate live verification authority.
 
 After building the API image, run the non-fake smoke command. It emits one
 safe JSON line containing the resolved revision, artifact-manifest identity,

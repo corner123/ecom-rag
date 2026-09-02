@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
+import inspect
+import pickle
 
 import numpy as np
 import pytest
@@ -14,6 +17,7 @@ from trade_agent.index.embeddings import (
     BGE_M3_REVISION,
     BgeEmbeddingManager,
     TRUSTED_ARTIFACTS,
+    VerifiedEmbeddingSnapshot,
 )
 
 
@@ -37,17 +41,20 @@ class FalseyFakeEncoder(FakeEncoder):
         return False
 
 
-def _attested_production_contract() -> EmbeddingContract:
-    return embedding_contracts._issue_verified_production_contract(
+def _unattested_snapshot_receipt() -> VerifiedEmbeddingSnapshot:
+    return VerifiedEmbeddingSnapshot(
         model_name="BAAI/bge-m3",
         requested_revision=BGE_M3_REVISION,
         resolved_revision=BGE_M3_REVISION,
-        dimension=BGE_M3_DIMENSION,
-        normalized=True,
-        dtype="float32",
-        library_version="3.4.1",
+        trusted_bytes=1,
         artifact_manifest_sha256=ARTIFACT_MANIFEST_SHA256,
-        verified_artifact_count=len(TRUSTED_ARTIFACTS),
+        artifact_count=len(TRUSTED_ARTIFACTS),
+    )
+
+
+def _issue_from_receipt(receipt: VerifiedEmbeddingSnapshot) -> EmbeddingContract:
+    return embedding_contracts._issue_verified_production_contract(
+        receipt=receipt,
     )
 
 
@@ -223,57 +230,49 @@ def test_direct_production_fields_are_valid_identity_but_not_live_attestation() 
         production.require_production()
 
 
-def test_attested_production_contract_and_unchanged_copy_are_accepted() -> None:
-    production = _attested_production_contract()
+def test_production_contract_factory_only_accepts_a_live_snapshot_receipt() -> None:
+    signature = inspect.signature(
+        embedding_contracts._issue_verified_production_contract
+    )
 
-    assert production.is_production is True
-    assert production.require_production() is production
-    copied = production.model_copy()
-    assert copied.is_production is True
-    copied.require_production()
-    same_value_update = production.model_copy(update={"dimension": BGE_M3_DIMENSION})
-    assert same_value_update.is_production is True
-    same_value_update.require_production()
-
-
-def test_dumped_or_revalidated_production_identity_loses_live_attestation() -> None:
-    production = _attested_production_contract()
-
-    reconstructed = EmbeddingContract.model_validate(production.model_dump(mode="python"))
-    revalidated_instance = EmbeddingContract.model_validate(production)
-
-    assert reconstructed.is_production is False
-    assert revalidated_instance is not production
-    assert revalidated_instance.is_production is False
-    for contract in (reconstructed, revalidated_instance):
-        with pytest.raises(ValueError, match="verified production"):
-            contract.require_production()
+    assert set(signature.parameters) == {"receipt"}
+    with pytest.raises(TypeError):
+        embedding_contracts._issue_verified_production_contract()
+    with pytest.raises(ValueError, match="verified snapshot"):
+        _issue_from_receipt(_unattested_snapshot_receipt())
 
 
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("provider", "deterministic-test"),
-        ("model_name", "BAAI/other"),
-        ("requested_revision", "0" * 40),
-        ("resolved_revision", "0" * 40),
-        ("dimension", BGE_M3_DIMENSION - 1),
-        ("normalized", False),
-        ("dtype", "float64"),
-        ("library_version", "changed"),
-        ("artifact_manifest_sha256", "1" * 64),
-        ("verified_artifact_count", len(TRUSTED_ARTIFACTS) - 1),
-        ("unexpected_field", "not part of the production schema"),
-    ],
-)
-def test_any_production_contract_field_mutation_invalidates_attestation(
-    field: str, value: object
-) -> None:
-    mutated = _attested_production_contract().model_copy(update={field: value})
+def test_snapshot_receipt_reconstruction_and_copy_cannot_mint_a_contract() -> None:
+    direct = _unattested_snapshot_receipt()
+    reconstructed = VerifiedEmbeddingSnapshot(
+        **{
+            "model_name": direct.model_name,
+            "requested_revision": direct.requested_revision,
+            "resolved_revision": direct.resolved_revision,
+            "trusted_bytes": direct.trusted_bytes,
+            "artifact_manifest_sha256": direct.artifact_manifest_sha256,
+            "artifact_count": direct.artifact_count,
+        }
+    )
+    candidates = (
+        direct,
+        reconstructed,
+        replace(direct),
+        replace(direct, trusted_bytes=direct.trusted_bytes + 1),
+        pickle.loads(pickle.dumps(direct)),
+    )
 
-    assert mutated.is_production is False
-    with pytest.raises(ValueError, match="verified production"):
-        mutated.require_production()
+    for candidate in candidates:
+        with pytest.raises(ValueError, match="verified snapshot"):
+            _issue_from_receipt(candidate)
+
+
+def test_manager_cannot_promote_a_directly_constructed_snapshot_receipt() -> None:
+    manager = BgeEmbeddingManager()
+    manager._verified_snapshot = _unattested_snapshot_receipt()
+
+    with pytest.raises(ValueError, match="verified snapshot"):
+        manager._record_contract(BGE_M3_DIMENSION)
 
 
 def test_changing_only_fake_provider_cannot_forge_production(
