@@ -80,6 +80,16 @@ _HTML_DOCUMENT_ROOTS = frozenset(
 _MARKDOWN_INLINE_HTML_ROOTS = frozenset({"em", "strong", "a", "code", "span"})
 _PROFILE_MARKERS = frozenset({"company", "company_id", "country_code", "hs_code", "calendar_month", "aggregation_grain"})
 _HS_CODE = re.compile(r"^[0-9]{4,10}$")
+_COUNTRY_REGION = {
+    "AE": "Middle East",
+    "AU": "Oceania",
+    "BR": "South America",
+    "CN": "Asia",
+    "DE": "Europe",
+    "US": "North America",
+    "VN": "Asia",
+    "ZA": "Africa",
+}
 _MONTH = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 _SYSTEM_ATTRIBUTE_KEYS = {
     "feed_source_url", "feed_canonical_url", "item_source_url", "item_canonical_url",
@@ -473,6 +483,7 @@ class DocumentRouter:
             "source_weight": catalog.get("source_weight", 0.5),
             "source_weight_version": catalog.get("source_weight_version", "task6-v1-provisional"),
             "fact_type": catalog.get("fact_type"),
+            "region": catalog.get("region") or _COUNTRY_REGION.get(item.get("country_code")),
         })
         attrs = {key: value for key, value in attrs.items() if value is not None and value != ""}
         _validate_json_value(attrs, "document_attributes")
