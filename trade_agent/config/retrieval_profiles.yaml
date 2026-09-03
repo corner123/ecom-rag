@@ -1,0 +1,28 @@
+version: trade-source-profiles-v1
+default_profile: balanced-v1
+profiles:
+  balanced-v1:
+    profile_id: balanced-v1
+    version: trade-source-profiles-v1
+    rrf_k: 60
+    retriever_weights:
+      dense: 0.7
+      bm25: 0.3
+    source_fact_priors:
+      "*:trade_activity": 0.85
+      "*:company_status": 0.70
+      "*:regulation": 0.80
+      "*:risk": 0.70
+      "b2b:product_offering": 0.55
+      "customs_profile:trade_activity": 0.95
+      "industry_news:market_signal": 0.50
+      "official_website:company_status": 0.80
+      "official_website:product_offering": 0.65
+      "regulator:regulation": 0.95
+      "regulator:risk": 0.90
+      "social:market_signal": 0.35
+    default_prior: 0.50
+    candidate_limits:
+      dense: 100
+      bm25: 100
+      output: 100
