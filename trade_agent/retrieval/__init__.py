@@ -10,6 +10,7 @@ from .filters import (
 from .bm25 import BM25Index
 from .models import SparseHit
 from .tokenizer import TOKENIZER_VERSION, TradeTokenizer
+from .planner import QueryIntent, RetrievalPlan, RetrievalPlanner
 
 __all__ = [
     "FILTER_EXPRESSION_VERSION",
@@ -21,4 +22,7 @@ __all__ = [
     "SparseHit",
     "TradeTokenizer",
     "TOKENIZER_VERSION",
+    "QueryIntent",
+    "RetrievalPlan",
+    "RetrievalPlanner",
 ]
