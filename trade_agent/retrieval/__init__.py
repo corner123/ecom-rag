@@ -13,6 +13,7 @@ from .tokenizer import TOKENIZER_VERSION, TradeTokenizer
 from .planner import QueryIntent, RetrievalPlan, RetrievalPlanner
 from .fusion import FusedHit, weighted_rrf
 from .profiles import RetrievalProfile, load_retrieval_profile
+from .reranker import BgeReranker, RerankedHit, RerankOutcome, RerankerContract
 
 __all__ = [
     "FILTER_EXPRESSION_VERSION",
@@ -31,4 +32,8 @@ __all__ = [
     "weighted_rrf",
     "RetrievalProfile",
     "load_retrieval_profile",
+    "BgeReranker",
+    "RerankedHit",
+    "RerankOutcome",
+    "RerankerContract",
 ]
