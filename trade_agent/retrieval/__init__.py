@@ -7,6 +7,9 @@ from .filters import (
     compile_filter,
     compile_filter_binding,
 )
+from .bm25 import BM25Index
+from .models import SparseHit
+from .tokenizer import TOKENIZER_VERSION, TradeTokenizer
 
 __all__ = [
     "FILTER_EXPRESSION_VERSION",
@@ -14,4 +17,8 @@ __all__ = [
     "RetrievalFilter",
     "compile_filter",
     "compile_filter_binding",
+    "BM25Index",
+    "SparseHit",
+    "TradeTokenizer",
+    "TOKENIZER_VERSION",
 ]
