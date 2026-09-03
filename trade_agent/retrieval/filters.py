@@ -36,10 +36,11 @@ def _ordered_unique(values: Any, *, field: str) -> tuple[Any, ...]:
         raise ValueError(f"{field} must be a list or tuple")
     if any(not isinstance(value, (str, SourceType, FactType)) for value in values):
         raise ValueError(f"{field} items must be strings or supported enums")
-    unique: dict[tuple[type[Any], str], Any] = {}
+    unique: dict[str, str] = {}
     for value in values:
-        unique[(type(value), str(value))] = value
-    return tuple(sorted(unique.values(), key=lambda value: str(value)))
+        normalized = value.value if hasattr(value, "value") else value
+        unique[str(normalized)] = str(normalized)
+    return tuple(sorted(unique))
 
 
 def _aware_utc(value: datetime | None) -> datetime | None:

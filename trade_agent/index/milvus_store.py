@@ -487,21 +487,30 @@ def _chunk_ids_match(
     client: Any,
     collection_name: str,
     expected_sha256: str,
+    expected_count: int,
 ) -> bool:
-    rows = client.query(
+    iterator = client.query_iterator(
         collection_name=collection_name,
+        batch_size=1_000,
+        limit=-1,
         filter="",
         output_fields=["chunk_id"],
-        limit=16_384,
         consistency_level="Strong",
     )
     chunk_ids: list[str] = []
-    for row in rows:
-        value = row.get("chunk_id")
-        if type(value) is not str:
-            return False
-        chunk_ids.append(value)
-    return chunk_ids_sha256(chunk_ids) == expected_sha256
+    try:
+        while True:
+            rows = iterator.next()
+            if not rows:
+                break
+            for row in rows:
+                value = row.get("chunk_id")
+                if type(value) is not str:
+                    return False
+                chunk_ids.append(value)
+    finally:
+        iterator.close()
+    return len(chunk_ids) == expected_count and chunk_ids_sha256(chunk_ids) == expected_sha256
 
 
 class _EmbeddingManager(Protocol):
@@ -593,6 +602,7 @@ class TradeMilvusStore:
                 self.client,
                 contract.collection_name,
                 contract.build_chunk_ids_sha256,
+                contract.build_chunk_count,
             ):
                 return IndexWriteSummary(
                     collection_name=contract.collection_name,
@@ -621,6 +631,7 @@ class TradeMilvusStore:
             self.client,
             contract.collection_name,
             contract.build_chunk_ids_sha256,
+            contract.build_chunk_count,
         ):
             raise CollectionContractMismatch("flushed chunk IDs do not match the immutable contract")
         return IndexWriteSummary(
@@ -660,6 +671,7 @@ class TradeMilvusStore:
                 self.client,
                 contract.collection_name,
                 contract.build_chunk_ids_sha256,
+                contract.build_chunk_count,
             )
             if not exact_chunk_ids:
                 raise CollectionContractMismatch("Milvus chunk IDs do not match the contract")
@@ -916,10 +928,17 @@ class TradeMilvusStore:
         if indexes != [VECTOR_INDEX_NAME]:
             raise CollectionContractMismatch("Milvus vector index contract mismatch")
         index = self.client.describe_index(contract.collection_name, VECTOR_INDEX_NAME)
+        try:
+            hnsw_m = int(index["M"])
+            hnsw_ef_construction = int(index["efConstruction"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise CollectionContractMismatch("Milvus HNSW construction parameters are absent") from error
         if (
             index.get("index_type") != contract.index_type
             or index.get("metric_type") != contract.metric_type
             or index.get("field_name") != contract.vector_field
+            or hnsw_m != contract.hnsw_m
+            or hnsw_ef_construction != contract.hnsw_ef_construction
         ):
             raise CollectionContractMismatch("Milvus vector index settings mismatch")
 

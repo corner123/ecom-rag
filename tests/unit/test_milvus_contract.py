@@ -146,6 +146,18 @@ def test_filter_execution_uses_typed_template_parameters_not_literal_syntax() ->
     )
 
 
+def test_filter_deduplicates_mixed_source_type_strings_and_enums() -> None:
+    from trade_agent.retrieval.filters import RetrievalFilter
+    from trade_agent.schemas.source import FactType, SourceType
+
+    filter_ = RetrievalFilter(
+        source_types=["customs_profile", SourceType.CUSTOMS_PROFILE],
+        fact_types=["trade_activity", FactType.TRADE_ACTIVITY],
+    )
+    assert filter_.source_types == (SourceType.CUSTOMS_PROFILE,)
+    assert filter_.fact_types == (FactType.TRADE_ACTIVITY,)
+
+
 def test_filter_rejects_naive_or_inverted_publication_ranges() -> None:
     from trade_agent.retrieval.filters import RetrievalFilter
 
