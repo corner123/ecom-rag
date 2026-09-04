@@ -36,6 +36,14 @@ class StructuredIntentRejected(ValueError):
     """A structured provider response does not satisfy the local contract."""
 
 
+class ExplicitFilterConflict(ValueError):
+    """Caller-supplied filters conflict with an extracted or provider constraint."""
+
+
+class UnresolvedIntentConstraint(ValueError):
+    """The request names a scope the deterministic parser cannot safely resolve."""
+
+
 class TimeRange(BaseModel):
     """A trade-date range whose relative bounds are resolved before planning."""
 
@@ -110,8 +118,10 @@ _COUNTRY_NAMES = {
     "AE": ("阿联酋", "uae", "united arab emirates"),
     "ZA": ("南非", "south africa"),
     "AU": ("澳大利亚", "australia"),
+    "JP": ("日本", "japan"),
 }
 _HS = re.compile(r"(?i)(?:\bhs\s*)?(\d{4,10})\b")
+_ISO_RANGE = re.compile(r"\b(20\d{2}-\d{2}-\d{2})\s*(?:到|至|to|through|-)\s*(20\d{2}-\d{2}-\d{2})\b", re.IGNORECASE)
 _MONTHS = re.compile(r"(?:最近|近|过去|past|last)\s*(\d+|半)\s*(?:个)?(?:月|months?)", re.IGNORECASE)
 _LIMIT = re.compile(r"(?:top\s*|前\s*|最高的?\s*)(\d+)\s*(?:家|个|companies?)?", re.IGNORECASE)
 _COMPANY_BEFORE_RANGE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9 .&'_-]{1,127}?)\s*(?:最近|近|过去|past|last)", re.IGNORECASE)
@@ -138,8 +148,11 @@ class IntentParser:
         if explicit_filters is not None and type(explicit_filters) is not RetrievalFilter:
             raise TypeError("explicit_filters must be an exact RetrievalFilter instance")
         deterministic = self._parse_deterministic(question)
+        baseline = _apply_explicit_filters(deterministic, explicit_filters)
         if self.structured_provider is None:
-            return _apply_explicit_filters(deterministic, explicit_filters)
+            return baseline
+        if baseline.kind == "out_of_scope":
+            raise StructuredIntentRejected("structured intent cannot bypass an out-of-scope request")
         try:
             provided = self.structured_provider(question)
             if not isinstance(provided, Mapping):
@@ -154,7 +167,8 @@ class IntentParser:
             raise StructuredIntentRejected("structured intent does not satisfy the required schema") from error
         if candidate.question != question:
             raise StructuredIntentRejected("structured intent question does not match the request")
-        return _apply_explicit_filters(candidate, explicit_filters)
+        _require_provider_preserves_deterministic_scope(candidate, baseline)
+        return candidate
 
     def _parse_deterministic(self, question: str) -> QueryIntent:
         normalized = " ".join(question.split())
@@ -163,9 +177,11 @@ class IntentParser:
             return QueryIntent(question=question, kind="out_of_scope", out_of_scope_reason="unsupported_request")
 
         role: CompanyRole = "exporter_company" if any(token in lowered for token in ("出口", "export")) else "importer_company"
-        countries = _country_codes(normalized)
-        hs_codes = tuple(sorted(set(_HS.findall(normalized))))
         time_range = _time_range(normalized, self.as_of)
+        question_without_dates = _ISO_RANGE.sub("", normalized)
+        countries = _country_codes(question_without_dates)
+        _reject_unresolved_country_scope(question_without_dates, countries)
+        hs_codes = tuple(sorted(set(_HS.findall(question_without_dates))))
         company_names = _company_names(normalized)
         if "月度" in normalized or "monthly" in lowered or "趋势" in normalized or "trend" in lowered:
             time_range = time_range.model_copy(update={"grain": "month"})
@@ -180,6 +196,7 @@ class IntentParser:
         lead = any(token in lowered for token in ("值得跟进", "是否跟进", "lead", "follow up", "跟进"))
         external = any(token in lowered for token in ("官网", "website", "扩产", "状态", "新闻", "regulation", "法规"))
         quantity = any(token in lowered for token in ("数量", "重量", "quantity", "volume"))
+        metric = _metric(lowered, quantity)
         top = limit is not None and any(token in lowered for token in ("最高", "top", "排名", "前"))
         trade_language = any(
             token in lowered
@@ -190,7 +207,7 @@ class IntentParser:
             return QueryIntent(
                 question=question,
                 kind="lead_assessment",
-                constraints=_constraints("trade_amount", role, countries, hs_codes, time_range),
+                constraints=_constraints(metric, role, countries, hs_codes, time_range),
                 filters=filters,
                 time_range=time_range,
                 need_trade_data=True,
@@ -201,29 +218,32 @@ class IntentParser:
             return QueryIntent(
                 question=question,
                 kind="top_importers" if role == "importer_company" else "country_hs_activity",
-                constraints=_constraints("trade_amount", role, countries, hs_codes, time_range),
+                constraints=_constraints(metric, role, countries, hs_codes, time_range),
                 filters=filters,
                 time_range=time_range,
                 need_trade_data=True,
+                need_external_intel=external,
                 limit=limit,
             )
         if company_names and ("趋势" in normalized or "trend" in lowered or trade_language):
             return QueryIntent(
                 question=question,
                 kind="company_trend",
-                constraints=_constraints("quantity" if quantity else "trade_amount", role, countries, hs_codes, time_range),
+                constraints=_constraints(metric, role, countries, hs_codes, time_range),
                 filters=filters,
                 time_range=time_range,
                 need_trade_data=True,
+                need_external_intel=external,
             )
         if trade_language or countries or hs_codes:
             return QueryIntent(
                 question=question,
                 kind="country_hs_activity",
-                constraints=_constraints("quantity" if quantity else "trade_amount", role, countries, hs_codes, time_range),
+                constraints=_constraints(metric, role, countries, hs_codes, time_range),
                 filters=filters,
                 time_range=time_range,
                 need_trade_data=True,
+                need_external_intel=external,
             )
         if external:
             return QueryIntent(question=question, kind="external_intelligence", need_external_intel=True)
@@ -259,21 +279,27 @@ def to_retrieval_query_intent(intent: QueryIntent) -> RetrievalQueryIntent:
 def _apply_explicit_filters(intent: QueryIntent, explicit: RetrievalFilter | None) -> QueryIntent:
     if explicit is None:
         return intent
+    _require_compatible("country_codes", intent.filters.country_codes, explicit.country_codes)
+    _require_compatible("hs_codes", intent.filters.hs_codes, explicit.hs_codes)
+    _require_compatible("entity_ids", intent.filters.entity_ids, explicit.entity_ids)
+    _require_compatible("region", (intent.retrieval_filter.region,) if intent.retrieval_filter.region else (), (explicit.region,) if explicit.region else ())
+    _require_compatible("source_types", intent.retrieval_filter.source_types, explicit.source_types)
+    _require_compatible("fact_types", intent.retrieval_filter.fact_types, explicit.fact_types)
     filters = intent.filters.model_copy(
         update={
-            "country_codes": tuple(sorted(set(intent.filters.country_codes) | set(explicit.country_codes))),
-            "hs_codes": tuple(sorted(set(intent.filters.hs_codes) | set(explicit.hs_codes))),
-            "entity_ids": tuple(sorted(set(intent.filters.entity_ids) | set(explicit.entity_ids))),
+            "country_codes": explicit.country_codes or intent.filters.country_codes,
+            "hs_codes": explicit.hs_codes or intent.filters.hs_codes,
+            "entity_ids": explicit.entity_ids or intent.filters.entity_ids,
         }
     )
     retrieval = intent.retrieval_filter.model_copy(
         update={
             "region": explicit.region if explicit.region is not None else intent.retrieval_filter.region,
-            "country_codes": tuple(sorted(set(intent.retrieval_filter.country_codes) | set(explicit.country_codes))),
-            "hs_codes": tuple(sorted(set(intent.retrieval_filter.hs_codes) | set(explicit.hs_codes))),
-            "entity_ids": tuple(sorted(set(intent.retrieval_filter.entity_ids) | set(explicit.entity_ids))),
-            "source_types": tuple(sorted(set(intent.retrieval_filter.source_types) | set(explicit.source_types), key=lambda value: value.value)),
-            "fact_types": tuple(sorted(set(intent.retrieval_filter.fact_types) | set(explicit.fact_types), key=lambda value: value.value)),
+            "country_codes": explicit.country_codes or intent.retrieval_filter.country_codes,
+            "hs_codes": explicit.hs_codes or intent.retrieval_filter.hs_codes,
+            "entity_ids": explicit.entity_ids or intent.retrieval_filter.entity_ids,
+            "source_types": explicit.source_types or intent.retrieval_filter.source_types,
+            "fact_types": explicit.fact_types or intent.retrieval_filter.fact_types,
             "published_after": explicit.published_after or intent.retrieval_filter.published_after,
             "published_before": explicit.published_before or intent.retrieval_filter.published_before,
             "is_synthetic": explicit.is_synthetic if explicit.is_synthetic is not None else intent.retrieval_filter.is_synthetic,
@@ -308,7 +334,23 @@ def _country_codes(question: str) -> tuple[str, ...]:
     return tuple(sorted(codes))
 
 
+def _reject_unresolved_country_scope(question: str, codes: tuple[str, ...]) -> None:
+    if codes:
+        return
+    stripped = re.sub(r"(?:最近|近|过去)\s*(?:半|\d+\s*个?)?月", "", question)
+    chinese = re.search(r"([\u4e00-\u9fff]{2,})(?:采购|进口|出口)", stripped)
+    english = re.search(r"\b([A-Za-z]+)\s+(?:procurement|imports?|exports?)\b", stripped, re.IGNORECASE)
+    if chinese is not None or english is not None:
+        raise UnresolvedIntentConstraint("country scope is not recognized")
+
+
 def _time_range(question: str, as_of: date) -> TimeRange:
+    explicit = _ISO_RANGE.search(question)
+    if explicit:
+        try:
+            return TimeRange(start=date.fromisoformat(explicit.group(1)), end=date.fromisoformat(explicit.group(2)))
+        except ValueError as error:
+            raise UnresolvedIntentConstraint("date range is not valid") from error
     if "半年" in question or "half year" in question.casefold():
         return TimeRange(start=_subtract_months(as_of, 6), end=as_of, months=6)
     match = _MONTHS.search(question)
@@ -334,9 +376,48 @@ def _limit(question: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def _metric(question: str, quantity: bool) -> str:
+    requested: set[str] = set()
+    if any(token in question for token in ("金额", "采购额", "贸易额", "trade amount", "trade value")):
+        requested.add("trade_amount")
+    if quantity:
+        requested.add("quantity")
+    if any(token in question for token in ("交易次数", "交易笔数", "trade count")):
+        requested.add("trade_count")
+    if any(token in question for token in ("最近交易日期", "latest trade date")):
+        requested.add("latest_trade_date")
+    if any(token in question for token in ("利润率", "profit margin")):
+        raise UnresolvedIntentConstraint("unregistered metric")
+    if len(requested) > 1:
+        raise UnresolvedIntentConstraint("conflicting metrics")
+    return next(iter(requested), "trade_amount")
+
+
 def _company_names(question: str) -> tuple[str, ...]:
     match = _COMPANY_BEFORE_RANGE.search(question) or _COMPANY_BEFORE_DECISION.search(question)
     if match is None:
         return ()
     name = match.group(1).strip()
     return (name,) if name else ()
+
+
+def _require_compatible(field: str, current: tuple[object, ...], explicit: tuple[object, ...]) -> None:
+    if current and explicit and set(current) != set(explicit):
+        raise ExplicitFilterConflict(f"explicit {field} conflicts with extracted constraint")
+
+
+def _require_provider_preserves_deterministic_scope(candidate: QueryIntent, deterministic: QueryIntent) -> None:
+    if candidate.kind != deterministic.kind:
+        raise StructuredIntentRejected("structured intent conflicts with deterministic kind")
+    for field in ("country_codes", "hs_codes", "entity_ids", "company_names"):
+        expected = getattr(deterministic.filters, field)
+        if expected and getattr(candidate.filters, field) != expected:
+            raise StructuredIntentRejected(f"structured intent conflicts with deterministic {field}")
+    if deterministic.time_range.start is not None and candidate.time_range != deterministic.time_range:
+        raise StructuredIntentRejected("structured intent conflicts with deterministic time range")
+    if deterministic.need_trade_data and not candidate.need_trade_data:
+        raise StructuredIntentRejected("structured intent conflicts with deterministic trade route")
+    if deterministic.need_external_intel and not candidate.need_external_intel:
+        raise StructuredIntentRejected("structured intent conflicts with deterministic external route")
+    if candidate.retrieval_filter != deterministic.retrieval_filter:
+        raise StructuredIntentRejected("structured intent conflicts with deterministic retrieval filters")

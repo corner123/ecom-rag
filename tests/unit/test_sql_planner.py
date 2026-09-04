@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import date
+from dataclasses import replace
+from datetime import date, datetime, timezone
 from types import MappingProxyType
 
 import pytest
@@ -21,6 +22,7 @@ def registry() -> RegistrySnapshot:
             "companies.company_name",
             "countries.id",
             "countries.country_code",
+            "countries.region",
             "hs_codes.id",
             "hs_codes.hs_code",
             "trade_records.id",
@@ -47,6 +49,7 @@ def registry() -> RegistrySnapshot:
             {
                 "import_country": "countries.country_code",
                 "export_country": "countries.country_code",
+                "hs_code": "hs_codes.hs_code",
             }
         ),
         aggregations=MappingProxyType(
@@ -66,6 +69,7 @@ def registry() -> RegistrySnapshot:
                 "import_country": "countries.country_name",
                 "export_country": "countries.country_name",
                 "hs_code": "hs_codes.hs_code",
+                "region": "countries.region",
                 "time": "trade_records.trade_date",
             }
         ),
@@ -76,6 +80,7 @@ def registry() -> RegistrySnapshot:
                 "import_country": "countries.country_name",
                 "export_country": "countries.country_name",
                 "hs_code": "hs_codes.hs_code",
+                "region": "countries.region",
                 "time": "trade_records.trade_date",
             }
         ),
@@ -179,3 +184,97 @@ def test_structured_sql_plan_rejects_unknown_schema_elements(registry: RegistryS
 
     with pytest.raises(StructuredPlanRejected, match="unknown schema"):
         planner.plan(intent, registry)
+
+
+def test_planner_compiles_reviewed_region_and_entity_binding_or_rejects_unresolved_entity(
+    registry: RegistrySnapshot,
+) -> None:
+    from trade_agent.agents.intent import IntentParser
+    from trade_agent.db.sql_planner import SqlPlanner, UnresolvedSqlConstraint
+    from trade_agent.retrieval.filters import RetrievalFilter
+
+    intent = IntentParser(as_of=AS_OF).parse(
+        "最近半年美国采购 HS850440 金额最高的 10 家公司",
+        explicit_filters=RetrievalFilter(region="Europe", entity_ids=["company:buyer-7"]),
+    )
+
+    with pytest.raises(UnresolvedSqlConstraint, match="entity_ids"):
+        SqlPlanner().plan(intent, registry)
+
+    plan = SqlPlanner(entity_bindings={"company:buyer-7": 7}).plan(intent, registry)
+    predicates = {(item.column, item.operator, item.values) for item in plan.predicates}
+    assert ("import_country.region", "equals", ("Europe",)) in predicates
+    assert ("importer.id", "in", ("7",)) in predicates
+
+
+def test_entity_binding_uses_company_primary_key_even_when_names_are_not_unique(registry: RegistrySnapshot) -> None:
+    from trade_agent.agents.intent import IntentParser
+    from trade_agent.db.sql_planner import SqlPlanner
+    from trade_agent.retrieval.filters import RetrievalFilter
+
+    intent = IntentParser(as_of=AS_OF).parse(
+        "最近半年美国采购 HS850440 金额最高的 10 家公司",
+        explicit_filters=RetrievalFilter(entity_ids=["company:left", "company:right"]),
+    )
+
+    plan = SqlPlanner(entity_bindings={"company:left": 17, "company:right": 29}).plan(intent, registry)
+
+    assert ("importer.id", "in", ("17", "29")) in {
+        (item.column, item.operator, item.values) for item in plan.predicates
+    }
+
+
+def test_planner_leaves_publication_window_for_rag_and_does_not_convert_it_to_trade_date(
+    registry: RegistrySnapshot,
+) -> None:
+    from trade_agent.agents.intent import IntentParser
+    from trade_agent.db.sql_planner import SqlPlanner
+    from trade_agent.retrieval.filters import RetrievalFilter
+
+    published_after = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    intent = IntentParser(as_of=AS_OF).parse(
+        "美国采购 HS850440 金额最高的 10 家公司",
+        explicit_filters=RetrievalFilter(published_after=published_after),
+    )
+    plan = SqlPlanner().plan(intent, registry)
+
+    assert plan.rag_filter.published_after == published_after
+    assert all(predicate.column != "tr.trade_date" for predicate in plan.predicates)
+
+
+def test_planner_rejects_multi_metric_or_dimension_shape_instead_of_discarding_fields(
+    registry: RegistrySnapshot,
+) -> None:
+    from trade_agent.agents.intent import QueryIntent
+    from trade_agent.db.contracts import QueryConstraints
+    from trade_agent.db.sql_planner import UnsupportedQueryShape, SqlPlanner
+
+    intent = QueryIntent(
+        question="two metrics",
+        kind="top_importers",
+        constraints=QueryConstraints(
+            metrics=["trade_amount", "quantity"],
+            dimensions=["importer_company", "hs_code"],
+            filters=[],
+        ),
+        need_trade_data=True,
+    )
+
+    with pytest.raises(UnsupportedQueryShape, match="multiple metrics"):
+        SqlPlanner().plan(intent, registry)
+
+
+def test_planner_rejects_a_snapshot_missing_a_referenced_physical_column(registry: RegistrySnapshot) -> None:
+    from trade_agent.agents.intent import IntentParser
+    from trade_agent.db.sql_planner import SchemaNotRegistered, SqlPlanner
+
+    missing_company_name = replace(
+        registry,
+        columns=tuple(column for column in registry.columns if column != "companies.company_name"),
+    )
+
+    with pytest.raises(SchemaNotRegistered, match="companies.company_name"):
+        SqlPlanner().plan(
+            IntentParser(as_of=AS_OF).parse("最近半年美国采购 HS850440 金额最高的 10 家公司"),
+            missing_company_name,
+        )

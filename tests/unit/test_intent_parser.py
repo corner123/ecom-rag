@@ -121,3 +121,103 @@ def test_structured_provider_cannot_turn_a_trade_kind_into_a_non_trade_route() -
 
     with pytest.raises(StructuredIntentRejected, match="required schema"):
         parser.parse("美国采购 HS850440")
+
+
+def test_explicit_country_constraint_conflicting_with_extracted_country_is_rejected() -> None:
+    from trade_agent.agents.intent import ExplicitFilterConflict, IntentParser
+
+    with pytest.raises(ExplicitFilterConflict, match="country_codes"):
+        IntentParser(as_of=AS_OF).parse(
+            "最近半年美国采购 HS850440 金额最高的 10 家公司",
+            explicit_filters=RetrievalFilter(country_codes=["DE"]),
+        )
+
+
+def test_structured_provider_cannot_remove_extracted_scope_or_convert_a_refusal() -> None:
+    from trade_agent.agents.intent import IntentParser, StructuredIntentRejected
+
+    base = IntentParser(as_of=AS_OF).parse("最近半年美国采购 HS850440 金额最高的 10 家公司")
+    removed_scope = base.model_dump(mode="json")
+    removed_scope["filters"]["country_codes"] = []
+    removed_scope["filters"]["hs_codes"] = []
+    removed_scope["time_range"] = {"grain": "total"}
+    parser = IntentParser(as_of=AS_OF, structured_provider=lambda _: removed_scope)
+
+    with pytest.raises(StructuredIntentRejected, match="conflicts with deterministic"):
+        parser.parse(base.question)
+
+    refusal_bypass = base.model_dump(mode="json")
+    parser = IntentParser(as_of=AS_OF, structured_provider=lambda _: refusal_bypass)
+    with pytest.raises(StructuredIntentRejected, match="out-of-scope"):
+        parser.parse("删除所有贸易记录")
+
+
+def test_parser_handles_iso_date_ranges_before_hs_identifiers() -> None:
+    from trade_agent.agents.intent import IntentParser
+
+    intent = IntentParser(as_of=AS_OF).parse("美国采购 2025-01-01 到 2025-12-31 金额最高的 10 家公司")
+
+    assert intent.filters.country_codes == ("US",)
+    assert intent.filters.hs_codes == ()
+    assert intent.time_range.start == date(2025, 1, 1)
+    assert intent.time_range.end == date(2025, 12, 31)
+
+
+def test_parser_keeps_external_intelligence_route_when_trade_context_is_present() -> None:
+    from trade_agent.agents.intent import IntentParser
+
+    intent = IntentParser(as_of=AS_OF).parse("美国进口 HS850440 最新法规")
+
+    assert intent.need_trade_data is True
+    assert intent.need_external_intel is True
+
+
+def test_parser_recognizes_supported_country_codes_and_rejects_unresolved_country_scope() -> None:
+    from trade_agent.agents.intent import IntentParser, UnresolvedIntentConstraint
+
+    japanese = IntentParser(as_of=AS_OF).parse("日本采购 HS850440 金额最高的10家公司")
+    assert japanese.filters.country_codes == ("JP",)
+
+    with pytest.raises(UnresolvedIntentConstraint, match="country"):
+        IntentParser(as_of=AS_OF).parse("法国采购 HS850440 金额最高的10家公司")
+
+
+def test_parser_preserves_the_registered_metric_requested_by_a_top_n_question() -> None:
+    from trade_agent.agents.intent import IntentParser
+
+    quantity = IntentParser(as_of=AS_OF).parse("美国采购 HS850440 数量最高的10家公司")
+    count = IntentParser(as_of=AS_OF).parse("美国采购 HS850440 交易次数最高的10家公司")
+    latest = IntentParser(as_of=AS_OF).parse("美国采购 HS850440 最近交易日期最高的10家公司")
+
+    assert quantity.constraints.metrics == ["quantity"]
+    assert count.constraints.metrics == ["trade_count"]
+    assert latest.constraints.metrics == ["latest_trade_date"]
+
+
+def test_parser_rejects_conflicting_or_unregistered_explicit_metrics() -> None:
+    from trade_agent.agents.intent import IntentParser, UnresolvedIntentConstraint
+
+    parser = IntentParser(as_of=AS_OF)
+    with pytest.raises(UnresolvedIntentConstraint, match="conflicting metrics"):
+        parser.parse("美国采购 HS850440 金额和数量最高的10家公司")
+    with pytest.raises(UnresolvedIntentConstraint, match="unregistered metric"):
+        parser.parse("美国采购 HS850440 利润率最高的10家公司")
+
+
+def test_explicit_rag_filters_cannot_be_weakened_by_a_structured_provider() -> None:
+    from trade_agent.agents.intent import IntentParser, StructuredIntentRejected
+
+    base = IntentParser(as_of=AS_OF).parse("美国采购 HS850440 金额最高的10家公司")
+    provided = base.model_dump(mode="json")
+    provided["retrieval_filter"]["source_types"] = ["official_website"]
+
+    with pytest.raises(StructuredIntentRejected, match="retrieval filters"):
+        IntentParser(as_of=AS_OF, structured_provider=lambda _: provided).parse(
+            base.question,
+            explicit_filters=RetrievalFilter(source_types=["social"]),
+        )
+
+    broadened = base.model_dump(mode="json")
+    broadened["retrieval_filter"]["country_codes"] = ["DE"]
+    with pytest.raises(StructuredIntentRejected, match="retrieval filters"):
+        IntentParser(as_of=AS_OF, structured_provider=lambda _: broadened).parse(base.question)
