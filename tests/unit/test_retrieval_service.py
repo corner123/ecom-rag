@@ -26,12 +26,12 @@ from trade_agent.retrieval import (
 )
 
 
-def _build(tmp_path: Path, *, attributes=None) -> BuildManifest:
+def _build(tmp_path: Path, *, attributes=None, html=None) -> BuildManifest:
     root = tmp_path / "corpus"
     (root / "manifests").mkdir(parents=True)
     source = root / "site.html"
     source.write_text(
-        "<h1>Example exporter</h1><p>Verified synthetic trade evidence.</p>"
+        html or "<h1>Example exporter</h1><p>Verified synthetic trade evidence.</p>"
         "<h1>Gardening</h1><p>Flowers trees green leaves.</p>"
         "<h1>Astronomy</h1><p>Planets orbit distant stars.</p>",
         encoding="utf-8",
@@ -497,3 +497,53 @@ def test_bundle_rejects_changed_normalized_vectors(tmp_path):
     store.corrupt_vector = True
     with pytest.raises(ValueError, match="dense.*checksum"):
         TradeIndexBundle.load(bundle.descriptor_path, milvus=store, embedding_manager=manager)
+
+
+@pytest.fixture(scope="module")
+def disjoint_recall_build(tmp_path_factory):
+    # 512 lexical matches in 1,025 documents gives positive BM25 IDF. Dense
+    # recall uses 512 different documents, reproducing the 1,024-hit union.
+    html = "".join(f"<h1>Section{index}</h1><p>{'needle' if index < 512 else 'background'}</p>"
+                   for index in range(1025))
+    return _build(tmp_path_factory.mktemp("disjoint-recall"), html=html)
+
+
+@pytest.mark.parametrize("limits, expected", [
+    ({"dense": 512, "bm25": 512}, {"dense": 512, "bm25": 512, "output": 100}),
+    ({}, {"dense": 100, "bm25": 100, "output": 100}),
+    ({"dense": 512, "bm25": 512, "output": 37}, {"dense": 512, "bm25": 512, "output": 37}),
+    ({"dense": 512, "bm25": 512, "output": 512}, {"dense": 512, "bm25": 512, "output": 512}),
+])
+def test_effective_candidate_limits_bound_disjoint_recall_and_trace(disjoint_recall_build, limits, expected):
+    from trade_agent.retrieval import BgeReranker, RerankerContract
+    build = disjoint_recall_build
+    chunks = tuple(snapshot.restore() for snapshot in build.chunks)
+    dense_chunks = [chunk for chunk in chunks if "needle" not in chunk.content][:512]
+    store = FakeStore(build)
+    def dense_search(vector, *, top_k, filter_):
+        return tuple(DenseHit(chunk_id=chunk.metadata.chunk_id, record=chunk,
+            score=float(512 - index), rank=index + 1, build_id=build.build_id,
+            filter_expression="", filter_expression_version="trade-filter-v1")
+            for index, chunk in enumerate(dense_chunks[:top_k]))
+    store.search = dense_search
+    class Scores:
+        def predict(self, pairs, **kwargs):
+            return np.arange(len(pairs), dtype=np.float32)
+    contract = RerankerContract(provider="test", model_name="BAAI/bge-reranker-v2-m3",
+        revision="953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e", max_length=32, library_version="test")
+    profile = load_retrieval_profile().model_copy(update={"candidate_limits": dict(limits)})
+    original = profile.model_dump(mode="python")
+    service = RetrievalService(build=build,
+        bm25=BM25Index.build(chunks, build_id=build.build_id), milvus=store,
+        embedding_manager=FakeEmbeddingManager(), profile=profile,
+        reranker=BgeReranker(model=Scores(), contract=contract))
+    outcome = service.search(QueryIntent(query="needle"), top_k=1)
+    assert len(outcome.dense_hits) == expected["dense"]
+    assert len(outcome.sparse_hits) == expected["bm25"]
+    assert {hit.chunk_id for hit in outcome.dense_hits}.isdisjoint(
+        hit.chunk_id for hit in outcome.sparse_hits)
+    assert len(outcome.fused_hits) == len(outcome.reranked_hits) == expected["output"]
+    assert outcome.hits and not outcome.rerank_degraded
+    assert outcome.profile.candidate_limits == expected
+    assert service.profile.candidate_limits == expected
+    assert profile.model_dump(mode="python") == original

@@ -92,8 +92,9 @@ class RetrievalService:
             raise TypeError("profile must be a RetrievalProfile")
         if type(source_diversity_cap) is not int or source_diversity_cap < 1:
             raise ValueError("source_diversity_cap must be a positive integer")
+        effective_limits = {"dense": 100, "bm25": 100, "output": 100, **profile.candidate_limits}
         for component in ("dense", "bm25", "output"):
-            limit = profile.candidate_limits.get(component, 100)
+            limit = effective_limits[component]
             if not 1 <= limit <= 512:
                 raise ValueError("candidate limits must be from 1 through 512")
         validate_sparse_build(build, bm25)
@@ -106,7 +107,7 @@ class RetrievalService:
         self.build_id = build.build_id
         self._bm25, self._milvus = bm25, milvus
         self._embedding_manager, self._reranker = embedding_manager, reranker
-        self.profile = profile.model_copy(deep=True)
+        self.profile = profile.model_copy(update={"candidate_limits": effective_limits}, deep=True)
         self.source_diversity_cap = source_diversity_cap
         self._planner = RetrievalPlanner()
         self._records = {s.chunk_id: s.restore() for s in build.chunks}
@@ -137,11 +138,11 @@ class RetrievalService:
             def dense_recall():
                 vector = self._embedding_manager.embed_query(query)
                 return tuple(self._milvus.search(vector,
-                    top_k=self.profile.candidate_limits.get("dense", 100), filter_=plan.filter))
+                    top_k=self.profile.candidate_limits["dense"], filter_=plan.filter))
             with ThreadPoolExecutor(max_workers=2, thread_name_prefix="trade-recall") as pool:
                 dense_future = pool.submit(dense_recall)
                 sparse_future = pool.submit(self._bm25.search, query,
-                    top_k=self.profile.candidate_limits.get("bm25", 100), allowed_chunk_ids=allowed)
+                    top_k=self.profile.candidate_limits["bm25"], allowed_chunk_ids=allowed)
                 dense, sparse = dense_future.result(), tuple(sparse_future.result())
             self._validate_hits(dense, allowed, DenseHit)
             self._validate_hits(sparse, allowed, SparseHit)
