@@ -47,6 +47,7 @@ include = ["trade_agent*", "scripts*"]
 
 [tool.setuptools.package-data]
 "trade_agent.index" = ["bge_m3_artifact_manifest.json"]
+"trade_agent.config" = ["schema_registry.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,0 +1,159 @@
+database: foreign_trade_db
+max_result_rows: 50
+
+tables:
+  countries:
+    description: Countries used by company and trade roles.
+    primary_key: [id]
+    unique_keys:
+      - {name: uq_countries_country_code, columns: [country_code]}
+    columns:
+      id: {description: Country identifier, type: bigint unsigned, nullable: false, default: null}
+      country_code: {description: ISO two-letter country code, type: char(2), nullable: false, default: null}
+      country_name: {description: Country name, type: varchar(100), nullable: false, default: null}
+      region: {description: Geographic region, type: varchar(64), nullable: false, default: null}
+      created_at: {description: Creation timestamp, type: datetime, nullable: false, default: current_timestamp}
+  companies:
+    description: Trading companies; address is sensitive.
+    primary_key: [id]
+    unique_keys:
+      - {name: uq_companies_registration_id, columns: [registration_id]}
+    columns:
+      id: {description: Company identifier, type: bigint unsigned, nullable: false, default: null}
+      company_name: {description: Registered company name, type: varchar(255), nullable: false, default: null}
+      normalized_name: {description: Normalized company name, type: varchar(255), nullable: false, default: null}
+      country_id: {description: Company home country key, type: bigint unsigned, nullable: false, default: null}
+      company_type: {description: Company trade role, type: varchar(64), nullable: false, default: null}
+      website: {description: Company website, type: varchar(255), nullable: false, default: null}
+      website_domain: {description: Company website domain, type: varchar(255), nullable: false, default: null}
+      registration_id: {description: Registration identifier, type: varchar(100), nullable: false, default: null}
+      address: {description: Company street address, type: varchar(500), nullable: false, default: null}
+      industry: {description: Company industry, type: varchar(128), nullable: false, default: null}
+      is_synthetic: {description: Synthetic fixture marker, type: tinyint(1), nullable: false, default: null}
+      created_at: {description: Creation timestamp, type: datetime, nullable: false, default: current_timestamp}
+  hs_codes:
+    description: Harmonized System commodity classifications.
+    primary_key: [id]
+    unique_keys:
+      - {name: uq_hs_codes_hs_code, columns: [hs_code]}
+    columns:
+      id: {description: HS identifier, type: bigint unsigned, nullable: false, default: null}
+      hs_code: {description: HS commodity code, type: varchar(12), nullable: false, default: null}
+      description: {description: HS commodity description, type: varchar(500), nullable: false, default: null}
+      category: {description: HS category, type: varchar(128), nullable: false, default: null}
+      parent_code: {description: Parent HS code, type: varchar(12), nullable: true, default: null}
+      created_at: {description: Creation timestamp, type: datetime, nullable: false, default: current_timestamp}
+  products:
+    description: Products connected to HS classifications.
+    primary_key: [id]
+    unique_keys:
+      - {name: uq_products_sku, columns: [sku]}
+    columns:
+      id: {description: Product identifier, type: bigint unsigned, nullable: false, default: null}
+      product_name: {description: Product name, type: varchar(255), nullable: false, default: null}
+      sku: {description: Product SKU, type: varchar(100), nullable: false, default: null}
+      hs_code_id: {description: HS classification key, type: bigint unsigned, nullable: false, default: null}
+      category: {description: Product category, type: varchar(128), nullable: false, default: null}
+      description: {description: Product description, type: varchar(500), nullable: false, default: null}
+      created_at: {description: Creation timestamp, type: datetime, nullable: false, default: current_timestamp}
+  data_sources:
+    description: Provenance for imported trade records.
+    primary_key: [id]
+    unique_keys:
+      - {name: uq_data_sources_source_url, columns: [source_url]}
+    columns:
+      id: {description: Data source identifier, type: bigint unsigned, nullable: false, default: null}
+      source_name: {description: Source name, type: varchar(255), nullable: false, default: null}
+      source_type: {description: Source type, type: varchar(64), nullable: false, default: null}
+      source_url: {description: Source URL, type: varchar(255), nullable: false, default: null}
+      update_frequency: {description: Update frequency, type: varchar(64), nullable: false, default: null}
+      last_updated_at: {description: Source update timestamp, type: datetime, nullable: false, default: null}
+      is_synthetic: {description: Synthetic fixture marker, type: tinyint(1), nullable: false, default: null}
+      created_at: {description: Creation timestamp, type: datetime, nullable: false, default: current_timestamp}
+  company_products:
+    description: Reviewed company-to-product relationship.
+    primary_key: [id]
+    unique_keys:
+      - {name: uq_company_products_company_product, columns: [company_id, product_id]}
+    columns:
+      id: {description: Relationship identifier, type: bigint unsigned, nullable: false, default: null}
+      company_id: {description: Company key, type: bigint unsigned, nullable: false, default: null}
+      product_id: {description: Product key, type: bigint unsigned, nullable: false, default: null}
+      relation_type: {description: Relationship type, type: varchar(64), nullable: false, default: null}
+      created_at: {description: Creation timestamp, type: datetime, nullable: false, default: current_timestamp}
+  trade_records:
+    description: Import and export trade transactions.
+    primary_key: [id]
+    unique_keys:
+      - {name: uq_trade_records_source_raw_record, columns: [source_id, raw_record_id]}
+    columns:
+      id: {description: Trade record identifier, type: bigint unsigned, nullable: false, default: null}
+      raw_record_id: {description: Source record identifier, type: varchar(100), nullable: false, default: null}
+      source_id: {description: Data source key, type: bigint unsigned, nullable: false, default: null}
+      importer_id: {description: Importer company key, type: bigint unsigned, nullable: false, default: null}
+      exporter_id: {description: Exporter company key, type: bigint unsigned, nullable: false, default: null}
+      product_id: {description: Product key, type: bigint unsigned, nullable: false, default: null}
+      hs_code_id: {description: HS code key, type: bigint unsigned, nullable: false, default: null}
+      import_country_id: {description: Import country key, type: bigint unsigned, nullable: false, default: null}
+      export_country_id: {description: Export country key, type: bigint unsigned, nullable: false, default: null}
+      trade_date: {description: Trade date, type: date, nullable: false, default: null}
+      quantity: {description: Trade quantity, type: "decimal(18,3)", nullable: false, default: null}
+      unit: {description: Quantity unit, type: varchar(32), nullable: false, default: null}
+      trade_amount: {description: Trade amount, type: "decimal(18,2)", nullable: false, default: null}
+      currency: {description: Trade amount currency, type: char(3), nullable: false, default: null}
+      created_at: {description: Creation timestamp, type: datetime, nullable: false, default: current_timestamp}
+
+joins:
+  - {name: fk_companies_country, left: companies.country_id, right: countries.id}
+  - {name: fk_company_products_company, left: company_products.company_id, right: companies.id}
+  - {name: fk_company_products_product, left: company_products.product_id, right: products.id}
+  - {name: fk_products_hs_code, left: products.hs_code_id, right: hs_codes.id}
+  - {name: fk_trade_records_export_country, left: trade_records.export_country_id, right: countries.id}
+  - {name: fk_trade_records_exporter, left: trade_records.exporter_id, right: companies.id}
+  - {name: fk_trade_records_hs_code, left: trade_records.hs_code_id, right: hs_codes.id}
+  - {name: fk_trade_records_import_country, left: trade_records.import_country_id, right: countries.id}
+  - {name: fk_trade_records_importer, left: trade_records.importer_id, right: companies.id}
+  - {name: fk_trade_records_product, left: trade_records.product_id, right: products.id}
+  - {name: fk_trade_records_source, left: trade_records.source_id, right: data_sources.id}
+
+aliases:
+  company: companies.company_name
+  product: products.product_name
+  hs_code: hs_codes.hs_code
+  importer_company: companies.company_name
+  exporter_company: companies.company_name
+  import_country: countries.country_name
+  export_country: countries.country_name
+  region: countries.region
+  time: trade_records.trade_date
+
+dimensions:
+  company: companies.company_name
+  product: products.product_name
+  hs_code: hs_codes.hs_code
+  importer_company: companies.company_name
+  exporter_company: companies.company_name
+  import_country: countries.country_name
+  export_country: countries.country_name
+  region: countries.region
+  time: trade_records.trade_date
+
+filters:
+  company: companies.company_name
+  product: products.product_name
+  hs_code: hs_codes.hs_code
+  importer_company: companies.company_name
+  exporter_company: companies.company_name
+  import_country: countries.country_name
+  export_country: countries.country_name
+  region: countries.region
+  time: trade_records.trade_date
+
+aggregations:
+  trade_amount: {column: trade_records.trade_amount, operations: [sum], currency_column: trade_records.currency}
+  quantity: {column: trade_records.quantity, operations: [sum], unit_column: trade_records.unit}
+  trade_count: {column: trade_records.id, operations: [count]}
+  latest_trade_date: {column: trade_records.trade_date, operations: [max]}
+
+sensitive_fields:
+  - companies.address
