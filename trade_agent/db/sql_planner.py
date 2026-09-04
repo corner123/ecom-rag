@@ -134,8 +134,9 @@ def _require_supported_shape(intent: QueryIntent) -> None:
         raise UnsupportedQueryShape("multiple metrics cannot be planned without changing aggregate grain")
     expected = {
         "top_importers": {intent.filters.company_role},
+        "top_exporters": {intent.filters.company_role},
         "company_trend": {intent.filters.company_role, "time"},
-        "country_hs_activity": {intent.filters.company_role} | ({"time"} if intent.time_range.grain == "month" else set()),
+        "country_hs_activity": {"time"} if intent.time_range.grain == "month" else set(),
         "lead_assessment": {intent.filters.company_role},
     }.get(intent.kind, set())
     if set(intent.constraints.dimensions) != expected:
@@ -147,16 +148,23 @@ def _compile(intent: QueryIntent, registry: RegistrySnapshot, entity_bindings: M
     role = intent.filters.company_role
     company_alias = "importer" if role == "importer_company" else "exporter"
     country_role = "import_country" if role == "importer_company" else "export_country"
-    company = _semantic_column(registry.dimensions, role, registry)
-    country_code = _physical_column(_identifier(registry, country_role), registry)
+    include_company = role in intent.constraints.dimensions
+    requires_company = include_company or bool(intent.filters.company_names) or bool(intent.filters.entity_ids)
+    company = _semantic_column(registry.dimensions, role, registry) if requires_company else None
+    country_code = _physical_column(_identifier(registry, country_role), registry) if intent.filters.country_codes else None
     country_region = _semantic_column(registry.filters, "region", registry) if intent.retrieval_filter.region is not None else None
-    hs_code = _physical_column(_identifier(registry, "hs_code"), registry)
+    hs_code = _physical_column(_identifier(registry, "hs_code"), registry) if intent.filters.hs_codes else None
     trade_date = _semantic_column(registry.dimensions, "time", registry)
-    role_join, country_join, hs_join = (_validated_join(registry, item) for item in (role, country_role, "hs_code"))
+    role_join = _validated_join(registry, role) if requires_company else None
+    country_join = _validated_join(registry, country_role) if intent.filters.country_codes or intent.retrieval_filter.region is not None else None
+    hs_join = _validated_join(registry, "hs_code") if intent.filters.hs_codes else None
     _require_table(registry, "trade_records")
-    _require_table(registry, "companies")
-    tables = [TableRef(table="trade_records", alias="tr"), TableRef(table="companies", alias=company_alias)]
-    joins = [_aliased_join(role_join, company_alias)]
+    tables = [TableRef(table="trade_records", alias="tr")]
+    joins: list[PlannedJoin] = []
+    if requires_company:
+        _require_table(registry, "companies")
+        tables.append(TableRef(table="companies", alias=company_alias))
+        joins.append(_aliased_join(role_join, company_alias))
     if intent.filters.country_codes or intent.retrieval_filter.region is not None:
         _require_table(registry, "countries")
         tables.append(TableRef(table="countries", alias=country_role))
@@ -168,7 +176,7 @@ def _compile(intent: QueryIntent, registry: RegistrySnapshot, entity_bindings: M
 
     group_by: list[str] = []
     columns: list[SelectColumn] = []
-    if intent.kind in {"top_importers", "company_trend", "lead_assessment"}:
+    if include_company:
         field = _alias(company, company_alias)
         group_by.append(field)
         columns.append(SelectColumn(expression=field, alias=role))

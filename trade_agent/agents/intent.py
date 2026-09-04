@@ -21,6 +21,7 @@ from trade_agent.retrieval.planner import QueryIntent as RetrievalQueryIntent
 
 IntentKind = Literal[
     "top_importers",
+    "top_exporters",
     "company_trend",
     "country_hs_activity",
     "lead_assessment",
@@ -100,7 +101,7 @@ class QueryIntent(BaseModel):
                 raise ValueError("out-of-scope intent must have only an explicit refusal reason")
         elif self.out_of_scope_reason is not None:
             raise ValueError("supported intents cannot carry an out-of-scope reason")
-        if self.kind in {"top_importers", "company_trend", "country_hs_activity", "lead_assessment"} and not self.need_trade_data:
+        if self.kind in {"top_importers", "top_exporters", "company_trend", "country_hs_activity", "lead_assessment"} and not self.need_trade_data:
             raise ValueError("trade intent kinds require the trade-data route")
         if self.kind == "lead_assessment" and not self.need_external_intel:
             raise ValueError("lead assessment requires the external-intelligence route")
@@ -122,6 +123,9 @@ _COUNTRY_NAMES = {
 }
 _HS = re.compile(r"(?i)(?:\bhs\s*)?(\d{4,10})\b")
 _ISO_RANGE = re.compile(r"\b(20\d{2}-\d{2}-\d{2})\s*(?:到|至|to|through|-)\s*(20\d{2}-\d{2}-\d{2})\b", re.IGNORECASE)
+_ISO_DATE = re.compile(r"\b20\d{2}-\d{2}-\d{2}\b")
+_ISO_FROM = re.compile(r"(?:自|from)\s*(20\d{2}-\d{2}-\d{2})\b", re.IGNORECASE)
+_ISO_ON = re.compile(r"\bon\s+(20\d{2}-\d{2}-\d{2})\b", re.IGNORECASE)
 _MONTHS = re.compile(r"(?:最近|近|过去|past|last)\s*(\d+|半)\s*(?:个)?(?:月|months?)", re.IGNORECASE)
 _LIMIT = re.compile(r"(?:top\s*|前\s*|最高的?\s*)(\d+)\s*(?:家|个|companies?)?", re.IGNORECASE)
 _COMPANY_BEFORE_RANGE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9 .&'_-]{1,127}?)\s*(?:最近|近|过去|past|last)", re.IGNORECASE)
@@ -178,7 +182,7 @@ class IntentParser:
 
         role: CompanyRole = "exporter_company" if any(token in lowered for token in ("出口", "export")) else "importer_company"
         time_range = _time_range(normalized, self.as_of)
-        question_without_dates = _ISO_RANGE.sub("", normalized)
+        question_without_dates = _ISO_DATE.sub("", normalized)
         countries = _country_codes(question_without_dates)
         _reject_unresolved_country_scope(question_without_dates, countries)
         hs_codes = tuple(sorted(set(_HS.findall(question_without_dates))))
@@ -207,7 +211,7 @@ class IntentParser:
             return QueryIntent(
                 question=question,
                 kind="lead_assessment",
-                constraints=_constraints(metric, role, countries, hs_codes, time_range),
+                constraints=_constraints(metric, role, countries, hs_codes, time_range, include_company=True),
                 filters=filters,
                 time_range=time_range,
                 need_trade_data=True,
@@ -217,8 +221,8 @@ class IntentParser:
         if top:
             return QueryIntent(
                 question=question,
-                kind="top_importers" if role == "importer_company" else "country_hs_activity",
-                constraints=_constraints(metric, role, countries, hs_codes, time_range),
+                kind="top_importers" if role == "importer_company" else "top_exporters",
+                constraints=_constraints(metric, role, countries, hs_codes, time_range, include_company=True),
                 filters=filters,
                 time_range=time_range,
                 need_trade_data=True,
@@ -229,7 +233,7 @@ class IntentParser:
             return QueryIntent(
                 question=question,
                 kind="company_trend",
-                constraints=_constraints(metric, role, countries, hs_codes, time_range),
+                constraints=_constraints(metric, role, countries, hs_codes, time_range, include_company=True),
                 filters=filters,
                 time_range=time_range,
                 need_trade_data=True,
@@ -239,7 +243,7 @@ class IntentParser:
             return QueryIntent(
                 question=question,
                 kind="country_hs_activity",
-                constraints=_constraints(metric, role, countries, hs_codes, time_range),
+                constraints=_constraints(metric, role, countries, hs_codes, time_range, include_company=False),
                 filters=filters,
                 time_range=time_range,
                 need_trade_data=True,
@@ -308,14 +312,22 @@ def _apply_explicit_filters(intent: QueryIntent, explicit: RetrievalFilter | Non
     return intent.model_copy(update={"filters": filters, "retrieval_filter": retrieval})
 
 
-def _constraints(metric: str, role: CompanyRole, countries: tuple[str, ...], hs_codes: tuple[str, ...], time_range: TimeRange) -> QueryConstraints:
+def _constraints(
+    metric: str,
+    role: CompanyRole,
+    countries: tuple[str, ...],
+    hs_codes: tuple[str, ...],
+    time_range: TimeRange,
+    *,
+    include_company: bool,
+) -> QueryConstraints:
     country_field = "import_country" if role == "importer_company" else "export_country"
     fields = [country_field] if countries else []
     if hs_codes:
         fields.append("hs_code")
     if time_range.start is not None:
         fields.append("time")
-    dimensions = [role]
+    dimensions = [role] if include_company else []
     if time_range.grain == "month":
         dimensions.append("time")
     return QueryConstraints(metrics=[metric], dimensions=dimensions, filters=fields)
@@ -351,6 +363,19 @@ def _time_range(question: str, as_of: date) -> TimeRange:
             return TimeRange(start=date.fromisoformat(explicit.group(1)), end=date.fromisoformat(explicit.group(2)))
         except ValueError as error:
             raise UnresolvedIntentConstraint("date range is not valid") from error
+    single_dates = _ISO_DATE.findall(question)
+    if single_dates:
+        if len(single_dates) != 1:
+            raise UnresolvedIntentConstraint("date syntax is not supported")
+        try:
+            bound = date.fromisoformat(single_dates[0])
+        except ValueError as error:
+            raise UnresolvedIntentConstraint("date range is not valid") from error
+        if _ISO_FROM.search(question):
+            return TimeRange(start=bound, end=as_of)
+        if _ISO_ON.search(question):
+            return TimeRange(start=bound, end=bound)
+        raise UnresolvedIntentConstraint("date syntax is not supported")
     if "半年" in question or "half year" in question.casefold():
         return TimeRange(start=_subtract_months(as_of, 6), end=as_of, months=6)
     match = _MONTHS.search(question)
@@ -407,17 +432,5 @@ def _require_compatible(field: str, current: tuple[object, ...], explicit: tuple
 
 
 def _require_provider_preserves_deterministic_scope(candidate: QueryIntent, deterministic: QueryIntent) -> None:
-    if candidate.kind != deterministic.kind:
-        raise StructuredIntentRejected("structured intent conflicts with deterministic kind")
-    for field in ("country_codes", "hs_codes", "entity_ids", "company_names"):
-        expected = getattr(deterministic.filters, field)
-        if expected and getattr(candidate.filters, field) != expected:
-            raise StructuredIntentRejected(f"structured intent conflicts with deterministic {field}")
-    if deterministic.time_range.start is not None and candidate.time_range != deterministic.time_range:
-        raise StructuredIntentRejected("structured intent conflicts with deterministic time range")
-    if deterministic.need_trade_data and not candidate.need_trade_data:
-        raise StructuredIntentRejected("structured intent conflicts with deterministic trade route")
-    if deterministic.need_external_intel and not candidate.need_external_intel:
-        raise StructuredIntentRejected("structured intent conflicts with deterministic external route")
-    if candidate.retrieval_filter != deterministic.retrieval_filter:
-        raise StructuredIntentRejected("structured intent conflicts with deterministic retrieval filters")
+    if candidate != deterministic:
+        raise StructuredIntentRejected("structured intent diverges from deterministic executable semantics")

@@ -134,15 +134,13 @@ def test_monthly_export_quantity_plan_keeps_export_country_alias_unit_and_time_g
 
     plan = SqlPlanner().plan(IntentParser(as_of=AS_OF).parse("中国出口 HS850440 的月度数量"), registry)
 
+    assert plan.columns[0].expression == "tr.trade_date"
+    assert all(column.alias != "exporter_company" for column in plan.columns)
     assert [(table.table, table.alias) for table in plan.tables] == [
         ("trade_records", "tr"),
-        ("companies", "exporter"),
         ("countries", "export_country"),
         ("hs_codes", "hs"),
     ]
-    assert ("fk_trade_records_exporter", "tr.exporter_id", "exporter.id") in {
-        (join.name, join.left, join.right) for join in plan.joins
-    }
     assert ("fk_trade_records_export_country", "tr.export_country_id", "export_country.id") in {
         (join.name, join.left, join.right) for join in plan.joins
     }
@@ -153,6 +151,22 @@ def test_monthly_export_quantity_plan_keeps_export_country_alias_unit_and_time_g
     assert plan.aggregations[0].metric == "quantity"
     assert plan.aggregations[0].unit_column == "tr.unit"
     assert plan.aggregations[0].grain == ("tr.trade_date", "tr.unit")
+
+
+def test_top_exporters_groups_by_the_exporter_company_dimension(registry: RegistrySnapshot) -> None:
+    from trade_agent.agents.intent import IntentParser
+    from trade_agent.db.sql_planner import SqlPlanner
+
+    intent = IntentParser(as_of=AS_OF).parse("中国出口金额最高的10家公司")
+    plan = SqlPlanner().plan(intent, registry)
+
+    assert intent.kind == "top_exporters"
+    assert intent.constraints.dimensions == ["exporter_company"]
+    assert ("companies", "exporter") in {(table.table, table.alias) for table in plan.tables}
+    assert ("fk_trade_records_exporter", "tr.exporter_id", "exporter.id") in {
+        (join.name, join.left, join.right) for join in plan.joins
+    }
+    assert "exporter.company_name" in plan.group_by
 
 
 def test_planner_rejects_out_of_scope_and_unregistered_business_fields(registry: RegistrySnapshot) -> None:

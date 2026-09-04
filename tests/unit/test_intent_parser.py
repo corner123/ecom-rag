@@ -143,7 +143,7 @@ def test_structured_provider_cannot_remove_extracted_scope_or_convert_a_refusal(
     removed_scope["time_range"] = {"grain": "total"}
     parser = IntentParser(as_of=AS_OF, structured_provider=lambda _: removed_scope)
 
-    with pytest.raises(StructuredIntentRejected, match="conflicts with deterministic"):
+    with pytest.raises(StructuredIntentRejected, match="diverges"):
         parser.parse(base.question)
 
     refusal_bypass = base.model_dump(mode="json")
@@ -161,6 +161,23 @@ def test_parser_handles_iso_date_ranges_before_hs_identifiers() -> None:
     assert intent.filters.hs_codes == ()
     assert intent.time_range.start == date(2025, 1, 1)
     assert intent.time_range.end == date(2025, 12, 31)
+
+
+def test_parser_preserves_single_iso_date_scope_or_refuses_an_open_ended_date() -> None:
+    from trade_agent.agents.intent import IntentParser, UnresolvedIntentConstraint
+
+    parser = IntentParser(as_of=AS_OF)
+    from_date = parser.parse("美国采购 自 2025-01-01 金额最高的10家公司")
+    on_date = parser.parse("美国采购 on 2025-01-01 金额最高的10家公司")
+
+    assert from_date.filters.hs_codes == ()
+    assert from_date.time_range.start == date(2025, 1, 1)
+    assert from_date.time_range.end == AS_OF
+    assert on_date.filters.hs_codes == ()
+    assert on_date.time_range.start == on_date.time_range.end == date(2025, 1, 1)
+
+    with pytest.raises(UnresolvedIntentConstraint, match="date"):
+        parser.parse("美国采购 截至 2025-01-01 金额最高的10家公司")
 
 
 def test_parser_keeps_external_intelligence_route_when_trade_context_is_present() -> None:
@@ -211,7 +228,7 @@ def test_explicit_rag_filters_cannot_be_weakened_by_a_structured_provider() -> N
     provided = base.model_dump(mode="json")
     provided["retrieval_filter"]["source_types"] = ["official_website"]
 
-    with pytest.raises(StructuredIntentRejected, match="retrieval filters"):
+    with pytest.raises(StructuredIntentRejected, match="diverges"):
         IntentParser(as_of=AS_OF, structured_provider=lambda _: provided).parse(
             base.question,
             explicit_filters=RetrievalFilter(source_types=["social"]),
@@ -219,5 +236,32 @@ def test_explicit_rag_filters_cannot_be_weakened_by_a_structured_provider() -> N
 
     broadened = base.model_dump(mode="json")
     broadened["retrieval_filter"]["country_codes"] = ["DE"]
-    with pytest.raises(StructuredIntentRejected, match="retrieval filters"):
+    with pytest.raises(StructuredIntentRejected, match="diverges"):
         IntentParser(as_of=AS_OF, structured_provider=lambda _: broadened).parse(base.question)
+
+
+def test_structured_provider_cannot_change_any_executable_intent_semantics() -> None:
+    from trade_agent.agents.intent import IntentParser, StructuredIntentRejected
+
+    base = IntentParser(as_of=AS_OF).parse("最近半年美国采购 HS850440 金额最高的10家公司")
+    changes = (
+        lambda payload: payload["filters"].update(company_role="exporter_company"),
+        lambda payload: payload["filters"].update(entity_ids=["company:injected"]),
+        lambda payload: payload["retrieval_filter"].update(entity_ids=["company:injected"]),
+        lambda payload: payload["constraints"].update(metrics=["quantity"]),
+        lambda payload: payload["constraints"].update(dimensions=["hs_code"]),
+        lambda payload: payload.update(limit=1),
+        lambda payload: payload.update(need_external_intel=True),
+        lambda payload: payload.update(time_range={"start": "2025-01-01", "end": "2025-12-31"}),
+    )
+    for change in changes:
+        provided = base.model_dump(mode="json")
+        change(provided)
+        with pytest.raises(StructuredIntentRejected, match="diverges"):
+            IntentParser(as_of=AS_OF, structured_provider=lambda _: provided).parse(base.question)
+
+    external = IntentParser(as_of=AS_OF).parse("美国采购 HS850440 最新法规")
+    removed_route = external.model_dump(mode="json")
+    removed_route["need_external_intel"] = False
+    with pytest.raises(StructuredIntentRejected, match="diverges"):
+        IntentParser(as_of=AS_OF, structured_provider=lambda _: removed_route).parse(external.question)
