@@ -104,17 +104,17 @@ tables:
       created_at: {description: Creation timestamp, type: datetime, nullable: false, default: current_timestamp}
 
 joins:
-  - {name: fk_companies_country, left: companies.country_id, right: countries.id}
-  - {name: fk_company_products_company, left: company_products.company_id, right: companies.id}
-  - {name: fk_company_products_product, left: company_products.product_id, right: products.id}
-  - {name: fk_products_hs_code, left: products.hs_code_id, right: hs_codes.id}
-  - {name: fk_trade_records_export_country, left: trade_records.export_country_id, right: countries.id}
-  - {name: fk_trade_records_exporter, left: trade_records.exporter_id, right: companies.id}
-  - {name: fk_trade_records_hs_code, left: trade_records.hs_code_id, right: hs_codes.id}
-  - {name: fk_trade_records_import_country, left: trade_records.import_country_id, right: countries.id}
-  - {name: fk_trade_records_importer, left: trade_records.importer_id, right: companies.id}
-  - {name: fk_trade_records_product, left: trade_records.product_id, right: products.id}
-  - {name: fk_trade_records_source, left: trade_records.source_id, right: data_sources.id}
+  - {name: fk_companies_country, left: companies.country_id, right: countries.id, roles: [company_home_country]}
+  - {name: fk_company_products_company, left: company_products.company_id, right: companies.id, roles: []}
+  - {name: fk_company_products_product, left: company_products.product_id, right: products.id, roles: []}
+  - {name: fk_products_hs_code, left: products.hs_code_id, right: hs_codes.id, roles: [product_hs_code]}
+  - {name: fk_trade_records_export_country, left: trade_records.export_country_id, right: countries.id, roles: [export_country]}
+  - {name: fk_trade_records_exporter, left: trade_records.exporter_id, right: companies.id, roles: [exporter_company]}
+  - {name: fk_trade_records_hs_code, left: trade_records.hs_code_id, right: hs_codes.id, roles: [hs_code]}
+  - {name: fk_trade_records_import_country, left: trade_records.import_country_id, right: countries.id, roles: [import_country]}
+  - {name: fk_trade_records_importer, left: trade_records.importer_id, right: companies.id, roles: [importer_company]}
+  - {name: fk_trade_records_product, left: trade_records.product_id, right: products.id, roles: [product]}
+  - {name: fk_trade_records_source, left: trade_records.source_id, right: data_sources.id, roles: []}
 
 aliases:
   company: companies.company_name

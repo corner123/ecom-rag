@@ -15,8 +15,16 @@ from sqlalchemy import Connection, text
 from trade_agent.db.contracts import QueryConstraints
 
 
+def _freeze_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze_value(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return tuple(_freeze_value(item) for item in value)
+    return value
+
+
 def _freeze_mapping(value: Mapping[str, Any]) -> Mapping[str, Any]:
-    return MappingProxyType(dict(value))
+    return _freeze_value(value)
 
 
 def _canonical_default(value: object) -> str | None:
@@ -61,6 +69,16 @@ class _PhysicalJoin:
 
 
 @dataclass(frozen=True)
+class RegistryJoin:
+    """A reviewed foreign-key route, including its business-role traversal."""
+
+    name: str
+    left: str
+    right: str
+    roles: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class _PhysicalKey:
     table: str
     name: str
@@ -96,7 +114,7 @@ class RegistrySnapshot:
     fingerprint: str
     tables: tuple[str, ...]
     columns: tuple[str, ...]
-    joins: tuple[str, ...]
+    joins: tuple[RegistryJoin, ...]
     aliases: Mapping[str, str]
     aggregations: Mapping[str, Mapping[str, Any]]
     dimensions: Mapping[str, str]
@@ -138,7 +156,15 @@ class SchemaRegistry:
             fingerprint=physical.fingerprint,
             tables=physical.tables,
             columns=tuple(f"{column.table}.{column.name}" for column in physical.columns),
-            joins=tuple(join.name for join in physical.joins),
+            joins=tuple(
+                RegistryJoin(
+                    name=str(join["name"]),
+                    left=str(join["left"]),
+                    right=str(join["right"]),
+                    roles=tuple(str(role) for role in join.get("roles", [])),
+                )
+                for join in semantics["joins"]
+            ),
             aliases=_freeze_mapping(semantics["aliases"]),
             aggregations=MappingProxyType(
                 {name: _freeze_mapping(definition) for name, definition in semantics["aggregations"].items()}
@@ -152,12 +178,22 @@ class SchemaRegistry:
         return snapshot
 
     def link(self, constraints: QueryConstraints) -> SchemaLinkResult:
-        semantics = self._load_semantics()
-        allowed = {
-            "metrics": set(semantics["aggregations"]),
-            "dimensions": set(semantics["dimensions"]) | set(semantics["aliases"]),
-            "filters": set(semantics["filters"]) | set(semantics["aliases"]),
-        }
+        snapshot = self._snapshot
+        if snapshot is None:
+            semantics = self._load_semantics()
+            allowed = self._allowed_fields(
+                aggregations=semantics["aggregations"],
+                dimensions=semantics["dimensions"],
+                filters=semantics["filters"],
+                aliases=semantics["aliases"],
+            )
+        else:
+            allowed = self._allowed_fields(
+                aggregations=snapshot.aggregations,
+                dimensions=snapshot.dimensions,
+                filters=snapshot.filters,
+                aliases=snapshot.aliases,
+            )
         missing = tuple(
             field
             for category, fields in (
@@ -170,9 +206,23 @@ class SchemaRegistry:
         )
         if missing:
             return SchemaLinkResult(ok=False, error_code="schema_not_registered", missing=missing)
-        if self._snapshot is None:
+        if snapshot is None:
             return SchemaLinkResult(ok=False, error_code="registry_not_refreshed")
-        return SchemaLinkResult(ok=True, snapshot=self._snapshot)
+        return SchemaLinkResult(ok=True, snapshot=snapshot)
+
+    @staticmethod
+    def _allowed_fields(
+        *,
+        aggregations: Mapping[str, Any],
+        dimensions: Mapping[str, Any],
+        filters: Mapping[str, Any],
+        aliases: Mapping[str, Any],
+    ) -> dict[str, set[str]]:
+        return {
+            "metrics": set(aggregations),
+            "dimensions": set(dimensions) | set(aliases),
+            "filters": set(filters) | set(aliases),
+        }
 
     def _load_semantics(self) -> Mapping[str, Any]:
         path = self.semantic_path

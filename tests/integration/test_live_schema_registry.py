@@ -29,7 +29,17 @@ def test_live_query_role_refreshes_the_reviewed_seven_table_schema() -> None:
             "products",
             "trade_records",
         )
-        assert len(snapshot.joins) == 11
+        joins = {join.name: join for join in snapshot.joins}
+        assert joins["fk_trade_records_importer"].left == "trade_records.importer_id"
+        assert joins["fk_trade_records_importer"].right == "companies.id"
+        assert joins["fk_trade_records_importer"].roles == ("importer_company",)
+        assert joins["fk_trade_records_exporter"].left == "trade_records.exporter_id"
+        assert joins["fk_trade_records_exporter"].right == "companies.id"
+        assert joins["fk_trade_records_exporter"].roles == ("exporter_company",)
+        assert joins["fk_trade_records_import_country"].left == "trade_records.import_country_id"
+        assert joins["fk_trade_records_import_country"].right == "countries.id"
+        assert joins["fk_trade_records_export_country"].left == "trade_records.export_country_id"
+        assert joins["fk_trade_records_export_country"].right == "countries.id"
         assert snapshot.aggregations["trade_amount"]["currency_column"] == "trade_records.currency"
         assert snapshot.aggregations["quantity"]["unit_column"] == "trade_records.unit"
         assert registry.link(QueryConstraints(metrics=["trade_amount"], dimensions=["importer_company"], filters=["import_country"])).ok
