@@ -1,6 +1,7 @@
 """Budgeted execution of validated SQL on an explicitly read-only MySQL session."""
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import date, datetime
 from decimal import Decimal
 from hashlib import sha256
@@ -15,6 +16,7 @@ import sqlglot
 from sqlglot import exp
 
 from trade_agent.db.sql_validator import ValidatedSql
+from trade_agent.evidence.models import RawRecordLocator
 
 
 class SqlExecutionError(RuntimeError):
@@ -66,8 +68,9 @@ class SqlExecutionResult(BaseModel):
     rows: tuple[dict[str, Any], ...]
     row_count: int = Field(ge=0)
     result_hash: str
-    raw_record_ids: tuple[str, ...]
-    raw_record_ids_truncated: bool
+    parameter_digest: str
+    raw_record_locators: tuple[RawRecordLocator, ...]
+    raw_record_locators_truncated: bool
     estimated_scan_rows: int = Field(ge=0)
     execution_ms: float = Field(ge=0)
     max_execution_time_ms: int = Field(gt=0)
@@ -111,6 +114,16 @@ class ReadOnlySqlExecutor:
         connection = self.connection
         if connection.in_transaction():
             connection.rollback()
+        try:
+            previous_max_execution_time = int(
+                connection.scalar(text("SELECT @@SESSION.max_execution_time"))
+            )
+            previous_transaction_read_only = bool(
+                connection.scalar(text("SELECT @@SESSION.transaction_read_only"))
+            )
+            connection.rollback()
+        except SQLAlchemyError as error:
+            raise SqlExecutionError("could not read SQL session safety settings") from error
         estimated_scan_rows = 0
         driver = connection.connection.driver_connection
         if not hasattr(driver, "_read_timeout"):
@@ -138,17 +151,26 @@ class ReadOnlySqlExecutor:
             rows = tuple(dict(row) for row in result.fetchmany(validated.limit + 1))
             if len(rows) > validated.limit:
                 raise SqlResultLimitExceeded("database returned more rows than the validated limit")
+            if any(tuple(row) != validated.projection_aliases for row in rows):
+                raise SqlExecutionError("database result projection diverged from validated SQL")
             locator_sql = self._locator_sql(validated.sql, self.max_locator_rows + 1)
-            locator_result = connection.execute(text(locator_sql), dict(validated.params)).scalars()
-            locator_values = tuple(str(value) for value in locator_result.fetchmany(self.max_locator_rows + 1))
+            locator_rows = connection.execute(
+                text(locator_sql), dict(validated.params)
+            ).mappings().fetchmany(self.max_locator_rows + 1)
+            locator_values = tuple(
+                RawRecordLocator(source_id=int(row["source_id"]), raw_record_id=str(row["raw_record_id"]))
+                for row in locator_rows
+            )
             truncated = len(locator_values) > self.max_locator_rows
-            raw_record_ids = locator_values[: self.max_locator_rows]
+            raw_record_locators = locator_values[: self.max_locator_rows]
             result_hash = self._hash_rows(rows)
+            parameter_digest = self._parameter_digest(validated.params)
             query_id = sha256(
                 json.dumps(
                     {
                         "sql": validated.sql,
                         "filters": validated.bound_filter_names,
+                        "parameter_digest": parameter_digest,
                         "schema": validated.schema_fingerprint,
                         "dataset": validated.dataset_id,
                     },
@@ -171,8 +193,9 @@ class ReadOnlySqlExecutor:
                 rows=rows,
                 row_count=len(rows),
                 result_hash=result_hash,
-                raw_record_ids=raw_record_ids,
-                raw_record_ids_truncated=truncated,
+                parameter_digest=parameter_digest,
+                raw_record_locators=raw_record_locators,
+                raw_record_locators_truncated=truncated,
                 estimated_scan_rows=estimated_scan_rows,
                 execution_ms=(monotonic() - started) * 1000,
                 max_execution_time_ms=self.max_execution_time_ms,
@@ -193,13 +216,22 @@ class ReadOnlySqlExecutor:
         finally:
             try:
                 connection.exec_driver_sql("ROLLBACK")
-                connection.exec_driver_sql("SET SESSION max_execution_time = 0")
+                connection.execute(
+                    text("SET SESSION max_execution_time = :previous_timeout_ms"),
+                    {"previous_timeout_ms": previous_max_execution_time},
+                )
+                connection.exec_driver_sql(
+                    "SET SESSION TRANSACTION READ ONLY"
+                    if previous_transaction_read_only
+                    else "SET SESSION TRANSACTION READ WRITE"
+                )
                 connection.rollback()
+            except SQLAlchemyError:
+                connection.invalidate()
+            finally:
                 driver._read_timeout = previous_read_timeout
                 if getattr(driver, "_sock", None) is not None:
                     driver._sock.settimeout(previous_socket_timeout)
-            except SQLAlchemyError:
-                connection.invalidate()
 
     @staticmethod
     def _estimated_rows(rows: list[dict[str, Any]]) -> int:
@@ -225,10 +257,21 @@ class ReadOnlySqlExecutor:
         tree = sqlglot.parse_one(sql, read="mysql")
         tree.set(
             "expressions",
-            [exp.alias_(exp.column("raw_record_id", table="tr"), "raw_record_id")],
+            [
+                exp.alias_(exp.column("source_id", table="tr"), "source_id"),
+                exp.alias_(exp.column("raw_record_id", table="tr"), "raw_record_id"),
+            ],
         )
         tree.set("group", None)
-        tree.set("order", exp.Order(expressions=[exp.Ordered(this=exp.column("raw_record_id", table="tr"))]))
+        tree.set(
+            "order",
+            exp.Order(
+                expressions=[
+                    exp.Ordered(this=exp.column("source_id", table="tr")),
+                    exp.Ordered(this=exp.column("raw_record_id", table="tr")),
+                ]
+            ),
+        )
         tree.set("limit", exp.Limit(expression=exp.Literal.number(limit)))
         return tree.sql(dialect="mysql", pretty=False)
 
@@ -242,6 +285,31 @@ class ReadOnlySqlExecutor:
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest()
+
+    @classmethod
+    def _parameter_digest(cls, params: Mapping[str, object]) -> str:
+        canonical = [
+            {"name": name, "value": cls._canonical_parameter(value)}
+            for name, value in sorted(params.items())
+        ]
+        return sha256(
+            json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
+    @staticmethod
+    def _canonical_parameter(value: object) -> dict[str, object]:
+        if type(value) is bool:
+            return {"type": "bool", "value": value}
+        if type(value) is int:
+            return {"type": "int", "value": str(value)}
+        if type(value) is str:
+            return {"type": "str", "value": value}
+        if type(value) is date:
+            return {"type": "date", "value": value.isoformat()}
+        if type(value) is Decimal:
+            normalized = value.normalize()
+            return {"type": "decimal", "value": "0" if normalized == 0 else str(normalized)}
+        raise TypeError(f"unsupported SQL parameter value: {type(value).__name__}")
 
     @staticmethod
     def _json_value(value: object) -> str:

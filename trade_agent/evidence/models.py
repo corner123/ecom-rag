@@ -2,8 +2,18 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+class RawRecordLocator(BaseModel):
+    """The reviewed composite unique key for one source trade record."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    source_id: int = Field(gt=0)
+    raw_record_id: str = Field(min_length=1, max_length=100)
 
 
 class EvidenceLocator(BaseModel):
@@ -11,8 +21,9 @@ class EvidenceLocator(BaseModel):
 
     query_id: str
     table: str = "trade_records"
-    raw_record_ids: tuple[str, ...]
-    raw_record_ids_truncated: bool = False
+    scope: Literal["bounded_predicate_population"] = "bounded_predicate_population"
+    raw_record_locators: tuple[RawRecordLocator, ...]
+    raw_record_locators_truncated: bool = False
 
 
 class SqlProvenance(BaseModel):

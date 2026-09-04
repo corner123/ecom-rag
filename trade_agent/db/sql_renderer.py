@@ -6,6 +6,7 @@ from decimal import Decimal
 import re
 from types import MappingProxyType
 from collections.abc import Mapping
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -39,6 +40,40 @@ class SqlDataScope(BaseModel):
         return self
 
 
+class ProjectionExpression(BaseModel):
+    """One reviewed column expression before its SELECT alias is applied."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    table_alias: str
+    table: str
+    column: str
+    transform: Literal["identity", "month"] = "identity"
+
+
+class ProjectionItem(ProjectionExpression):
+    alias: str
+    operation: Literal["sum", "count", "max"] | None = None
+
+
+class ProjectionOrder(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    alias: str
+    direction: Literal["asc", "desc"]
+
+
+class SemanticProjectionManifest(BaseModel):
+    """The exact plan-derived SELECT, grouping, ordering, and time semantics."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    projections: tuple[ProjectionItem, ...]
+    group_by: tuple[ProjectionExpression, ...]
+    order_by: tuple[ProjectionOrder, ...]
+    time_grain: Literal["total", "day", "month"]
+
+
 class RenderedSql(BaseModel):
     """SQL text plus separately bound values and renderer provenance."""
 
@@ -50,9 +85,8 @@ class RenderedSql(BaseModel):
     dataset_id: str = ""
     effective_start_date: date | None = None
     effective_end_date: date | None = None
-    aggregation_grain: tuple[str, ...] = ()
-    time_grain: str = "total"
-    metric_names: tuple[str, ...] = ()
+    plan: SqlQueryPlan | None = None
+    projection_manifest: SemanticProjectionManifest | None = None
     planned_tables: tuple[tuple[str, str], ...] = ()
     planned_joins: tuple[tuple[str, str, str], ...] = ()
     tenant_scope: str | None = None
@@ -87,21 +121,8 @@ class SqlRenderer:
         if "data_scope" in aliases:
             raise SqlRenderRejected("data_scope alias is reserved for policy enforcement")
 
-        aggregate_aliases = {aggregation.metric for aggregation in plan.aggregations}
-        selections: list[str] = []
-        for column in plan.columns:
-            if column.alias in aggregate_aliases:
-                continue
-            expression = self._column(column.expression, aliases)
-            if plan.time_grain == "month" and column.alias == "trade_date":
-                expression = f"DATE_FORMAT({expression}, '%Y-%m')"
-            selections.append(f"{expression} AS {self._identifier(column.alias)}")
-        for aggregation in plan.aggregations:
-            column = self._column(aggregation.column, aliases)
-            function = {"sum": "SUM", "count": "COUNT", "max": "MAX"}.get(aggregation.operation)
-            if function is None:
-                raise SqlRenderRejected("aggregation operation is not reviewed")
-            selections.append(f"{function}({column}) AS {self._identifier(aggregation.metric)}")
+        manifest = build_projection_manifest(plan)
+        selections = [self._projection_sql(item) for item in manifest.projections]
         if not selections:
             raise SqlRenderRejected("query must select at least one reviewed expression")
 
@@ -177,20 +198,13 @@ class SqlRenderer:
         sql.append(f"WHERE {' AND '.join(predicates)}")
 
         if plan.group_by:
-            groups = []
-            for expression in plan.group_by:
-                group = self._column(expression, aliases)
-                if plan.time_grain == "month" and expression == "tr.trade_date":
-                    group = f"DATE_FORMAT({group}, '%Y-%m')"
-                groups.append(group)
+            groups = [self._expression_sql(expression) for expression in manifest.group_by]
             sql.append(f"GROUP BY {', '.join(groups)}")
         if plan.order_by:
-            order_parts = []
-            selectable_aliases = {column.alias for column in plan.columns} | aggregate_aliases
-            for order in plan.order_by:
-                if order.expression not in selectable_aliases:
-                    raise SqlRenderRejected("order expression is not a selected alias")
-                order_parts.append(f"{self._identifier(order.expression)} {order.direction.upper()}")
+            order_parts = [
+                f"{self._identifier(order.alias)} {order.direction.upper()}"
+                for order in manifest.order_by
+            ]
             sql.append(f"ORDER BY {', '.join(order_parts)}")
         sql.append(f"LIMIT {plan.limit}")
 
@@ -201,9 +215,8 @@ class SqlRenderer:
             dataset_id=self.scope.dataset_id,
             effective_start_date=effective_start,
             effective_end_date=effective_end,
-            aggregation_grain=plan.aggregations[0].grain,
-            time_grain=plan.time_grain,
-            metric_names=tuple(aggregation.metric for aggregation in plan.aggregations),
+            plan=plan,
+            projection_manifest=manifest,
             planned_tables=tuple((table.alias, table.table) for table in plan.tables)
             + (("data_scope", "data_sources"),),
             planned_joins=tuple((join.name, join.left, join.right) for join in plan.joins)
@@ -239,3 +252,77 @@ class SqlRenderer:
         if alias not in aliases:
             raise SqlRenderRejected("column uses an unknown table alias")
         return f"{alias}.{column}"
+
+    @classmethod
+    def _expression_sql(cls, expression: ProjectionExpression) -> str:
+        column = f"{cls._identifier(expression.table_alias)}.{cls._identifier(expression.column)}"
+        return f"DATE_FORMAT({column}, '%Y-%m')" if expression.transform == "month" else column
+
+    @classmethod
+    def _projection_sql(cls, projection: ProjectionItem) -> str:
+        expression = cls._expression_sql(projection)
+        if projection.operation is not None:
+            expression = f"{projection.operation.upper()}({expression})"
+        return f"{expression} AS {cls._identifier(projection.alias)}"
+
+
+def build_projection_manifest(plan: SqlQueryPlan) -> SemanticProjectionManifest:
+    """Derive a frozen exact result contract from the reviewed typed plan."""
+
+    if type(plan) is not SqlQueryPlan:
+        raise TypeError("projection manifest requires an exact SqlQueryPlan")
+    alias_to_table = {table.alias: table.table for table in plan.tables}
+
+    def expression(value: str, *, transform: Literal["identity", "month"] = "identity") -> ProjectionExpression:
+        match = _QUALIFIED.fullmatch(value)
+        if match is None or match.group(1) not in alias_to_table:
+            raise SqlRenderRejected("projection column must use a planned table alias")
+        return ProjectionExpression(
+            table_alias=match.group(1),
+            table=alias_to_table[match.group(1)],
+            column=match.group(2),
+            transform=transform,
+        )
+
+    aggregate_aliases = {aggregation.metric for aggregation in plan.aggregations}
+    projections: list[ProjectionItem] = []
+    for column in plan.columns:
+        if column.alias in aggregate_aliases:
+            continue
+        transform: Literal["identity", "month"] = (
+            "month" if plan.time_grain == "month" and column.alias == "trade_date" else "identity"
+        )
+        projections.append(
+            ProjectionItem(**expression(column.expression, transform=transform).model_dump(), alias=column.alias)
+        )
+    for aggregation in plan.aggregations:
+        projections.append(
+            ProjectionItem(
+                **expression(aggregation.column).model_dump(),
+                alias=aggregation.metric,
+                operation=aggregation.operation,
+            )
+        )
+    if not projections:
+        raise SqlRenderRejected("query must project at least one reviewed expression")
+
+    groups = tuple(
+        expression(
+            item,
+            transform="month" if plan.time_grain == "month" and item == "tr.trade_date" else "identity",
+        )
+        for item in plan.group_by
+    )
+    projected_aliases = {item.alias for item in projections}
+    orders = tuple(
+        ProjectionOrder(alias=order.expression, direction=order.direction)
+        for order in plan.order_by
+    )
+    if any(order.alias not in projected_aliases for order in orders):
+        raise SqlRenderRejected("order expression is not a projected alias")
+    return SemanticProjectionManifest(
+        projections=tuple(projections),
+        group_by=groups,
+        order_by=orders,
+        time_grain=plan.time_grain,
+    )

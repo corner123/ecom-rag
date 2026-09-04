@@ -57,14 +57,16 @@ def test_approved_aggregate_returns_independently_checked_decimals_and_replayabl
             (company, currency, total) for (company, currency), total in expected_rows
         ]
         assert all(isinstance(row["trade_amount"], Decimal) for row in result.rows)
-        assert result.raw_record_ids
+        assert result.raw_record_locators
         assert result.row_count <= 10
         assert result.max_execution_time_ms == 2_000
         assert result.client_timeout_ms == 3_000
 
         evidence = build_sql_evidence(result)
         assert len(evidence) == 1
-        assert evidence[0].locator.raw_record_ids
+        assert evidence[0].locator.raw_record_locators
+        assert evidence[0].locator.scope == "bounded_predicate_population"
+        assert all(locator.source_id > 0 and locator.raw_record_id for locator in evidence[0].locator.raw_record_locators)
         assert evidence[0].sql_provenance.result_hash == result.result_hash
         assert evidence[0].sql_provenance.schema_fingerprint == registry.fingerprint
         assert set(evidence[0].sql_provenance.bound_filter_names) == set(validated.bound_filter_names)
@@ -119,6 +121,8 @@ def test_explain_scan_budget_fails_closed() -> None:
     engine = create_engine(database_url_from_environment(role="query"))
     try:
         with engine.connect() as connection:
+            connection.execute(text("SET SESSION max_execution_time = 37"))
+            original_transaction_read_only = connection.scalar(text("SELECT @@SESSION.transaction_read_only"))
             registry = SchemaRegistry().refresh(connection)
             plan = SqlPlanner().plan(
                 IntentParser(as_of=date(2026, 9, 4)).parse("最近18个月美国采购金额最高的 10 家公司"), registry
@@ -126,6 +130,8 @@ def test_explain_scan_budget_fails_closed() -> None:
             validated = SqlValidator(scope=_scope()).validate(SqlRenderer(scope=_scope()).render(plan), registry)
             with pytest.raises(SqlScanBudgetExceeded):
                 ReadOnlySqlExecutor(connection, max_execution_time_ms=2_000, max_scan_rows=1).execute(validated)
+            assert connection.scalar(text("SELECT @@SESSION.max_execution_time")) == 37
+            assert connection.scalar(text("SELECT @@SESSION.transaction_read_only")) == original_transaction_read_only
     finally:
         engine.dispose()
 
@@ -136,5 +142,41 @@ def test_executor_rejects_a_disabled_client_timeout() -> None:
         with engine.connect() as connection:
             with pytest.raises(ValueError, match="client_timeout_ms"):
                 ReadOnlySqlExecutor(connection, client_timeout_ms=0)
+    finally:
+        engine.dispose()
+
+
+def test_query_identity_uses_a_private_type_aware_parameter_digest_even_for_empty_results() -> None:
+    engine = create_engine(database_url_from_environment(role="query"), pool_pre_ping=True)
+    try:
+        with engine.connect() as connection:
+            registry = SchemaRegistry().refresh(connection)
+            parser = IntentParser(as_of=date(2026, 9, 4))
+            planner = SqlPlanner()
+            renderer = SqlRenderer(scope=_scope())
+            first = renderer.render(
+                planner.plan(
+                    parser.parse("美国采购 2025-03-02 到 2025-03-03 HS850440 金额最高的 10 家公司"),
+                    registry,
+                )
+            )
+            second = renderer.render(
+                planner.plan(
+                    parser.parse("中国采购 2025-03-02 到 2025-03-03 HS850440 金额最高的 10 家公司"),
+                    registry,
+                )
+            )
+            validator = SqlValidator(scope=_scope())
+            executor = ReadOnlySqlExecutor(connection, max_execution_time_ms=2_000, max_scan_rows=5_000)
+            first_result = executor.execute(validator.validate(first, registry))
+            second_result = executor.execute(validator.validate(second, registry))
+
+        assert first_result.rows == second_result.rows == ()
+        assert first_result.result_hash == second_result.result_hash
+        assert first_result.parameter_digest != second_result.parameter_digest
+        assert first_result.query_id != second_result.query_id
+        assert build_sql_evidence(first_result)[0].evidence_id != build_sql_evidence(second_result)[0].evidence_id
+        assert "US" not in first_result.parameter_digest
+        assert "CN" not in second_result.parameter_digest
     finally:
         engine.dispose()

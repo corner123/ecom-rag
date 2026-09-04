@@ -50,8 +50,8 @@ def build_sql_evidence(result: SqlExecutionResult) -> list[Evidence]:
             content=content,
             locator=EvidenceLocator(
                 query_id=result.query_id,
-                raw_record_ids=result.raw_record_ids,
-                raw_record_ids_truncated=result.raw_record_ids_truncated,
+                raw_record_locators=result.raw_record_locators,
+                raw_record_locators_truncated=result.raw_record_locators_truncated,
             ),
             valid_from=result.effective_start_date,
             valid_to=result.effective_end_date,

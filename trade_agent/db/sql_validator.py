@@ -6,7 +6,7 @@ from decimal import Decimal
 import re
 from types import MappingProxyType
 from collections.abc import Mapping
-from typing import Iterable
+from typing import Iterable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 import sqlglot
@@ -14,7 +14,16 @@ from sqlglot import exp
 from sqlglot.errors import ParseError
 
 from trade_agent.db.registry import RegistrySnapshot
-from trade_agent.db.sql_renderer import RenderedSql, SqlDataScope, SqlParameter
+from trade_agent.db.sql_renderer import (
+    ProjectionExpression,
+    ProjectionItem,
+    ProjectionOrder,
+    RenderedSql,
+    SemanticProjectionManifest,
+    SqlDataScope,
+    SqlParameter,
+    build_projection_manifest,
+)
 
 
 _COMMENT = re.compile(r"(?:/\*|\*/|--|#)")
@@ -47,6 +56,7 @@ class ValidatedSql(BaseModel):
     aggregation_grain: tuple[str, ...]
     time_grain: str
     metric_names: tuple[str, ...]
+    projection_aliases: tuple[str, ...]
     bound_filter_names: tuple[str, ...]
     limit: int = Field(ge=1)
 
@@ -75,6 +85,14 @@ class SqlValidator:
             raise SqlPolicyDenied("schema fingerprint does not match the reviewed registry")
         if rendered.dataset_id != self.scope.dataset_id:
             raise SqlPolicyDenied("dataset identity does not match the configured scope")
+        if rendered.plan is None or rendered.projection_manifest is None:
+            raise SqlAstRejected("SQL lacks a plan-derived projection manifest")
+        if rendered.plan.schema_fingerprint != registry.fingerprint:
+            raise SqlPolicyDenied("plan schema fingerprint does not match the reviewed registry")
+        expected_manifest = build_projection_manifest(rendered.plan)
+        if rendered.projection_manifest != expected_manifest:
+            raise SqlAstRejected("projection manifest diverges from the typed SQL plan")
+        self._validate_manifest_semantics(expected_manifest, registry)
         if (
             rendered.effective_start_date is None
             or rendered.effective_end_date is None
@@ -104,13 +122,17 @@ class SqlValidator:
 
         alias_to_table = self._validate_tables(tree, rendered, registry)
         self._validate_joins(tree, rendered, registry, alias_to_table)
-        selected_aliases, selected_columns = self._validate_select(tree, registry, alias_to_table)
+        actual_projections = self._validate_select(tree, registry, alias_to_table)
+        if actual_projections != expected_manifest.projections:
+            raise SqlAstRejected("SQL projection diverges from the typed plan manifest")
         self._validate_where(tree, registry, alias_to_table, rendered.params)
-        self._validate_group_order(tree, alias_to_table, selected_aliases, selected_columns)
+        self._validate_group_order(tree, alias_to_table, expected_manifest)
         limit = self._validate_limit(tree, registry)
+        self._validate_parameters(tree, rendered.params)
         self._validate_policy(tree, rendered.params, alias_to_table)
         self._validate_effective_time(tree, rendered, alias_to_table)
-        self._validate_parameters(tree, rendered.params)
+        aggregation_grain = self._aggregation_grain(expected_manifest)
+        metric_names = tuple(item.alias for item in expected_manifest.projections if item.operation is not None)
 
         return ValidatedSql(
             sql=tree.sql(dialect="mysql", pretty=False),
@@ -120,9 +142,10 @@ class SqlValidator:
             is_synthetic=self.scope.synthetic,
             effective_start_date=rendered.effective_start_date,
             effective_end_date=rendered.effective_end_date,
-            aggregation_grain=rendered.aggregation_grain,
-            time_grain=rendered.time_grain,
-            metric_names=rendered.metric_names,
+            aggregation_grain=aggregation_grain,
+            time_grain=expected_manifest.time_grain,
+            metric_names=metric_names,
+            projection_aliases=tuple(item.alias for item in expected_manifest.projections),
             bound_filter_names=tuple(sorted(rendered.params)),
             limit=limit,
         )
@@ -191,14 +214,17 @@ class SqlValidator:
     @classmethod
     def _validate_select(
         cls, tree: exp.Select, registry: RegistrySnapshot, alias_to_table: dict[str, str]
-    ) -> tuple[set[str], set[str]]:
+    ) -> tuple[ProjectionItem, ...]:
         if not tree.expressions:
             raise SqlAstRejected("SELECT list must not be empty")
         aliases: set[str] = set()
-        raw_columns: set[str] = set()
-        allowed_aggregates = {
-            (str(definition["operations"][0]).lower(), str(definition["column"]))
+        projections: list[ProjectionItem] = []
+        allowed_dimensions = set(registry.dimensions.values())
+        support_dimensions = {
+            str(definition[key])
             for definition in registry.aggregations.values()
+            for key in ("currency_column", "unit_column")
+            if key in definition
         }
         for selection in tree.expressions:
             if type(selection) is not exp.Alias or not selection.alias:
@@ -209,22 +235,36 @@ class SqlValidator:
             expression = selection.this
             if type(expression) is exp.Column:
                 physical = cls._registered_column(expression, alias_to_table, registry)
-                raw_columns.add(physical)
+                if physical not in allowed_dimensions | support_dimensions:
+                    raise SqlAstRejected("projection column is not a reviewed dimension or unit")
+                base = cls._projection_expression(expression, alias_to_table)
+                projections.append(ProjectionItem(**base.model_dump(), alias=selection.alias))
             elif isinstance(expression, (exp.Sum, exp.Count, exp.Max)):
                 if type(expression.this) is not exp.Column:
                     raise SqlAstRejected("aggregate argument must be one registered column")
                 physical = cls._registered_column(expression.this, alias_to_table, registry)
                 operation = {exp.Sum: "sum", exp.Count: "count", exp.Max: "max"}[type(expression)]
-                if (operation, physical) not in allowed_aggregates:
-                    raise SqlAstRejected("aggregate is not registered for this column")
+                definition = registry.aggregations.get(selection.alias)
+                if (
+                    definition is None
+                    or operation not in tuple(str(item) for item in definition["operations"])
+                    or physical != str(definition["column"])
+                ):
+                    raise SqlAstRejected("projection aggregate does not match its registered metric")
+                base = cls._projection_expression(expression.this, alias_to_table)
+                projections.append(
+                    ProjectionItem(**base.model_dump(), alias=selection.alias, operation=operation)
+                )
             elif cls._is_month_expression(expression, alias_to_table):
-                physical = cls._registered_column(next(expression.find_all(exp.Column)), alias_to_table, registry)
+                column = next(expression.find_all(exp.Column))
+                physical = cls._registered_column(column, alias_to_table, registry)
                 if physical != "trade_records.trade_date":
                     raise SqlAstRejected("month bucketing is allowed only for trade_date")
-                raw_columns.add(physical)
+                base = cls._projection_expression(column, alias_to_table, transform="month")
+                projections.append(ProjectionItem(**base.model_dump(), alias=selection.alias))
             else:
                 raise SqlAstRejected("selected expression is outside the reviewed grammar")
-        return aliases, raw_columns
+        return tuple(projections)
 
     @classmethod
     def _validate_where(
@@ -262,27 +302,33 @@ class SqlValidator:
         cls,
         tree: exp.Select,
         alias_to_table: dict[str, str],
-        selected_aliases: set[str],
-        selected_columns: set[str],
+        manifest: SemanticProjectionManifest,
     ) -> None:
         group = tree.args.get("group")
-        if group is not None:
-            for expression in group.expressions:
-                if type(expression) is exp.Column:
-                    if cls._physical(expression, alias_to_table) not in selected_columns:
-                        raise SqlAstRejected("GROUP BY column must be selected")
-                elif cls._is_month_expression(expression, alias_to_table):
-                    if "trade_records.trade_date" not in selected_columns:
-                        raise SqlAstRejected("month group must be selected")
-                else:
-                    raise SqlAstRejected("GROUP BY expression is not reviewed")
+        actual_groups: list[ProjectionExpression] = []
+        for expression in group.expressions if group is not None else ():
+            if type(expression) is exp.Column:
+                actual_groups.append(cls._projection_expression(expression, alias_to_table))
+            elif cls._is_month_expression(expression, alias_to_table):
+                actual_groups.append(
+                    cls._projection_expression(
+                        next(expression.find_all(exp.Column)), alias_to_table, transform="month"
+                    )
+                )
+            else:
+                raise SqlAstRejected("GROUP BY expression is not reviewed")
+        if tuple(actual_groups) != manifest.group_by:
+            raise SqlAstRejected("GROUP BY diverges from the typed plan projection manifest")
         order = tree.args.get("order")
-        if order is not None:
-            for ordered in order.expressions:
-                if type(ordered) is not exp.Ordered or type(ordered.this) is not exp.Column:
-                    raise SqlAstRejected("ORDER BY expression is not reviewed")
-                if ordered.this.table or ordered.this.name not in selected_aliases:
-                    raise SqlAstRejected("ORDER BY must reference a selected alias")
+        actual_orders: list[ProjectionOrder] = []
+        for ordered in order.expressions if order is not None else ():
+            if type(ordered) is not exp.Ordered or type(ordered.this) is not exp.Column or ordered.this.table:
+                raise SqlAstRejected("ORDER BY expression is not reviewed")
+            actual_orders.append(
+                ProjectionOrder(alias=ordered.this.name, direction="desc" if ordered.args.get("desc") else "asc")
+            )
+        if tuple(actual_orders) != manifest.order_by:
+            raise SqlAstRejected("ORDER BY diverges from the typed plan projection manifest")
 
     @staticmethod
     def _validate_limit(tree: exp.Select, registry: RegistrySnapshot) -> int:
@@ -303,6 +349,8 @@ class SqlValidator:
         if len(names) != len(set(names)):
             raise SqlAstRejected("bound parameter names must be unique")
         if set(names) != set(params):
+            if any(name.startswith("policy_") for name in set(names) ^ set(params)):
+                raise SqlPolicyDenied("policy parameters must match placeholders exactly")
             raise SqlAstRejected("bound parameters must match placeholders exactly")
         if any(type(value) not in (str, int, bool, date, Decimal) for value in params.values()):
             raise SqlAstRejected("bound parameter type is not allowed")
@@ -407,6 +455,71 @@ class SqlValidator:
         if physical not in registry.columns or physical in registry.sensitive_fields:
             raise SqlAstRejected("column is not registered for SQL output")
         return physical
+
+    @staticmethod
+    def _projection_expression(
+        column: exp.Column,
+        alias_to_table: dict[str, str],
+        *,
+        transform: Literal["identity", "month"] = "identity",
+    ) -> ProjectionExpression:
+        if not column.table or column.table not in alias_to_table:
+            raise SqlAstRejected("projection column must use a known alias")
+        return ProjectionExpression(
+            table_alias=column.table,
+            table=alias_to_table[column.table],
+            column=column.name,
+            transform=transform,
+        )
+
+    @staticmethod
+    def _validate_manifest_semantics(
+        manifest: SemanticProjectionManifest, registry: RegistrySnapshot
+    ) -> None:
+        dimensions = tuple(
+            ProjectionExpression(**item.model_dump(exclude={"alias", "operation"}))
+            for item in manifest.projections
+            if item.operation is None
+        )
+        if dimensions != manifest.group_by:
+            raise SqlAstRejected("all and only projected dimensions must define aggregation grain")
+        grouped_physical = {f"{item.table}.{item.column}" for item in manifest.group_by}
+        for metric in (item for item in manifest.projections if item.operation is not None):
+            definition = registry.aggregations.get(metric.alias)
+            if definition is None:
+                raise SqlAstRejected("projection metric is not registered")
+            for key in ("currency_column", "unit_column"):
+                if key in definition and str(definition[key]) not in grouped_physical:
+                    raise SqlAstRejected("projection omits the registered metric unit or currency grain")
+        time_items = [
+            item for item in manifest.group_by if f"{item.table}.{item.column}" == "trade_records.trade_date"
+        ]
+        if manifest.time_grain == "month":
+            if len(time_items) != 1 or time_items[0].transform != "month":
+                raise SqlAstRejected("monthly time grain requires one month-bucketed trade date")
+        elif manifest.time_grain == "day":
+            if len(time_items) != 1 or time_items[0].transform != "identity":
+                raise SqlAstRejected("daily time grain requires one trade-date dimension")
+        elif any(item.transform == "month" for item in manifest.group_by):
+            raise SqlAstRejected("total time grain cannot contain a month transform")
+
+    @staticmethod
+    def _aggregation_grain(manifest: SemanticProjectionManifest) -> tuple[str, ...]:
+        aliases: list[str] = []
+        for group in manifest.group_by:
+            matches = [
+                item.alias
+                for item in manifest.projections
+                if item.operation is None
+                and item.table_alias == group.table_alias
+                and item.table == group.table
+                and item.column == group.column
+                and item.transform == group.transform
+            ]
+            if len(matches) != 1:
+                raise SqlAstRejected("aggregation grain does not map to one projected dimension")
+            aliases.append(matches[0])
+        return tuple(aliases)
 
     @staticmethod
     def _is_month_expression(expression: exp.Expression, alias_to_table: dict[str, str]) -> bool:

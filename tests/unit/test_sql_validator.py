@@ -215,3 +215,64 @@ def test_validator_rejects_literal_or_unmatched_parameters(
 
     with pytest.raises(SqlAstRejected):
         SqlValidator(scope=scope).validate(rendered.model_copy(update={"params": {**rendered.params, "unused": "secret"}}), registry)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        (
+            "SELECT tr.raw_record_id AS importer_company, tr.currency AS currency, "
+            "SUM(tr.trade_amount) AS trade_amount"
+        ),
+        (
+            "SELECT importer.company_name AS importer_company, tr.currency AS currency, "
+            "SUM(tr.quantity) AS trade_amount"
+        ),
+        (
+            "SELECT importer.company_name AS importer_company, "
+            "SUM(tr.trade_amount) AS trade_amount"
+        ),
+        (
+            "SELECT importer.company_name AS importer_company, tr.currency AS currency, "
+            "SUM(tr.trade_amount) AS trade_amount, tr.raw_record_id AS raw_record_id"
+        ),
+    ],
+)
+def test_validator_rejects_projection_that_differs_from_the_plan_manifest(
+    registry: RegistrySnapshot, rendered: RenderedSql, scope: SqlDataScope, sql: str
+) -> None:
+    suffix = rendered.sql.split(" FROM trade_records", maxsplit=1)[1]
+    candidate_sql = f"{sql} FROM trade_records{suffix}"
+    if "raw_record_id" in candidate_sql:
+        candidate_sql = candidate_sql.replace(
+            "GROUP BY importer.company_name, tr.currency", "GROUP BY tr.raw_record_id, tr.currency"
+        )
+    if "tr.currency AS currency" not in candidate_sql:
+        candidate_sql = candidate_sql.replace(" GROUP BY importer.company_name, tr.currency", " GROUP BY importer.company_name")
+    with pytest.raises(SqlAstRejected, match="projection"):
+        SqlValidator(scope=scope).validate(rendered.model_copy(update={"sql": candidate_sql}), registry)
+
+
+def test_validated_semantics_are_derived_instead_of_trusting_rendered_metadata(
+    registry: RegistrySnapshot, rendered: RenderedSql, scope: SqlDataScope
+) -> None:
+    forged = rendered.model_copy(
+        update={
+            "metric_names": ("quantity",),
+            "aggregation_grain": ("tr.raw_record_id",),
+            "time_grain": "month",
+        }
+    )
+    validated = SqlValidator(scope=scope).validate(forged, registry)
+    assert validated.metric_names == ("trade_amount",)
+    assert validated.aggregation_grain == ("importer_company", "currency")
+    assert validated.time_grain == "total"
+
+
+def test_missing_date_parameter_is_a_typed_rejection_not_key_error(
+    registry: RegistrySnapshot, rendered: RenderedSql, scope: SqlDataScope
+) -> None:
+    params = dict(rendered.params)
+    params.pop("filter_2_start")
+    with pytest.raises(SqlAstRejected, match="parameters"):
+        SqlValidator(scope=scope).validate(rendered.model_copy(update={"params": params}), registry)
