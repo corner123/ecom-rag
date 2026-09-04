@@ -37,3 +37,12 @@ __all__ = [
     "RerankOutcome",
     "RerankerContract",
 ]
+
+
+def __getattr__(name):
+    if name in {"RetrievalService", "RetrievalOutcome", "RetrievalHit", "HitTrace"}:
+        from .service import RetrievalService, RetrievalOutcome, RetrievalHit, HitTrace
+        return locals()[name]
+    raise AttributeError(name)
+
+__all__ += ["RetrievalService", "RetrievalOutcome", "RetrievalHit", "HitTrace"]

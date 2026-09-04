@@ -10,3 +10,12 @@ __all__ = [
     "BgeEmbeddingManager",
     "EmbeddingContract",
 ]
+
+
+def __getattr__(name):
+    if name in {"TradeIndexBuilder", "TradeIndexBundle", "BundleDescriptor"}:
+        from .builder import TradeIndexBuilder, TradeIndexBundle, BundleDescriptor
+        return locals()[name]
+    raise AttributeError(name)
+
+__all__ += ["TradeIndexBuilder", "TradeIndexBundle", "BundleDescriptor"]

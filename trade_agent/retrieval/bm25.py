@@ -108,6 +108,20 @@ class BM25Index:
     def chunk_count(self) -> int:
         return len(self._ordered_chunks)
 
+    @property
+    def records(self) -> tuple[ChunkRecord, ...]:
+        """Return detached records for verification against a frozen build."""
+        return tuple(record.model_copy(deep=True) for record in self._ordered_chunks)
+
+    def validate_records(self, records: Sequence[ChunkRecord]) -> None:
+        """Prove persisted IDs, payloads and cached tokens came from these records."""
+        expected = tuple(records)
+        if self._ordered_chunks != expected:
+            raise ValueError("BM25 records do not exactly match expected records")
+        retokenized = tuple(tuple(TradeTokenizer.tokenize(record.content)) for record in expected)
+        if self._tokenized_corpus != retokenized:
+            raise ValueError("BM25 tokenized corpus does not match record content")
+
     def search(
         self,
         query: str,
