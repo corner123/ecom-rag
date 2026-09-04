@@ -127,6 +127,13 @@ aliases:
   region: countries.region
   time: trade_records.trade_date
 
+identifiers:
+  import_country: countries.country_code
+  export_country: countries.country_code
+  hs_code: hs_codes.hs_code
+  importer_company: companies.company_name
+  exporter_company: companies.company_name
+
 dimensions:
   company: companies.company_name
   product: products.product_name

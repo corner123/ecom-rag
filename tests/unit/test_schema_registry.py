@@ -152,6 +152,7 @@ def test_registry_snapshot_preserves_reviewed_join_endpoints_and_roles(
         "tables": {"countries": {"columns": {"id": {"description": "Identifier", "type": "bigint unsigned", "nullable": False, "default": None}}}},
         "joins": [{"name": "fk_import_country", "left": "trade_records.import_country_id", "right": "countries.id", "roles": ["import_country"]}],
         "aliases": {},
+        "identifiers": {"import_country": "countries.country_code"},
         "dimensions": {},
         "filters": {},
         "aggregations": {},
@@ -170,6 +171,7 @@ def test_registry_snapshot_preserves_reviewed_join_endpoints_and_roles(
     assert snapshot.joins[0].left == "trade_records.import_country_id"
     assert snapshot.joins[0].right == "countries.id"
     assert snapshot.joins[0].roles == ("import_country",)
+    assert snapshot.identifiers["import_country"] == "countries.country_code"
 
 
 def test_registry_link_uses_the_snapshot_validated_at_refresh(

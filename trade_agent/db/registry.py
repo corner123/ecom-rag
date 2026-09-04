@@ -121,6 +121,7 @@ class RegistrySnapshot:
     filters: Mapping[str, str]
     sensitive_fields: tuple[str, ...]
     max_result_rows: int
+    identifiers: Mapping[str, str] = MappingProxyType({})
 
 
 @dataclass(frozen=True)
@@ -166,6 +167,7 @@ class SchemaRegistry:
                 for join in semantics["joins"]
             ),
             aliases=_freeze_mapping(semantics["aliases"]),
+            identifiers=_freeze_mapping(semantics.get("identifiers", {})),
             aggregations=MappingProxyType(
                 {name: _freeze_mapping(definition) for name, definition in semantics["aggregations"].items()}
             ),
@@ -232,7 +234,8 @@ class SchemaRegistry:
         if not isinstance(loaded, dict):
             raise ValueError("schema registry semantics must be a mapping")
         required = {"database", "tables", "joins", "aliases", "dimensions", "filters", "aggregations", "sensitive_fields", "max_result_rows"}
-        if set(loaded) != required:
+        allowed = required | {"identifiers"}
+        if not required.issubset(loaded) or not set(loaded).issubset(allowed):
             raise ValueError("schema registry semantics have unexpected keys")
         if not isinstance(loaded["tables"], dict) or not loaded["tables"]:
             raise ValueError("schema registry must register tables")
