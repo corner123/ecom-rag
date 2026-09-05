@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from datetime import date, datetime
 from decimal import Decimal
 from hashlib import sha256
+import hmac
 import json
 from time import monotonic
 from typing import Any
@@ -23,6 +24,12 @@ class SqlExecutionError(RuntimeError):
     """A database failure occurred without exposing SQL values or credentials."""
 
     error_code = "sql_execution_failed"
+
+
+class SqlIdentityConfigurationError(SqlExecutionError):
+    """The runtime did not inject a key for private, stable query identity."""
+
+    error_code = "sql_identity_configuration_error"
 
 
 class SqlExecutionTimeout(SqlExecutionError):
@@ -84,6 +91,7 @@ class ReadOnlySqlExecutor:
         self,
         connection: Connection,
         *,
+        identity_hmac_key: bytes | None = None,
         max_execution_time_ms: int = 2_000,
         client_timeout_ms: int | None = None,
         max_scan_rows: int = 100_000,
@@ -91,6 +99,10 @@ class ReadOnlySqlExecutor:
     ) -> None:
         if not isinstance(connection, Connection):
             raise TypeError("connection must be a SQLAlchemy Connection")
+        if type(identity_hmac_key) is not bytes or not identity_hmac_key:
+            raise SqlIdentityConfigurationError(
+                "a nonempty runtime identity HMAC key is required"
+            )
         if type(max_execution_time_ms) is not int or max_execution_time_ms <= 0:
             raise ValueError("max_execution_time_ms must be a positive integer")
         if type(max_scan_rows) is not int or max_scan_rows <= 0:
@@ -98,6 +110,7 @@ class ReadOnlySqlExecutor:
         if type(max_locator_rows) is not int or max_locator_rows <= 0:
             raise ValueError("max_locator_rows must be a positive integer")
         self.connection = connection
+        self._identity_hmac_key = identity_hmac_key
         self.max_execution_time_ms = max_execution_time_ms
         self.client_timeout_ms = (
             max_execution_time_ms + 1_000 if client_timeout_ms is None else client_timeout_ms
@@ -112,126 +125,135 @@ class ReadOnlySqlExecutor:
             raise TypeError("executor requires an exact ValidatedSql")
         started = monotonic()
         connection = self.connection
-        if connection.in_transaction():
-            connection.rollback()
-        try:
-            previous_max_execution_time = int(
-                connection.scalar(text("SELECT @@SESSION.max_execution_time"))
-            )
-            previous_transaction_read_only = bool(
-                connection.scalar(text("SELECT @@SESSION.transaction_read_only"))
-            )
-            connection.rollback()
-        except SQLAlchemyError as error:
-            raise SqlExecutionError("could not read SQL session safety settings") from error
-        estimated_scan_rows = 0
+        if connection.dialect.name != "mysql" or connection.dialect.driver != "pymysql":
+            raise SqlExecutionError("SQL execution requires the reviewed MySQL PyMySQL adapter")
         driver = connection.connection.driver_connection
-        if not hasattr(driver, "_read_timeout"):
-            raise SqlExecutionError("database driver does not expose a bounded client read timeout")
+        socket = getattr(driver, "_sock", None)
+        if not hasattr(driver, "_read_timeout") or socket is None:
+            raise SqlExecutionError("PyMySQL driver does not expose bounded read and socket timeouts")
         previous_read_timeout = driver._read_timeout
-        previous_socket_timeout = driver._sock.gettimeout() if getattr(driver, "_sock", None) else None
-        driver._read_timeout = self.client_timeout_ms / 1_000
+        previous_socket_timeout = socket.gettimeout()
+        timeout_seconds = self.client_timeout_ms / 1_000
+        driver._read_timeout = timeout_seconds
         try:
-            connection.execute(text("SET SESSION TRANSACTION READ ONLY"))
-            connection.execute(
-                text("SET SESSION max_execution_time = :timeout_ms"),
-                {"timeout_ms": self.max_execution_time_ms},
-            )
-            connection.execute(text("START TRANSACTION READ ONLY"))
-            explain_rows = connection.execute(
-                text(f"EXPLAIN {validated.sql}"), dict(validated.params)
-            ).mappings().all()
-            estimated_scan_rows = self._estimated_rows(explain_rows)
-            if estimated_scan_rows > self.max_scan_rows:
-                raise SqlScanBudgetExceeded(
-                    f"estimated scan rows {estimated_scan_rows} exceed configured budget"
-                )
-
-            result = connection.execute(text(validated.sql), dict(validated.params)).mappings()
-            rows = tuple(dict(row) for row in result.fetchmany(validated.limit + 1))
-            if len(rows) > validated.limit:
-                raise SqlResultLimitExceeded("database returned more rows than the validated limit")
-            if any(tuple(row) != validated.projection_aliases for row in rows):
-                raise SqlExecutionError("database result projection diverged from validated SQL")
-            locator_sql = self._locator_sql(validated.sql, self.max_locator_rows + 1)
-            locator_rows = connection.execute(
-                text(locator_sql), dict(validated.params)
-            ).mappings().fetchmany(self.max_locator_rows + 1)
-            locator_values = tuple(
-                RawRecordLocator(source_id=int(row["source_id"]), raw_record_id=str(row["raw_record_id"]))
-                for row in locator_rows
-            )
-            truncated = len(locator_values) > self.max_locator_rows
-            raw_record_locators = locator_values[: self.max_locator_rows]
-            result_hash = self._hash_rows(rows)
-            parameter_digest = self._parameter_digest(validated.params)
-            query_id = sha256(
-                json.dumps(
-                    {
-                        "sql": validated.sql,
-                        "filters": validated.bound_filter_names,
-                        "parameter_digest": parameter_digest,
-                        "schema": validated.schema_fingerprint,
-                        "dataset": validated.dataset_id,
-                    },
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-            ).hexdigest()
-            return SqlExecutionResult(
-                query_id=query_id,
-                normalized_sql=validated.sql,
-                bound_filter_names=validated.bound_filter_names,
-                schema_fingerprint=validated.schema_fingerprint,
-                dataset_id=validated.dataset_id,
-                is_synthetic=validated.is_synthetic,
-                effective_start_date=validated.effective_start_date,
-                effective_end_date=validated.effective_end_date,
-                aggregation_grain=validated.aggregation_grain,
-                time_grain=validated.time_grain,
-                metric_names=validated.metric_names,
-                rows=rows,
-                row_count=len(rows),
-                result_hash=result_hash,
-                parameter_digest=parameter_digest,
-                raw_record_locators=raw_record_locators,
-                raw_record_locators_truncated=truncated,
-                estimated_scan_rows=estimated_scan_rows,
-                execution_ms=(monotonic() - started) * 1000,
-                max_execution_time_ms=self.max_execution_time_ms,
-                client_timeout_ms=self.client_timeout_ms,
-            )
-        except SqlExecutionError:
-            raise
-        except DBAPIError as error:
-            code = self._mysql_error_code(error)
-            message = str(error.orig).lower()
-            if code in {1317, 3024} or (code == 2013 and "timed out" in message):
-                raise SqlExecutionTimeout("read-only SELECT exceeded its execution timeout") from error
-            if code in {2002, 2003, 2006, 2013}:
-                raise SqlTransportError("database transport failed during read-only SQL execution") from error
-            raise SqlExecutionError("read-only SQL execution failed") from error
-        except SQLAlchemyError as error:
-            raise SqlExecutionError("read-only SQL execution failed") from error
-        finally:
+            socket.settimeout(timeout_seconds)
+            previous_session_state: tuple[int, bool] | None = None
             try:
-                connection.exec_driver_sql("ROLLBACK")
-                connection.execute(
-                    text("SET SESSION max_execution_time = :previous_timeout_ms"),
-                    {"previous_timeout_ms": previous_max_execution_time},
+                if connection.in_transaction():
+                    connection.rollback()
+                previous_max_execution_time = int(
+                    connection.scalar(text("SELECT @@SESSION.max_execution_time"))
                 )
-                connection.exec_driver_sql(
-                    "SET SESSION TRANSACTION READ ONLY"
-                    if previous_transaction_read_only
-                    else "SET SESSION TRANSACTION READ WRITE"
+                previous_transaction_read_only = bool(
+                    int(connection.scalar(text("SELECT @@SESSION.transaction_read_only")))
+                )
+                previous_session_state = (
+                    previous_max_execution_time,
+                    previous_transaction_read_only,
                 )
                 connection.rollback()
-            except SQLAlchemyError:
-                connection.invalidate()
+                connection.execute(text("SET SESSION TRANSACTION READ ONLY"))
+                connection.execute(
+                    text("SET SESSION max_execution_time = :timeout_ms"),
+                    {"timeout_ms": self.max_execution_time_ms},
+                )
+                connection.execute(text("START TRANSACTION READ ONLY"))
+                explain_rows = connection.execute(
+                    text(f"EXPLAIN {validated.sql}"), dict(validated.params)
+                ).mappings().all()
+                estimated_scan_rows = self._estimated_rows(explain_rows)
+                if estimated_scan_rows > self.max_scan_rows:
+                    raise SqlScanBudgetExceeded(
+                        f"estimated scan rows {estimated_scan_rows} exceed configured budget"
+                    )
+
+                result = connection.execute(text(validated.sql), dict(validated.params)).mappings()
+                rows = tuple(dict(row) for row in result.fetchmany(validated.limit + 1))
+                if len(rows) > validated.limit:
+                    raise SqlResultLimitExceeded("database returned more rows than the validated limit")
+                if any(tuple(row) != validated.projection_aliases for row in rows):
+                    raise SqlExecutionError("database result projection diverged from validated SQL")
+                locator_sql = self._locator_sql(validated.sql, self.max_locator_rows + 1)
+                locator_rows = connection.execute(
+                    text(locator_sql), dict(validated.params)
+                ).mappings().fetchmany(self.max_locator_rows + 1)
+                locator_values = tuple(
+                    RawRecordLocator(
+                        source_id=int(row["source_id"]),
+                        raw_record_id=str(row["raw_record_id"]),
+                    )
+                    for row in locator_rows
+                )
+                truncated = len(locator_values) > self.max_locator_rows
+                raw_record_locators = locator_values[: self.max_locator_rows]
+                result_hash = self._hash_rows(rows)
+                parameter_digest = self._parameter_digest(
+                    validated.params, self._identity_hmac_key
+                )
+                query_id = sha256(
+                    json.dumps(
+                        {
+                            "sql": validated.sql,
+                            "filters": validated.bound_filter_names,
+                            "parameter_digest": parameter_digest,
+                            "schema": validated.schema_fingerprint,
+                            "dataset": validated.dataset_id,
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+                return SqlExecutionResult(
+                    query_id=query_id,
+                    normalized_sql=validated.sql,
+                    bound_filter_names=validated.bound_filter_names,
+                    schema_fingerprint=validated.schema_fingerprint,
+                    dataset_id=validated.dataset_id,
+                    is_synthetic=validated.is_synthetic,
+                    effective_start_date=validated.effective_start_date,
+                    effective_end_date=validated.effective_end_date,
+                    aggregation_grain=validated.aggregation_grain,
+                    time_grain=validated.time_grain,
+                    metric_names=validated.metric_names,
+                    rows=rows,
+                    row_count=len(rows),
+                    result_hash=result_hash,
+                    parameter_digest=parameter_digest,
+                    raw_record_locators=raw_record_locators,
+                    raw_record_locators_truncated=truncated,
+                    estimated_scan_rows=estimated_scan_rows,
+                    execution_ms=(monotonic() - started) * 1000,
+                    max_execution_time_ms=self.max_execution_time_ms,
+                    client_timeout_ms=self.client_timeout_ms,
+                )
+            except SqlExecutionError:
+                raise
+            except DBAPIError as error:
+                raise self._classified_database_error(error) from error
+            except SQLAlchemyError as error:
+                raise SqlExecutionError("read-only SQL execution failed") from error
             finally:
-                driver._read_timeout = previous_read_timeout
-                if getattr(driver, "_sock", None) is not None:
-                    driver._sock.settimeout(previous_socket_timeout)
+                if previous_session_state is not None:
+                    try:
+                        connection.exec_driver_sql("ROLLBACK")
+                        connection.execute(
+                            text("SET SESSION max_execution_time = :previous_timeout_ms"),
+                            {"previous_timeout_ms": previous_session_state[0]},
+                        )
+                        connection.exec_driver_sql(
+                            "SET SESSION TRANSACTION READ ONLY"
+                            if previous_session_state[1]
+                            else "SET SESSION TRANSACTION READ WRITE"
+                        )
+                        connection.rollback()
+                    except SQLAlchemyError:
+                        connection.invalidate()
+        finally:
+            driver._read_timeout = previous_read_timeout
+            try:
+                socket.settimeout(previous_socket_timeout)
+            except OSError:
+                connection.invalidate()
 
     @staticmethod
     def _estimated_rows(rows: list[dict[str, Any]]) -> int:
@@ -287,14 +309,22 @@ class ReadOnlySqlExecutor:
         ).hexdigest()
 
     @classmethod
-    def _parameter_digest(cls, params: Mapping[str, object]) -> str:
+    def _parameter_digest(
+        cls, params: Mapping[str, object], identity_hmac_key: bytes
+    ) -> str:
+        if type(identity_hmac_key) is not bytes or not identity_hmac_key:
+            raise SqlIdentityConfigurationError(
+                "a nonempty runtime identity HMAC key is required"
+            )
         canonical = [
             {"name": name, "value": cls._canonical_parameter(value)}
             for name, value in sorted(params.items())
         ]
-        return sha256(
-            json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        ).hexdigest()
+        payload = (
+            b"trade-agent/sql-query-identity/parameters/v1\x00"
+            + json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        )
+        return hmac.digest(identity_hmac_key, payload, "sha256").hex()
 
     @staticmethod
     def _canonical_parameter(value: object) -> dict[str, object]:
@@ -316,6 +346,18 @@ class ReadOnlySqlExecutor:
         if isinstance(value, (Decimal, date, datetime)):
             return value.isoformat() if hasattr(value, "isoformat") else str(value)
         raise TypeError(f"unsupported SQL result value: {type(value).__name__}")
+
+    @classmethod
+    def _classified_database_error(cls, error: DBAPIError) -> SqlExecutionError:
+        code = cls._mysql_error_code(error)
+        message = str(error.orig).lower()
+        if code in {1317, 3024} or (
+            code == 2013 and ("timed out" in message or "timeout" in message)
+        ):
+            return SqlExecutionTimeout("read-only SQL operation exceeded its execution timeout")
+        if code in {2002, 2003, 2006, 2013}:
+            return SqlTransportError("database transport failed during read-only SQL execution")
+        return SqlExecutionError("read-only SQL execution failed")
 
     @staticmethod
     def _mysql_error_code(error: DBAPIError) -> int | None:

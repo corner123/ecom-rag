@@ -14,6 +14,7 @@ from sqlglot import exp
 from sqlglot.errors import ParseError
 
 from trade_agent.db.registry import RegistrySnapshot
+from trade_agent.db.sql_planner import SqlQueryPlan
 from trade_agent.db.sql_renderer import (
     ProjectionExpression,
     ProjectionItem,
@@ -22,6 +23,7 @@ from trade_agent.db.sql_renderer import (
     SemanticProjectionManifest,
     SqlDataScope,
     SqlParameter,
+    SqlRenderRejected,
     build_projection_manifest,
 )
 
@@ -89,10 +91,13 @@ class SqlValidator:
             raise SqlAstRejected("SQL lacks a plan-derived projection manifest")
         if rendered.plan.schema_fingerprint != registry.fingerprint:
             raise SqlPolicyDenied("plan schema fingerprint does not match the reviewed registry")
-        expected_manifest = build_projection_manifest(rendered.plan)
+        try:
+            expected_manifest = build_projection_manifest(rendered.plan)
+        except SqlRenderRejected as error:
+            raise SqlAstRejected("projection aggregate manifest is not reviewed") from error
         if rendered.projection_manifest != expected_manifest:
             raise SqlAstRejected("projection manifest diverges from the typed SQL plan")
-        self._validate_manifest_semantics(expected_manifest, registry)
+        self._validate_manifest_semantics(expected_manifest, rendered.plan, registry)
         if (
             rendered.effective_start_date is None
             or rendered.effective_end_date is None
@@ -126,13 +131,28 @@ class SqlValidator:
         if actual_projections != expected_manifest.projections:
             raise SqlAstRejected("SQL projection diverges from the typed plan manifest")
         self._validate_where(tree, registry, alias_to_table, rendered.params)
-        self._validate_group_order(tree, alias_to_table, expected_manifest)
+        actual_groups, actual_orders = self._validate_group_order(
+            tree, alias_to_table, expected_manifest
+        )
+        actual_time_grain = self._derive_time_grain(
+            actual_projections, actual_groups, registry
+        )
+        if actual_time_grain != expected_manifest.time_grain:
+            raise SqlAstRejected("SQL time grain diverges from the accepted time expression")
+        accepted_manifest = SemanticProjectionManifest(
+            projections=actual_projections,
+            group_by=actual_groups,
+            order_by=actual_orders,
+            time_grain=actual_time_grain,
+        )
         limit = self._validate_limit(tree, registry)
         self._validate_parameters(tree, rendered.params)
         self._validate_policy(tree, rendered.params, alias_to_table)
         self._validate_effective_time(tree, rendered, alias_to_table)
-        aggregation_grain = self._aggregation_grain(expected_manifest)
-        metric_names = tuple(item.alias for item in expected_manifest.projections if item.operation is not None)
+        aggregation_grain = self._aggregation_grain(accepted_manifest)
+        metric_names = tuple(
+            item.alias for item in accepted_manifest.projections if item.operation is not None
+        )
 
         return ValidatedSql(
             sql=tree.sql(dialect="mysql", pretty=False),
@@ -143,9 +163,9 @@ class SqlValidator:
             effective_start_date=rendered.effective_start_date,
             effective_end_date=rendered.effective_end_date,
             aggregation_grain=aggregation_grain,
-            time_grain=expected_manifest.time_grain,
+            time_grain=accepted_manifest.time_grain,
             metric_names=metric_names,
-            projection_aliases=tuple(item.alias for item in expected_manifest.projections),
+            projection_aliases=tuple(item.alias for item in accepted_manifest.projections),
             bound_filter_names=tuple(sorted(rendered.params)),
             limit=limit,
         )
@@ -303,7 +323,7 @@ class SqlValidator:
         tree: exp.Select,
         alias_to_table: dict[str, str],
         manifest: SemanticProjectionManifest,
-    ) -> None:
+    ) -> tuple[tuple[ProjectionExpression, ...], tuple[ProjectionOrder, ...]]:
         group = tree.args.get("group")
         actual_groups: list[ProjectionExpression] = []
         for expression in group.expressions if group is not None else ():
@@ -329,6 +349,7 @@ class SqlValidator:
             )
         if tuple(actual_orders) != manifest.order_by:
             raise SqlAstRejected("ORDER BY diverges from the typed plan projection manifest")
+        return tuple(actual_groups), tuple(actual_orders)
 
     @staticmethod
     def _validate_limit(tree: exp.Select, registry: RegistrySnapshot) -> int:
@@ -472,10 +493,16 @@ class SqlValidator:
             transform=transform,
         )
 
-    @staticmethod
+    @classmethod
     def _validate_manifest_semantics(
-        manifest: SemanticProjectionManifest, registry: RegistrySnapshot
+        cls,
+        manifest: SemanticProjectionManifest,
+        plan: SqlQueryPlan,
+        registry: RegistrySnapshot,
     ) -> None:
+        metrics = tuple(item for item in manifest.projections if item.operation is not None)
+        if len(metrics) != 1 or len(plan.aggregations) != 1:
+            raise SqlAstRejected("projection requires exactly one reviewed aggregate")
         dimensions = tuple(
             ProjectionExpression(**item.model_dump(exclude={"alias", "operation"}))
             for item in manifest.projections
@@ -483,14 +510,17 @@ class SqlValidator:
         )
         if dimensions != manifest.group_by:
             raise SqlAstRejected("all and only projected dimensions must define aggregation grain")
+        definition = registry.aggregations.get(metrics[0].alias)
+        if definition is None:
+            raise SqlAstRejected("projection metric is not registered")
+        for item in (projection for projection in manifest.projections if projection.operation is None):
+            expected_alias = cls._reviewed_dimension_alias(item, plan, registry, definition)
+            if item.alias != expected_alias:
+                raise SqlAstRejected("dimension semantic name and output alias do not match")
         grouped_physical = {f"{item.table}.{item.column}" for item in manifest.group_by}
-        for metric in (item for item in manifest.projections if item.operation is not None):
-            definition = registry.aggregations.get(metric.alias)
-            if definition is None:
-                raise SqlAstRejected("projection metric is not registered")
-            for key in ("currency_column", "unit_column"):
-                if key in definition and str(definition[key]) not in grouped_physical:
-                    raise SqlAstRejected("projection omits the registered metric unit or currency grain")
+        for key in ("currency_column", "unit_column"):
+            if key in definition and str(definition[key]) not in grouped_physical:
+                raise SqlAstRejected("projection omits the registered metric unit or currency grain")
         time_items = [
             item for item in manifest.group_by if f"{item.table}.{item.column}" == "trade_records.trade_date"
         ]
@@ -502,6 +532,73 @@ class SqlValidator:
                 raise SqlAstRejected("daily time grain requires one trade-date dimension")
         elif any(item.transform == "month" for item in manifest.group_by):
             raise SqlAstRejected("total time grain cannot contain a month transform")
+
+    @staticmethod
+    def _reviewed_dimension_alias(
+        item: ProjectionItem,
+        plan: SqlQueryPlan,
+        registry: RegistrySnapshot,
+        aggregate_definition: Mapping[str, object],
+    ) -> str:
+        physical = f"{item.table}.{item.column}"
+        if physical == aggregate_definition.get("currency_column"):
+            return "currency"
+        if physical == aggregate_definition.get("unit_column"):
+            return "unit"
+        if physical == registry.dimensions.get("time"):
+            return "trade_date"
+
+        candidates = {
+            name
+            for name, registered in registry.dimensions.items()
+            if registered == physical and name != "time"
+        }
+        roles: set[str] = set()
+        joins_by_name = {join.name: join for join in registry.joins}
+        for planned_join in plan.joins:
+            endpoint_aliases = {
+                planned_join.left.split(".", maxsplit=1)[0],
+                planned_join.right.split(".", maxsplit=1)[0],
+            }
+            if item.table_alias in endpoint_aliases:
+                registered_join = joins_by_name.get(planned_join.name)
+                if registered_join is not None:
+                    roles.update(registered_join.roles)
+        role_matches = candidates & roles
+        if len(role_matches) == 1:
+            return next(iter(role_matches))
+        if len(candidates) == 1:
+            return next(iter(candidates))
+        raise SqlAstRejected("dimension has no unique reviewed semantic alias")
+
+    @staticmethod
+    def _derive_time_grain(
+        projections: tuple[ProjectionItem, ...],
+        groups: tuple[ProjectionExpression, ...],
+        registry: RegistrySnapshot,
+    ) -> Literal["total", "day", "month"]:
+        time_column = registry.dimensions.get("time")
+        if time_column is None:
+            raise SqlAstRejected("registry has no reviewed time dimension")
+        time_projections = tuple(
+            item
+            for item in projections
+            if item.operation is None and f"{item.table}.{item.column}" == time_column
+        )
+        time_groups = tuple(item for item in groups if f"{item.table}.{item.column}" == time_column)
+        if not time_projections and not time_groups:
+            return "total"
+        if (
+            len(time_projections) != 1
+            or len(time_groups) != 1
+            or time_projections[0].alias != "trade_date"
+            or ProjectionExpression(
+                **time_projections[0].model_dump(exclude={"alias", "operation"})
+            )
+            != time_groups[0]
+        ):
+            raise SqlAstRejected("time projection and group require one reviewed trade_date alias")
+        return "month" if time_projections[0].transform == "month" else "day"
 
     @staticmethod
     def _aggregation_grain(manifest: SemanticProjectionManifest) -> tuple[str, ...]:

@@ -271,6 +271,12 @@ def build_projection_manifest(plan: SqlQueryPlan) -> SemanticProjectionManifest:
 
     if type(plan) is not SqlQueryPlan:
         raise TypeError("projection manifest requires an exact SqlQueryPlan")
+    if len(plan.aggregations) != 1:
+        raise SqlRenderRejected("SQL plans require exactly one reviewed aggregate")
+    aggregation = plan.aggregations[0]
+    metric_columns = tuple(column for column in plan.columns if column.alias == aggregation.metric)
+    if len(metric_columns) != 1 or metric_columns[0].expression != aggregation.column:
+        raise SqlRenderRejected("aggregate projection must match its reviewed plan column")
     alias_to_table = {table.alias: table.table for table in plan.tables}
 
     def expression(value: str, *, transform: Literal["identity", "month"] = "identity") -> ProjectionExpression:

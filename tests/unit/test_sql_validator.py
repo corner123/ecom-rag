@@ -8,7 +8,7 @@ import pytest
 
 from trade_agent.agents.intent import IntentParser
 from trade_agent.db.registry import RegistryJoin, RegistrySnapshot
-from trade_agent.db.sql_planner import SqlPlanner
+from trade_agent.db.sql_planner import SelectColumn, SqlPlanner
 from trade_agent.db.sql_renderer import RenderedSql, SqlDataScope, SqlRenderer
 from trade_agent.db.sql_validator import SqlAstRejected, SqlPolicyDenied, SqlValidator
 
@@ -276,3 +276,94 @@ def test_missing_date_parameter_is_a_typed_rejection_not_key_error(
     params.pop("filter_2_start")
     with pytest.raises(SqlAstRejected, match="parameters"):
         SqlValidator(scope=scope).validate(rendered.model_copy(update={"params": params}), registry)
+
+
+def test_validator_rejects_plan_that_swaps_reviewed_dimension_aliases(
+    registry: RegistrySnapshot, rendered: RenderedSql, scope: SqlDataScope
+) -> None:
+    assert rendered.plan is not None
+    columns = tuple(
+        column.model_copy(
+            update={
+                "alias": {
+                    "importer_company": "currency",
+                    "currency": "importer_company",
+                }.get(column.alias, column.alias)
+            }
+        )
+        for column in rendered.plan.columns
+    )
+    candidate = SqlRenderer(scope=scope).render(rendered.plan.model_copy(update={"columns": columns}))
+
+    with pytest.raises(SqlAstRejected, match="semantic|alias|dimension"):
+        SqlValidator(scope=scope).validate(candidate, registry)
+
+
+def test_validator_rejects_total_grain_that_projects_raw_trade_date(
+    registry: RegistrySnapshot, rendered: RenderedSql, scope: SqlDataScope
+) -> None:
+    assert rendered.plan is not None
+    plan = rendered.plan.model_copy(
+        update={
+            "columns": (
+                SelectColumn(expression="tr.trade_date", alias="trade_date"),
+                *rendered.plan.columns,
+            ),
+            "group_by": ("tr.trade_date", *rendered.plan.group_by),
+            "time_grain": "total",
+        }
+    )
+    candidate = SqlRenderer(scope=scope).render(plan)
+
+    with pytest.raises(SqlAstRejected, match="time|total"):
+        SqlValidator(scope=scope).validate(candidate, registry)
+
+
+def test_validator_rejects_month_grain_with_unreviewed_time_alias(
+    registry: RegistrySnapshot, rendered: RenderedSql, scope: SqlDataScope
+) -> None:
+    assert rendered.plan is not None
+    plan = rendered.plan.model_copy(
+        update={
+            "columns": (
+                SelectColumn(expression="tr.trade_date", alias="calendar_month"),
+                *rendered.plan.columns,
+            ),
+            "group_by": ("tr.trade_date", *rendered.plan.group_by),
+            "time_grain": "month",
+        }
+    )
+    candidate = SqlRenderer(scope=scope).render(plan)
+
+    with pytest.raises(SqlAstRejected, match="time|alias|dimension"):
+        SqlValidator(scope=scope).validate(candidate, registry)
+
+
+def test_renderer_rejects_plan_without_the_one_required_aggregate(
+    rendered: RenderedSql, scope: SqlDataScope
+) -> None:
+    assert rendered.plan is not None
+    plan = rendered.plan.model_copy(
+        update={
+            "columns": tuple(
+                column for column in rendered.plan.columns if column.alias != "trade_amount"
+            ),
+            "aggregations": (),
+            "order_by": (),
+        }
+    )
+
+    with pytest.raises(ValueError, match="aggregate"):
+        SqlRenderer(scope=scope).render(plan)
+
+
+def test_validator_returns_typed_ast_rejection_for_forged_zero_aggregate_plan(
+    registry: RegistrySnapshot, rendered: RenderedSql, scope: SqlDataScope
+) -> None:
+    assert rendered.plan is not None
+    forged_plan = rendered.plan.model_copy(update={"aggregations": ()})
+
+    with pytest.raises(SqlAstRejected, match="aggregate"):
+        SqlValidator(scope=scope).validate(
+            rendered.model_copy(update={"plan": forged_plan}), registry
+        )

@@ -21,6 +21,11 @@ from trade_agent.evidence.sql import build_sql_evidence
 pytestmark = pytest.mark.integration
 
 
+@pytest.fixture
+def identity_hmac_key() -> bytes:
+    return bytes(range(32))
+
+
 def _scope() -> SqlDataScope:
     return SqlDataScope(
         dataset_id="synthetic-demo-v1",
@@ -30,7 +35,9 @@ def _scope() -> SqlDataScope:
     )
 
 
-def test_approved_aggregate_returns_independently_checked_decimals_and_replayable_evidence() -> None:
+def test_approved_aggregate_returns_independently_checked_decimals_and_replayable_evidence(
+    identity_hmac_key: bytes,
+) -> None:
     engine = create_engine(database_url_from_environment(role="query"), pool_pre_ping=True)
     try:
         with engine.connect() as connection:
@@ -39,7 +46,12 @@ def test_approved_aggregate_returns_independently_checked_decimals_and_replayabl
             plan = SqlPlanner().plan(intent, registry)
             rendered = SqlRenderer(scope=_scope()).render(plan)
             validated = SqlValidator(scope=_scope()).validate(rendered, registry)
-            result = ReadOnlySqlExecutor(connection, max_execution_time_ms=2_000, max_scan_rows=5_000).execute(validated)
+            result = ReadOnlySqlExecutor(
+                connection,
+                identity_hmac_key=identity_hmac_key,
+                max_execution_time_ms=2_000,
+                max_scan_rows=5_000,
+            ).execute(validated)
             assert connection.scalar(text("SELECT @@session.max_execution_time")) == 0
             assert connection.connection.driver_connection._read_timeout is None
 
@@ -75,12 +87,15 @@ def test_approved_aggregate_returns_independently_checked_decimals_and_replayabl
         assert evidence[0].is_synthetic is True
         provenance_dump = evidence[0].sql_provenance.model_dump()
         assert "params" not in provenance_dump
+        assert "parameter_digest" not in provenance_dump
         assert "raw_record_id" not in evidence[0].content
     finally:
         engine.dispose()
 
 
-def test_monthly_quantity_uses_decimal_and_matches_independent_seed_calculation() -> None:
+def test_monthly_quantity_uses_decimal_and_matches_independent_seed_calculation(
+    identity_hmac_key: bytes,
+) -> None:
     engine = create_engine(database_url_from_environment(role="query"), pool_pre_ping=True)
     try:
         with engine.connect() as connection:
@@ -90,7 +105,12 @@ def test_monthly_quantity_uses_decimal_and_matches_independent_seed_calculation(
             )
             rendered = SqlRenderer(scope=_scope()).render(plan)
             validated = SqlValidator(scope=_scope()).validate(rendered, registry)
-            result = ReadOnlySqlExecutor(connection, max_execution_time_ms=2_000, max_scan_rows=5_000).execute(validated)
+            result = ReadOnlySqlExecutor(
+                connection,
+                identity_hmac_key=identity_hmac_key,
+                max_execution_time_ms=2_000,
+                max_scan_rows=5_000,
+            ).execute(validated)
 
         expected: dict[tuple[str, str], Decimal] = {}
         for record in generate_trade_seed().trade_records:
@@ -117,7 +137,7 @@ def test_query_user_cannot_write() -> None:
         engine.dispose()
 
 
-def test_explain_scan_budget_fails_closed() -> None:
+def test_explain_scan_budget_fails_closed(identity_hmac_key: bytes) -> None:
     engine = create_engine(database_url_from_environment(role="query"))
     try:
         with engine.connect() as connection:
@@ -129,24 +149,33 @@ def test_explain_scan_budget_fails_closed() -> None:
             )
             validated = SqlValidator(scope=_scope()).validate(SqlRenderer(scope=_scope()).render(plan), registry)
             with pytest.raises(SqlScanBudgetExceeded):
-                ReadOnlySqlExecutor(connection, max_execution_time_ms=2_000, max_scan_rows=1).execute(validated)
+                ReadOnlySqlExecutor(
+                    connection,
+                    identity_hmac_key=identity_hmac_key,
+                    max_execution_time_ms=2_000,
+                    max_scan_rows=1,
+                ).execute(validated)
             assert connection.scalar(text("SELECT @@SESSION.max_execution_time")) == 37
             assert connection.scalar(text("SELECT @@SESSION.transaction_read_only")) == original_transaction_read_only
     finally:
         engine.dispose()
 
 
-def test_executor_rejects_a_disabled_client_timeout() -> None:
+def test_executor_rejects_a_disabled_client_timeout(identity_hmac_key: bytes) -> None:
     engine = create_engine(database_url_from_environment(role="query"))
     try:
         with engine.connect() as connection:
             with pytest.raises(ValueError, match="client_timeout_ms"):
-                ReadOnlySqlExecutor(connection, client_timeout_ms=0)
+                ReadOnlySqlExecutor(
+                    connection, identity_hmac_key=identity_hmac_key, client_timeout_ms=0
+                )
     finally:
         engine.dispose()
 
 
-def test_query_identity_uses_a_private_type_aware_parameter_digest_even_for_empty_results() -> None:
+def test_query_identity_uses_a_private_type_aware_parameter_digest_even_for_empty_results(
+    identity_hmac_key: bytes,
+) -> None:
     engine = create_engine(database_url_from_environment(role="query"), pool_pre_ping=True)
     try:
         with engine.connect() as connection:
@@ -167,7 +196,12 @@ def test_query_identity_uses_a_private_type_aware_parameter_digest_even_for_empt
                 )
             )
             validator = SqlValidator(scope=_scope())
-            executor = ReadOnlySqlExecutor(connection, max_execution_time_ms=2_000, max_scan_rows=5_000)
+            executor = ReadOnlySqlExecutor(
+                connection,
+                identity_hmac_key=identity_hmac_key,
+                max_execution_time_ms=2_000,
+                max_scan_rows=5_000,
+            )
             first_result = executor.execute(validator.validate(first, registry))
             second_result = executor.execute(validator.validate(second, registry))
 
