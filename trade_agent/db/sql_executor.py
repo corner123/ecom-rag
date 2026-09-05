@@ -75,7 +75,6 @@ class SqlExecutionResult(BaseModel):
     rows: tuple[dict[str, Any], ...]
     row_count: int = Field(ge=0)
     result_hash: str
-    parameter_digest: str
     raw_record_locators: tuple[RawRecordLocator, ...]
     raw_record_locators_truncated: bool
     estimated_scan_rows: int = Field(ge=0)
@@ -190,19 +189,9 @@ class ReadOnlySqlExecutor:
                 parameter_digest = self._parameter_digest(
                     validated.params, self._identity_hmac_key
                 )
-                query_id = sha256(
-                    json.dumps(
-                        {
-                            "sql": validated.sql,
-                            "filters": validated.bound_filter_names,
-                            "parameter_digest": parameter_digest,
-                            "schema": validated.schema_fingerprint,
-                            "dataset": validated.dataset_id,
-                        },
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ).encode("utf-8")
-                ).hexdigest()
+                query_id = self._query_identity(
+                    validated, parameter_digest, self._identity_hmac_key
+                )
                 return SqlExecutionResult(
                     query_id=query_id,
                     normalized_sql=validated.sql,
@@ -218,7 +207,6 @@ class ReadOnlySqlExecutor:
                     rows=rows,
                     row_count=len(rows),
                     result_hash=result_hash,
-                    parameter_digest=parameter_digest,
                     raw_record_locators=raw_record_locators,
                     raw_record_locators_truncated=truncated,
                     estimated_scan_rows=estimated_scan_rows,
@@ -247,13 +235,13 @@ class ReadOnlySqlExecutor:
                         )
                         connection.rollback()
                     except SQLAlchemyError:
-                        connection.invalidate()
+                        self._best_effort_invalidate(connection)
         finally:
             driver._read_timeout = previous_read_timeout
             try:
                 socket.settimeout(previous_socket_timeout)
-            except OSError:
-                connection.invalidate()
+            except Exception:
+                self._best_effort_invalidate(connection)
 
     @staticmethod
     def _estimated_rows(rows: list[dict[str, Any]]) -> int:
@@ -342,6 +330,32 @@ class ReadOnlySqlExecutor:
         raise TypeError(f"unsupported SQL parameter value: {type(value).__name__}")
 
     @staticmethod
+    def _query_identity(
+        validated: ValidatedSql,
+        parameter_digest: str,
+        identity_hmac_key: bytes,
+    ) -> str:
+        if type(identity_hmac_key) is not bytes or not identity_hmac_key:
+            raise SqlIdentityConfigurationError(
+                "a nonempty runtime identity HMAC key is required"
+            )
+        identity = {
+            "sql": validated.sql,
+            "filters": validated.bound_filter_names,
+            "parameter_digest": parameter_digest,
+            "schema": validated.schema_fingerprint,
+            "dataset": validated.dataset_id,
+            "is_synthetic": validated.is_synthetic,
+            "effective_start_date": validated.effective_start_date.isoformat(),
+            "effective_end_date": validated.effective_end_date.isoformat(),
+        }
+        payload = (
+            b"trade-agent/sql-query-identity/final/v1\x00"
+            + json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        )
+        return hmac.digest(identity_hmac_key, payload, "sha256").hex()
+
+    @staticmethod
     def _json_value(value: object) -> str:
         if isinstance(value, (Decimal, date, datetime)):
             return value.isoformat() if hasattr(value, "isoformat") else str(value)
@@ -358,6 +372,16 @@ class ReadOnlySqlExecutor:
         if code in {2002, 2003, 2006, 2013}:
             return SqlTransportError("database transport failed during read-only SQL execution")
         return SqlExecutionError("read-only SQL execution failed")
+
+    @staticmethod
+    def _best_effort_invalidate(connection: Connection) -> None:
+        try:
+            connection.invalidate()
+        except Exception:
+            try:
+                connection.close()
+            except Exception:
+                pass
 
     @staticmethod
     def _mysql_error_code(error: DBAPIError) -> int | None:

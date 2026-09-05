@@ -7,11 +7,12 @@ from unittest.mock import create_autospec
 
 import pytest
 from sqlalchemy import Connection
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 
 from trade_agent.db.sql_executor import (
     ReadOnlySqlExecutor,
     SqlExecutionError,
+    SqlExecutionResult,
     SqlExecutionTimeout,
     SqlTransportError,
 )
@@ -127,6 +128,43 @@ def test_parameter_digest_is_keyed_and_not_the_enumerable_public_sha256(
     assert "secret-value" not in private
 
 
+def test_final_query_identity_has_an_independent_hmac_domain(
+    identity_hmac_key: bytes,
+) -> None:
+    validated = _validated()
+    parameter_digest = ReadOnlySqlExecutor._parameter_digest(
+        validated.params, identity_hmac_key
+    )
+    public_identity_payload = json.dumps(
+        {
+            "sql": validated.sql,
+            "filters": validated.bound_filter_names,
+            "parameter_digest": parameter_digest,
+            "schema": validated.schema_fingerprint,
+            "dataset": validated.dataset_id,
+            "is_synthetic": validated.is_synthetic,
+            "effective_start_date": validated.effective_start_date.isoformat(),
+            "effective_end_date": validated.effective_end_date.isoformat(),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    query_id = ReadOnlySqlExecutor._query_identity(
+        validated, parameter_digest, identity_hmac_key
+    )
+    other_key_query_id = ReadOnlySqlExecutor._query_identity(
+        validated, parameter_digest, bytes(range(1, 33))
+    )
+
+    assert query_id != sha256(public_identity_payload).hexdigest()
+    assert query_id != other_key_query_id
+
+
+def test_public_execution_result_does_not_expose_internal_parameter_digest() -> None:
+    assert "parameter_digest" not in SqlExecutionResult.model_fields
+
+
 def test_executor_requires_a_nonempty_runtime_identity_hmac_key() -> None:
     connection = create_autospec(Connection, instance=True)
 
@@ -201,6 +239,8 @@ def test_closed_socket_during_restore_does_not_mask_typed_transport_error(
         2006, "server has gone away"
     )
     socket.fail_restore = True
+    connection.invalidate.side_effect = SQLAlchemyError("invalidate also failed")
+    connection.close.side_effect = SQLAlchemyError("close also failed")
 
     with pytest.raises(SqlTransportError):
         ReadOnlySqlExecutor(
@@ -209,3 +249,4 @@ def test_closed_socket_during_restore_does_not_mask_typed_transport_error(
 
     assert driver._read_timeout is None
     connection.invalidate.assert_called_once()
+    connection.close.assert_called_once()

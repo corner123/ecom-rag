@@ -120,6 +120,12 @@ class SqlRenderer:
             raise SqlRenderRejected("trade_records must be the tr base table")
         if "data_scope" in aliases:
             raise SqlRenderRejected("data_scope alias is reserved for policy enforcement")
+        if "data_sources" in aliases.values() or any(
+            join.name == "fk_trade_records_source"
+            or "tr.source_id" in {join.left, join.right}
+            for join in plan.joins
+        ):
+            raise SqlRenderRejected("data-source table and join are reserved for policy enforcement")
 
         manifest = build_projection_manifest(plan)
         selections = [self._projection_sql(item) for item in manifest.projections]

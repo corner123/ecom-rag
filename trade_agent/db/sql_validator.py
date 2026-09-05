@@ -97,6 +97,7 @@ class SqlValidator:
             raise SqlAstRejected("projection aggregate manifest is not reviewed") from error
         if rendered.projection_manifest != expected_manifest:
             raise SqlAstRejected("projection manifest diverges from the typed SQL plan")
+        expected_tables, expected_joins = self._validated_plan_manifests(rendered)
         self._validate_manifest_semantics(expected_manifest, rendered.plan, registry)
         if (
             rendered.effective_start_date is None
@@ -125,8 +126,8 @@ class SqlValidator:
         if any(value is not None and key not in allowed_root_args for key, value in tree.args.items()):
             raise SqlAstRejected("SELECT contains an unreviewed clause")
 
-        alias_to_table = self._validate_tables(tree, rendered, registry)
-        self._validate_joins(tree, rendered, registry, alias_to_table)
+        alias_to_table = self._validate_tables(tree, expected_tables, registry)
+        self._validate_joins(tree, expected_joins, registry, alias_to_table)
         actual_projections = self._validate_select(tree, registry, alias_to_table)
         if actual_projections != expected_manifest.projections:
             raise SqlAstRejected("SQL projection diverges from the typed plan manifest")
@@ -171,8 +172,37 @@ class SqlValidator:
         )
 
     @staticmethod
+    def _validated_plan_manifests(
+        rendered: RenderedSql,
+    ) -> tuple[tuple[tuple[str, str], ...], tuple[tuple[str, str, str], ...]]:
+        if rendered.plan is None:
+            raise SqlAstRejected("SQL lacks a typed plan")
+        if any(
+            table.alias == "data_scope" or table.table == "data_sources"
+            for table in rendered.plan.tables
+        ) or any(
+            join.name == "fk_trade_records_source"
+            or "tr.source_id" in {join.left, join.right}
+            for join in rendered.plan.joins
+        ):
+            raise SqlAstRejected("data-source table and join are reserved for policy enforcement")
+        expected_tables = tuple(
+            (table.alias, table.table) for table in rendered.plan.tables
+        ) + (("data_scope", "data_sources"),)
+        expected_joins = tuple(
+            (join.name, join.left, join.right) for join in rendered.plan.joins
+        ) + (("fk_trade_records_source", "tr.source_id", "data_scope.id"),)
+        if rendered.planned_tables != expected_tables:
+            raise SqlAstRejected("table manifest diverges from the typed SQL plan")
+        if rendered.planned_joins != expected_joins:
+            raise SqlAstRejected("join manifest diverges from the typed SQL plan")
+        return expected_tables, expected_joins
+
+    @staticmethod
     def _validate_tables(
-        tree: exp.Select, rendered: RenderedSql, registry: RegistrySnapshot
+        tree: exp.Select,
+        expected_tables: tuple[tuple[str, str], ...],
+        registry: RegistrySnapshot,
     ) -> dict[str, str]:
         tables = tuple(tree.find_all(exp.Table))
         bindings: list[tuple[str, str]] = []
@@ -184,7 +214,7 @@ class SqlValidator:
             bindings.append((table.alias, table.name))
         if len({alias for alias, _ in bindings}) != len(bindings):
             raise SqlAstRejected("table aliases must be unique")
-        if tuple(bindings) != rendered.planned_tables:
+        if tuple(bindings) != expected_tables:
             raise SqlAstRejected("SQL table bindings diverge from the reviewed plan")
         if not bindings or bindings[0] != ("tr", "trade_records"):
             raise SqlAstRejected("trade_records must be the base table")
@@ -194,7 +224,7 @@ class SqlValidator:
     def _validate_joins(
         cls,
         tree: exp.Select,
-        rendered: RenderedSql,
+        expected_joins: tuple[tuple[str, str, str], ...],
         registry: RegistrySnapshot,
         alias_to_table: dict[str, str],
     ) -> None:
@@ -214,7 +244,7 @@ class SqlValidator:
             actual.append((left, right))
         expected_physical = []
         registry_by_name = {join.name: join for join in registry.joins}
-        for name, left, right in rendered.planned_joins:
+        for name, left, right in expected_joins:
             registered = registry_by_name.get(name)
             if registered is None:
                 raise SqlAstRejected("planned join is not registered")

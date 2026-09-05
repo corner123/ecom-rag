@@ -173,7 +173,7 @@ def test_executor_rejects_a_disabled_client_timeout(identity_hmac_key: bytes) ->
         engine.dispose()
 
 
-def test_query_identity_uses_a_private_type_aware_parameter_digest_even_for_empty_results(
+def test_query_identity_uses_private_keyed_parameters_even_for_empty_results(
     identity_hmac_key: bytes,
 ) -> None:
     engine = create_engine(database_url_from_environment(role="query"), pool_pre_ping=True)
@@ -207,10 +207,10 @@ def test_query_identity_uses_a_private_type_aware_parameter_digest_even_for_empt
 
         assert first_result.rows == second_result.rows == ()
         assert first_result.result_hash == second_result.result_hash
-        assert first_result.parameter_digest != second_result.parameter_digest
         assert first_result.query_id != second_result.query_id
         assert build_sql_evidence(first_result)[0].evidence_id != build_sql_evidence(second_result)[0].evidence_id
-        assert "US" not in first_result.parameter_digest
-        assert "CN" not in second_result.parameter_digest
+        assert not hasattr(first_result, "parameter_digest")
+        assert "US" not in first_result.query_id
+        assert "CN" not in second_result.query_id
     finally:
         engine.dispose()

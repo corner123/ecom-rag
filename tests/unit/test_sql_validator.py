@@ -8,8 +8,13 @@ import pytest
 
 from trade_agent.agents.intent import IntentParser
 from trade_agent.db.registry import RegistryJoin, RegistrySnapshot
-from trade_agent.db.sql_planner import SelectColumn, SqlPlanner
-from trade_agent.db.sql_renderer import RenderedSql, SqlDataScope, SqlRenderer
+from trade_agent.db.sql_planner import PlannedJoin, SelectColumn, SqlPlanner, TableRef
+from trade_agent.db.sql_renderer import (
+    RenderedSql,
+    SqlDataScope,
+    SqlRenderer,
+    SqlRenderRejected,
+)
 from trade_agent.db.sql_validator import SqlAstRejected, SqlPolicyDenied, SqlValidator
 
 
@@ -367,3 +372,103 @@ def test_validator_returns_typed_ast_rejection_for_forged_zero_aggregate_plan(
         SqlValidator(scope=scope).validate(
             rendered.model_copy(update={"plan": forged_plan}), registry
         )
+
+
+def test_validator_rejects_joint_ast_and_join_manifest_role_swap(
+    registry: RegistrySnapshot, rendered: RenderedSql, scope: SqlDataScope
+) -> None:
+    sql = rendered.sql.replace(
+        "tr.importer_id = importer.id", "tr.exporter_id = importer.id"
+    )
+    assert sql != rendered.sql
+    planned_joins = tuple(
+        (
+            ("fk_trade_records_exporter", "tr.exporter_id", "importer.id")
+            if name == "fk_trade_records_importer"
+            else (name, left, right)
+        )
+        for name, left, right in rendered.planned_joins
+    )
+
+    with pytest.raises(SqlAstRejected, match="plan|join"):
+        SqlValidator(scope=scope).validate(
+            rendered.model_copy(update={"sql": sql, "planned_joins": planned_joins}),
+            registry,
+        )
+
+
+def test_validator_rejects_joint_policy_alias_manifest_rewrite(
+    registry: RegistrySnapshot, rendered: RenderedSql, scope: SqlDataScope
+) -> None:
+    sql = rendered.sql.replace("data_scope", "forged_scope")
+    planned_tables = tuple(
+        ("forged_scope", table) if alias == "data_scope" else (alias, table)
+        for alias, table in rendered.planned_tables
+    )
+    planned_joins = tuple(
+        (name, left, right.replace("data_scope", "forged_scope"))
+        for name, left, right in rendered.planned_joins
+    )
+
+    with pytest.raises(SqlAstRejected, match="plan|policy|table|join"):
+        SqlValidator(scope=scope).validate(
+            rendered.model_copy(
+                update={
+                    "sql": sql,
+                    "planned_tables": planned_tables,
+                    "planned_joins": planned_joins,
+                }
+            ),
+            registry,
+        )
+
+
+def test_validator_rejects_extra_policy_table_and_join_even_when_manifest_matches(
+    registry: RegistrySnapshot, rendered: RenderedSql, scope: SqlDataScope
+) -> None:
+    sql = rendered.sql.replace(
+        " WHERE ",
+        " JOIN data_sources AS extra_scope ON tr.source_id = extra_scope.id WHERE ",
+    )
+    planned_tables = (*rendered.planned_tables, ("extra_scope", "data_sources"))
+    planned_joins = (
+        *rendered.planned_joins,
+        ("fk_trade_records_source", "tr.source_id", "extra_scope.id"),
+    )
+
+    with pytest.raises(SqlAstRejected, match="plan|policy|table|join"):
+        SqlValidator(scope=scope).validate(
+            rendered.model_copy(
+                update={
+                    "sql": sql,
+                    "planned_tables": planned_tables,
+                    "planned_joins": planned_joins,
+                }
+            ),
+            registry,
+        )
+
+
+def test_policy_table_and_join_cannot_be_smuggled_through_the_typed_plan(
+    registry: RegistrySnapshot, rendered: RenderedSql, scope: SqlDataScope
+) -> None:
+    assert rendered.plan is not None
+    forged_plan = rendered.plan.model_copy(
+        update={
+            "tables": (
+                *rendered.plan.tables,
+                TableRef(table="data_sources", alias="extra_scope"),
+            ),
+            "joins": (
+                *rendered.plan.joins,
+                PlannedJoin(
+                    name="fk_trade_records_source",
+                    left="tr.source_id",
+                    right="extra_scope.id",
+                ),
+            ),
+        }
+    )
+    with pytest.raises((SqlRenderRejected, SqlAstRejected), match="policy|table|join"):
+        candidate = SqlRenderer(scope=scope).render(forged_plan)
+        SqlValidator(scope=scope).validate(candidate, registry)
