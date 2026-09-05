@@ -306,7 +306,7 @@ class IngestionPipeline:
                     file_type=file_type,
                     source_type=candidate.rule.source_type,
                     source_id=source_id,
-                    title=record.get("expected_entity", candidate.relative_path),
+                    title=candidate.relative_path,
                     language="en",
                     fetched_at=datetime.fromisoformat(record["ingested_at"]),
                     is_synthetic=record["is_synthetic"],

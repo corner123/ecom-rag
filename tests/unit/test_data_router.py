@@ -29,7 +29,7 @@ def source(path, file_type, source_type, **extra):
     )
 
 
-def test_routes_checked_in_item_boundaries_and_preserves_claims():
+def test_routes_checked_in_item_boundaries_without_evaluation_labels():
     from trade_agent.data.router import DocumentRouter
 
     router = DocumentRouter()
@@ -39,13 +39,69 @@ def test_routes_checked_in_item_boundaries_and_preserves_claims():
     profiles = [router.load(source(f"customs_profiles/{p.name}", FileType.GENERATED_PROFILE, SourceType.CUSTOMS_PROFILE))[0]
                 for p in sorted((ROOT / "customs_profiles").glob("*.json"))]
     assert len(b2b) == 18
-    assert b2b[0].attributes["reference_claim_id"] == "CLAIM-B2B-001"
+    assert "reference_claim_id" not in b2b[0].attributes
+    assert "reference_claim_id" not in b2b[0].attributes["source_payload"]
+    assert "claim_id" not in b2b[0].units[0]["locator"]["raw"]
+    assert "manifest_claim_ids" not in b2b[0].units[0]["locator"]["raw"]
+    assert "CLAIM-B2B" not in json.dumps(b2b[0].model_dump(mode="json"))
     assert len(news) == 16
     assert news[12].attributes["canonical_story_id"] == "NEWS-001"
     assert len(social) == 12
     assert social[0].units[0]["locator"]["post_id"] == "POST-001"
     assert len(profiles) == 54
     assert profiles[0].attributes["aggregation_info"]["aggregation_grain"] == "company_country_hs_calendar_month"
+
+
+def test_b2b_news_and_social_reference_claim_id_is_optional_and_never_indexed(tmp_path):
+    from trade_agent.data.router import DocumentRouter
+
+    fixtures = (
+        (
+            "products.json",
+            FileType.JSON,
+            SourceType.B2B,
+            {"products": [{
+                "product_id": "P-1", "product_name": "Pump", "sku": "PUMP-1",
+                "supplier": "Maker", "hs_code": "841370", "url": "https://marketplace.example/p-1",
+                "reference_answer": "evaluation-only", "extra_evidence": {"minimum_order": 5, "gold_label": "yes"},
+            }]},
+        ),
+        (
+            "stories.json",
+            FileType.JSON,
+            SourceType.INDUSTRY_NEWS,
+            {"stories": [{
+                "id": "N-1", "headline": "Expansion", "body": "A new line opened.",
+                "entity": "Maker", "publisher": "News", "canonical_story_id": "N-1",
+                "dedupe_cluster_id": "N-1", "url": "https://news.example/n-1",
+                "published_at": NOW.isoformat(),
+            }]},
+        ),
+    )
+    for name, file_type, source_type, payload in fixtures:
+        path = tmp_path / name
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        inp = source("b2b/products.json", file_type, source_type).model_copy(update={"path": path})
+        documents = DocumentRouter().load(inp)
+        assert len(documents) == 1
+        serialized = json.dumps(documents[0].model_dump(mode="json"))
+        assert "reference_claim" not in serialized
+        assert "evaluation-only" not in serialized
+        assert "gold_label" not in serialized
+        if source_type is SourceType.B2B:
+            assert "minimum_order" in serialized
+
+    social_path = tmp_path / "posts.jsonl"
+    social_path.write_text(json.dumps({
+        "post_id": "S-1", "text": "Factory line opened.", "company": "Maker",
+        "url": "https://social.example/s-1", "published_at": NOW.isoformat(),
+    }), encoding="utf-8")
+    social_input = source("social/posts.jsonl", FileType.JSONL, SourceType.SOCIAL).model_copy(
+        update={"path": social_path}
+    )
+    documents = DocumentRouter().load(social_input)
+    assert len(documents) == 1
+    assert "reference_claim" not in json.dumps(documents[0].model_dump(mode="json"))
 
 
 def test_html_and_markdown_use_heading_sections():
@@ -557,7 +613,7 @@ def test_item_and_feed_urls_and_all_provenance_survive_documents_and_chunks():
     assert raw["item_canonical_url"] == "https://newsroom.example/story/001"
     assert raw["story_id"] == "NEWS-013"
     assert raw["canonical_story_id"] == "NEWS-001"
-    assert raw["claim_id"] == "CLAIM-NEWS-013"
+    assert "claim_id" not in raw
     assert raw["dedupe_cluster_id"] == "NEWS-CLUSTER-001"
     chunk = ChunkRouter().chunk(mirror)[0]
     assert chunk.metadata.source_locator.raw == raw
@@ -733,7 +789,7 @@ def test_b2b_short_identifiers_are_not_suppressed_by_narrative_substrings(tmp_pa
     assert content.count("Pump") == 1
 
 
-def test_b2b_without_narrative_preserves_full_canonical_json_fallback(tmp_path):
+def test_b2b_without_narrative_preserves_facts_but_removes_evaluation_labels(tmp_path):
     from trade_agent.data.router import DocumentRouter
 
     item = {
@@ -745,7 +801,8 @@ def test_b2b_without_narrative_preserves_full_canonical_json_fallback(tmp_path):
     path.write_text(json.dumps({"products": [item]}), encoding="utf-8")
     inp = source("b2b/products.json", FileType.JSON, SourceType.B2B).model_copy(update={"path": path})
     document = DocumentRouter().load(inp)[0]
-    assert document.content == json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    expected = {key: value for key, value in item.items() if key != "reference_claim_id"}
+    assert document.content == json.dumps(expected, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 @pytest.mark.parametrize("kind", ["b2b", "news", "social"])

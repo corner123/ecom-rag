@@ -3,11 +3,10 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
-from hashlib import sha256
 import json
 
 from trade_agent.db.sql_executor import SqlExecutionResult
-from trade_agent.evidence.models import Evidence, EvidenceLocator, SqlProvenance
+from trade_agent.evidence.models import Evidence, EvidenceLocator, SqlProvenance, sql_evidence_id
 
 
 def build_sql_evidence(result: SqlExecutionResult) -> list[Evidence]:
@@ -20,9 +19,12 @@ def build_sql_evidence(result: SqlExecutionResult) -> list[Evidence]:
         separators=(",", ":"),
         ensure_ascii=False,
     )
-    evidence_id = "sql_" + sha256(
-        f"{result.dataset_id}:{result.schema_fingerprint}:{result.query_id}:{result.result_hash}".encode("utf-8")
-    ).hexdigest()
+    evidence_id = sql_evidence_id(
+        dataset_id=result.dataset_id,
+        schema_fingerprint=result.schema_fingerprint,
+        query_id=result.query_id,
+        result_hash=result.result_hash,
+    )
     provenance = SqlProvenance(
         query_id=result.query_id,
         normalized_sql=result.normalized_sql,
@@ -46,6 +48,7 @@ def build_sql_evidence(result: SqlExecutionResult) -> list[Evidence]:
             evidence_id=evidence_id,
             fact_type=result.metric_names[0] if len(result.metric_names) == 1 else "trade_aggregate",
             source_type="sql",
+            source_id=result.dataset_id,
             source_weight=1.0,
             content=content,
             locator=EvidenceLocator(
@@ -55,11 +58,26 @@ def build_sql_evidence(result: SqlExecutionResult) -> list[Evidence]:
             ),
             valid_from=result.effective_start_date,
             valid_to=result.effective_end_date,
+            time_grain=result.time_grain,
+            currencies=_row_dimensions(result.rows, "currency"),
+            units=_row_dimensions(result.rows, "unit"),
+            aggregation_grain=result.aggregation_grain,
             confidence=1.0,
+            confidence_basis="validated_query_execution",
             is_synthetic=result.is_synthetic,
+            retrieval_provenance=None,
             sql_provenance=provenance,
         )
     ]
+
+
+def _row_dimensions(rows: tuple[dict[str, object], ...], field: str) -> tuple[str, ...]:
+    values = {row[field] for row in rows if row.get(field) is not None}
+    if any(not isinstance(value, str) or not value.strip() for value in values):
+        raise ValueError(f"SQL {field} values must be nonblank strings")
+    return tuple(sorted(values))
+
+
 def _json_value(value: object) -> str:
     if isinstance(value, Decimal):
         return str(value)

@@ -97,6 +97,28 @@ _SYSTEM_ATTRIBUTE_KEYS = {
     "valid_from", "valid_to", "license_scope", "aggregation_info", "ocr_confidence",
     "source_payload",
 }
+_EVALUATION_ONLY_KEYS = frozenset({
+    "claim_id", "claim_ids", "reference_claim_id", "reference_claim_ids", "manifest_claim_ids",
+    "gold_answer", "reference_answer", "expected_answer",
+    "gold_label", "reference_label", "expected_label",
+    "ground_truth", "ground_truth_answer", "ground_truth_label",
+    "target_answer", "target_label", "answer_key", "label", "labels",
+    "expected_entity", "reference_claims", "expected_route", "answerable",
+    "dataset_role", "label_version",
+})
+
+
+def _without_evaluation_fields(value: Any) -> Any:
+    """Remove dataset supervision while preserving factual source payload."""
+    if isinstance(value, dict):
+        return {
+            key: _without_evaluation_fields(item)
+            for key, item in value.items()
+            if key.casefold() not in _EVALUATION_ONLY_KEYS
+        }
+    if isinstance(value, list):
+        return [_without_evaluation_fields(item) for item in value]
+    return deepcopy(value)
 
 
 class MediaKind(str, Enum):
@@ -459,13 +481,15 @@ class DocumentRouter:
         feed_source_url, feed_canonical_url = self._feed_urls(source)
         catalog = source.manifest_attributes
         attrs = {
-            key: value
+            key: _without_evaluation_fields(value)
             for key, value in item.items()
-            if key not in _SYSTEM_ATTRIBUTE_KEYS and key not in catalog
+            if key not in _SYSTEM_ATTRIBUTE_KEYS
+            and key.casefold() not in _EVALUATION_ONLY_KEYS
+            and key not in catalog
         }
         if item:
-            attrs["source_payload"] = deepcopy(item)
-        attrs.update(catalog)
+            attrs["source_payload"] = _without_evaluation_fields(item)
+        attrs.update(_without_evaluation_fields(catalog))
         attrs.update({
             "feed_source_url": feed_source_url,
             "feed_canonical_url": feed_canonical_url,
@@ -545,9 +569,8 @@ class DocumentRouter:
             "feed_canonical_url": feed_canonical_url,
             "item_source_url": item_source_url or feed_source_url,
             "item_canonical_url": item_canonical_url or feed_canonical_url or item_source_url or feed_source_url,
-            "manifest_locator": source.manifest_attributes.get("locator"),
-            "manifest_claim_ids": source.manifest_attributes.get("reference_claim_ids"),
-            **(values or {}),
+            "manifest_locator": _without_evaluation_fields(source.manifest_attributes.get("locator")),
+            **_without_evaluation_fields(values or {}),
         }
         return {key: value for key, value in raw.items() if value is not None and value != ""}
 
@@ -602,7 +625,7 @@ class DocumentRouter:
         product_id = item.get("product_id")
         if isinstance(product_id, bool) or not isinstance(product_id, (int, str)) or not str(product_id).strip():
             raise ParseFailure("INVALID_DOCUMENT_SHAPE", parser, "product_id must be a string or integer")
-        for key in ("product_name", "sku", "supplier", "hs_code", "reference_claim_id"):
+        for key in ("product_name", "sku", "supplier", "hs_code"):
             _required_str(item, key, parser)
         if not _HS_CODE.fullmatch(item["hs_code"]):
             raise ParseFailure("INVALID_DOCUMENT_SHAPE", parser, "hs_code must be 4-10 digits")
@@ -612,7 +635,7 @@ class DocumentRouter:
         parser = "industry_news"
         for key in (
             "id", "headline", "body", "entity", "publisher", "canonical_story_id",
-            "dedupe_cluster_id", "reference_claim_id",
+            "dedupe_cluster_id",
         ):
             _required_str(item, key, parser)
         _required_url(item, "url", parser)
@@ -622,7 +645,7 @@ class DocumentRouter:
 
     def _validate_social(self, item: dict[str, Any]) -> None:
         parser = "social"
-        for key in ("post_id", "text", "company", "reference_claim_id"):
+        for key in ("post_id", "text", "company"):
             _required_str(item, key, parser)
         _required_url(item, "url", parser)
         _required_time(item, "published_at", parser)
@@ -689,11 +712,11 @@ class DocumentRouter:
             if source.source_type is SourceType.B2B:
                 identity = str(item["product_id"])
                 title = item["product_name"]
-                content = self._b2b_evidence_text(item)
+                content = self._b2b_evidence_text(_without_evaluation_fields(item))
                 item_url = item["url"]
                 canonical_url = item.get("canonical_url") or item_url
                 raw_values = {
-                    "product_id": item["product_id"], "claim_id": item["reference_claim_id"],
+                    "product_id": item["product_id"],
                     "sku": item["sku"], "hs_code": item["hs_code"], "supplier": item["supplier"],
                 }
             else:
@@ -706,11 +729,12 @@ class DocumentRouter:
                     raise ParseFailure("INVALID_DOCUMENT_SHAPE", "industry_news", "canonical_story_id does not resolve")
                 canonical_url = canonical_urls[canonical_id]
                 raw_values = {
-                    "story_id": item["id"], "claim_id": item["reference_claim_id"],
+                    "story_id": item["id"],
                     "canonical_story_id": canonical_id, "syndicated_from": item.get("syndicated_from"),
                     "dedupe_cluster_id": item["dedupe_cluster_id"],
                 }
             attrs = self._attrs(source, item, item_source_url=item_url, item_canonical_url=canonical_url)
+            attrs["raw_record_id"] = identity
             raw = self._raw_provenance(source, item_source_url=item_url, item_canonical_url=canonical_url, values=raw_values)
             docs.append(self._record(source, title, content, attrs, [{"text": content, "locator": {"row": row, "raw": raw}}], identity))
         return docs
@@ -736,9 +760,10 @@ class DocumentRouter:
                 source,
                 item_source_url=item_url,
                 item_canonical_url=canonical_url,
-                values={"post_id": item["post_id"], "claim_id": item["reference_claim_id"], "company": item["company"]},
+                values={"post_id": item["post_id"], "company": item["company"]},
             )
             locator = {"post_id": item["post_id"], "row": row, "raw": raw}
+            attrs["raw_record_id"] = item["post_id"]
             docs.append(self._record(source, item["post_id"], item["text"], attrs, [{"text": item["text"], "locator": locator}], item["post_id"]))
         return docs
 
@@ -805,7 +830,7 @@ def probe_manifest(corpus_root: Path, manifest_path: Path) -> dict[str, Any]:
             file_type=FileType(record["file_type"]),
             source_type=source_type,
             source_id=stable_id("source", record["path"]),
-            title=record.get("expected_entity", record["path"]),
+            title=record["path"],
             language="en",
             fetched_at=when,
             is_synthetic=record["is_synthetic"],

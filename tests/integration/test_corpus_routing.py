@@ -71,7 +71,9 @@ def test_corpus_boundaries_and_metadata_are_source_specific():
 
     assert all(chunk.metadata.source_locator.section for chunk in by_source[SourceType.OFFICIAL_WEBSITE])
     assert all(chunk.metadata.source_locator.row and chunk.metadata.source_locator.raw["product_id"] for chunk in by_source[SourceType.B2B])
-    assert all(chunk.metadata.source_locator.post_id and chunk.metadata.source_locator.raw["claim_id"] for chunk in by_source[SourceType.SOCIAL])
+    assert all(chunk.metadata.source_locator.post_id and chunk.metadata.raw_record_id for chunk in by_source[SourceType.SOCIAL])
+    assert all("claim_id" not in chunk.metadata.source_locator.raw for chunk in by_source[SourceType.SOCIAL])
+    assert all("CLAIM-" not in chunk.model_dump_json() for chunk in chunks)
     assert all(chunk.metadata.source_locator.profile == "monthly_company_hs" for chunk in by_source[SourceType.CUSTOMS_PROFILE])
     assert all(chunk.metadata.aggregation_info["aggregation_grain"] == "company_country_hs_calendar_month" for chunk in by_source[SourceType.CUSTOMS_PROFILE])
 
