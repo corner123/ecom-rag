@@ -104,6 +104,62 @@ def test_b2b_news_and_social_reference_claim_id_is_optional_and_never_indexed(tm
     assert "reference_claim" not in json.dumps(documents[0].model_dump(mode="json"))
 
 
+def test_all_structured_sources_strip_nested_supervision_key_variants(tmp_path):
+    from trade_agent.data.router import DocumentRouter
+
+    sentinel_fields = {
+        "goldAnswer": "LEAK-GOLD",
+        "REFERENCE-label": "LEAK-REFERENCE",
+        "nested": [{"Expected_Output": "LEAK-EXPECTED", "referenceClaimId": "LEAK-CLAIM"}],
+    }
+    fixtures = [
+        (
+            "products.json", FileType.JSON, SourceType.B2B,
+            {"products": [{
+                "product_id": "P-1", "product_name": "Pump", "sku": "PUMP-1",
+                "supplier": "Maker", "hs_code": "841370", "url": "https://marketplace.example/p-1",
+                **sentinel_fields,
+            }]},
+        ),
+        (
+            "stories.json", FileType.JSON, SourceType.INDUSTRY_NEWS,
+            {"stories": [{
+                "id": "N-1", "headline": "Expansion", "body": "A new line opened.",
+                "entity": "Maker", "publisher": "News", "canonical_story_id": "N-1",
+                "dedupe_cluster_id": "N-1", "url": "https://news.example/n-1",
+                "published_at": NOW.isoformat(), **sentinel_fields,
+            }]},
+        ),
+    ]
+    profile = json.loads(sorted((ROOT / "customs_profiles").glob("*.json"))[0].read_text())
+    fixtures.append(("profile.json", FileType.GENERATED_PROFILE, SourceType.CUSTOMS_PROFILE, {**profile, **sentinel_fields}))
+
+    for name, file_type, source_type, payload in fixtures:
+        path = tmp_path / name
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        inp = source("b2b/products.json", file_type, source_type).model_copy(
+            update={
+                "path": path,
+                "manifest_attributes": {"locator": {"expectedAnswer": "LEAK-LOCATOR"}},
+            }
+        )
+        serialized = json.dumps(DocumentRouter().load(inp)[0].model_dump(mode="json"))
+        for sentinel in ("LEAK-GOLD", "LEAK-REFERENCE", "LEAK-EXPECTED", "LEAK-CLAIM", "LEAK-LOCATOR"):
+            assert sentinel not in serialized
+
+    social_path = tmp_path / "posts.jsonl"
+    social_path.write_text(json.dumps({
+        "post_id": "S-1", "text": "Factory line opened.", "company": "Maker",
+        "url": "https://social.example/s-1", "published_at": NOW.isoformat(), **sentinel_fields,
+    }), encoding="utf-8")
+    social_input = source("social/posts.jsonl", FileType.JSONL, SourceType.SOCIAL).model_copy(
+        update={"path": social_path, "manifest_attributes": {"locator": {"expectedAnswer": "LEAK-LOCATOR"}}}
+    )
+    serialized = json.dumps(DocumentRouter().load(social_input)[0].model_dump(mode="json"))
+    for sentinel in ("LEAK-GOLD", "LEAK-REFERENCE", "LEAK-EXPECTED", "LEAK-CLAIM", "LEAK-LOCATOR"):
+        assert sentinel not in serialized
+
+
 def test_html_and_markdown_use_heading_sections():
     from trade_agent.data.router import DocumentRouter
 

@@ -3,10 +3,11 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
+from hashlib import sha256
 import json
 
 from trade_agent.db.sql_executor import SqlExecutionResult
-from trade_agent.evidence.models import Evidence, EvidenceLocator, SqlProvenance, sql_evidence_id
+from trade_agent.evidence.models import Evidence, EvidenceLocator, SqlProvenance, _evidence_identity, sql_evidence_id
 
 
 def build_sql_evidence(result: SqlExecutionResult) -> list[Evidence]:
@@ -19,12 +20,16 @@ def build_sql_evidence(result: SqlExecutionResult) -> list[Evidence]:
         separators=(",", ":"),
         ensure_ascii=False,
     )
-    evidence_id = sql_evidence_id(
-        dataset_id=result.dataset_id,
-        schema_fingerprint=result.schema_fingerprint,
-        query_id=result.query_id,
-        result_hash=result.result_hash,
-    )
+    if result.row_count != len(result.rows):
+        raise ValueError("SQL execution result row count does not match rows")
+    calculated_result_hash = sha256(
+        json.dumps(
+            result.rows, default=_json_value, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
+    if calculated_result_hash != result.result_hash:
+        raise ValueError("SQL execution result hash does not match rows")
+    content_digest = sha256(content.encode("utf-8")).hexdigest()
     provenance = SqlProvenance(
         query_id=result.query_id,
         normalized_sql=result.normalized_sql,
@@ -36,6 +41,8 @@ def build_sql_evidence(result: SqlExecutionResult) -> list[Evidence]:
         effective_end_date=result.effective_end_date,
         aggregation_grain=result.aggregation_grain,
         time_grain=result.time_grain,
+        metric_names=result.metric_names,
+        content_sha256=content_digest,
         execution_ms=result.execution_ms,
         row_count=result.row_count,
         result_hash=result.result_hash,
@@ -43,9 +50,7 @@ def build_sql_evidence(result: SqlExecutionResult) -> list[Evidence]:
         max_execution_time_ms=result.max_execution_time_ms,
         client_timeout_ms=result.client_timeout_ms,
     )
-    return [
-        Evidence(
-            evidence_id=evidence_id,
+    values = dict(
             fact_type=result.metric_names[0] if len(result.metric_names) == 1 else "trade_aggregate",
             source_type="sql",
             source_id=result.dataset_id,
@@ -67,8 +72,10 @@ def build_sql_evidence(result: SqlExecutionResult) -> list[Evidence]:
             is_synthetic=result.is_synthetic,
             retrieval_provenance=None,
             sql_provenance=provenance,
-        )
-    ]
+    )
+    provisional = Evidence.model_construct(evidence_id="sql_" + "0" * 64, **values)
+    evidence_id = sql_evidence_id(identity=_evidence_identity(provisional))
+    return [Evidence(evidence_id=evidence_id, **values)]
 
 
 def _row_dimensions(rows: tuple[dict[str, object], ...], field: str) -> tuple[str, ...]:

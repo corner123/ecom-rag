@@ -4,7 +4,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from trade_agent.evidence.models import Evidence, RetrievalComponentProvenance, RetrievalEvidenceLocator, RetrievalProvenance, retrieval_evidence_id
+from trade_agent.data.manifest import BuildManifest
+from trade_agent.evidence.models import Evidence, RetrievalComponentProvenance, RetrievalEvidenceLocator, RetrievalProvenance, _evidence_identity, canonical_public_url, retrieval_evidence_id
 from trade_agent.index.milvus_store import collection_name_for_build_id
 from trade_agent.retrieval.service import RetrievalOutcome
 
@@ -42,11 +43,40 @@ def _selection_key(evidence: Evidence) -> tuple[int, int, str]:
     return provenance.rank, provenance.pre_rerank_rank, canonical
 
 
-def normalize_retrieval(outcome: RetrievalOutcome) -> list[Evidence]:
+def _nonranking_payload(evidence: Evidence) -> dict[str, Any]:
+    payload = evidence.model_dump(mode="python")
+    provenance = payload["retrieval_provenance"]
+    for key in ("rank", "pre_rerank_rank", "fusion_score", "rerank_score"):
+        provenance.pop(key)
+    for component in provenance["components"]:
+        for key in ("rank", "raw_score", "relevance_contribution"):
+            component.pop(key)
+    return payload
+
+
+def normalize_retrieval(
+    outcome: RetrievalOutcome,
+    *,
+    published_manifest: BuildManifest,
+) -> list[Evidence]:
     """Normalize final hits while keeping raw documents and arbitrary metadata private."""
     if type(outcome) is not RetrievalOutcome:
         raise TypeError("retrieval normalization requires an exact RetrievalOutcome")
+    if type(published_manifest) is not BuildManifest:
+        raise TypeError("retrieval normalization requires an immutable published BuildManifest")
+    try:
+        verified_manifest = BuildManifest.model_validate_json(published_manifest.model_dump_json())
+    except Exception as exc:
+        raise ValueError("published manifest failed integrity verification") from exc
+    if verified_manifest != published_manifest:
+        raise ValueError("published manifest failed immutable round-trip verification")
+    if outcome.build_id != published_manifest.build_id:
+        raise ValueError("retrieval outcome does not belong to the published manifest")
     collection_name = collection_name_for_build_id(outcome.build_id)
+    published_chunks = {
+        snapshot.chunk_id: snapshot.restore() for snapshot in published_manifest.chunks
+    }
+    published_documents = set(published_manifest.document_ids)
     by_id: dict[str, Evidence] = {}
     for hit in outcome.hits:
         metadata = hit.record.metadata
@@ -54,25 +84,23 @@ def normalize_retrieval(outcome: RetrievalOutcome) -> list[Evidence]:
             raise ValueError("retrieval hit trace belongs to a foreign build")
         if hit.chunk_id != metadata.chunk_id:
             raise ValueError("retrieval hit chunk identity does not match its record")
-        source_url = str(metadata.source_url) if metadata.source_url else None
-        canonical_url = str(metadata.canonical_url) if metadata.canonical_url else None
+        published_record = published_chunks.get(hit.chunk_id)
+        if (
+            published_record is None
+            or metadata.document_id not in published_documents
+            or published_record != hit.record
+        ):
+            raise ValueError("retrieval hit is not an exact member of the published manifest")
+        source_url = canonical_public_url(str(metadata.source_url)) if metadata.source_url else None
+        canonical_url = canonical_public_url(str(metadata.canonical_url)) if metadata.canonical_url else None
         source_identity = source_url or canonical_url or f"urn:trade-agent:document:{metadata.document_id}"
         record_id = _source_record_id(metadata)
         fact_type = metadata.fact_type.value if metadata.fact_type is not None else "unknown"
         source_type = metadata.source_type.value
-        evidence_id = retrieval_evidence_id(
-            build_id=outcome.build_id,
-            collection_name=collection_name,
-            source_identity=source_identity,
-            source_type=source_type,
-            document_id=metadata.document_id,
-            chunk_id=metadata.chunk_id,
-            content_hash=metadata.content_hash,
-            fact_type=fact_type,
-        )
         locator = metadata.source_locator
         replay = RetrievalEvidenceLocator(
             manifest_id=outcome.build_id,
+            manifest_fingerprint=published_manifest.fingerprint,
             build_id=outcome.build_id,
             collection_name=collection_name,
             source_identity=source_identity,
@@ -102,6 +130,7 @@ def normalize_retrieval(outcome: RetrievalOutcome) -> list[Evidence]:
         )
         provenance = RetrievalProvenance(
             build_id=outcome.build_id,
+            manifest_fingerprint=published_manifest.fingerprint,
             collection_name=collection_name,
             profile_id=hit.trace.profile_id,
             profile_version=hit.trace.profile_version,
@@ -125,8 +154,7 @@ def normalize_retrieval(outcome: RetrievalOutcome) -> list[Evidence]:
         aggregation = metadata.aggregation_info or {}
         grain = _dimension_values(aggregation.get("aggregation_grain"), "aggregation_grain")
         confidence = metadata.ocr_confidence if metadata.ocr_confidence is not None else 1.0
-        evidence = Evidence(
-            evidence_id=evidence_id,
+        values = dict(
             entity_id=hit.trace.entity_resolution.entity_id or metadata.entity_id,
             company_name=metadata.company_name,
             country_code=metadata.country_code,
@@ -153,7 +181,12 @@ def normalize_retrieval(outcome: RetrievalOutcome) -> list[Evidence]:
             retrieval_provenance=provenance,
             sql_provenance=None,
         )
+        provisional = Evidence.model_construct(evidence_id="rag_" + "0" * 64, **values)
+        evidence_id = retrieval_evidence_id(identity=_evidence_identity(provisional))
+        evidence = Evidence(evidence_id=evidence_id, **values)
         existing = by_id.get(evidence_id)
+        if existing is not None and _nonranking_payload(evidence) != _nonranking_payload(existing):
+            raise ValueError("duplicate Evidence identity differs outside ranking fields")
         if existing is None or _selection_key(evidence) < _selection_key(existing):
             by_id[evidence_id] = evidence
     return sorted(by_id.values(), key=lambda item: (_selection_key(item), item.evidence_id))

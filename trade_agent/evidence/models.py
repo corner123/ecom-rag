@@ -7,7 +7,7 @@ from hashlib import sha256
 import json
 import re
 from typing import Annotated, Any, Literal, Mapping, Self
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictFloat, StrictInt, StrictStr, field_validator, model_validator
 
@@ -16,38 +16,42 @@ _EVIDENCE_ID = re.compile(r"(?:sql|rag)_[0-9a-f]{64}")
 _CLAIM_ID = re.compile(r"claim_[0-9a-f]{64}")
 _CONFLICT_ID = re.compile(r"conflict_[0-9a-f]{64}")
 _BUILD_ID = re.compile(r"build_[0-9a-f]{32}")
-_SENSITIVE_QUERY_NAMES = frozenset({
-    "access_token", "api_key", "apikey", "auth", "credential", "key",
-    "password", "secret", "signature", "sig", "token",
-})
+def _identity_value(value: Any) -> Any:
+    """Return a JSON-safe, typed value for stable content addressing."""
+    if isinstance(value, BaseModel):
+        return _identity_value(value.model_dump(mode="python"))
+    if isinstance(value, Mapping):
+        return {str(key): _identity_value(item) for key, item in sorted(value.items())}
+    if isinstance(value, (tuple, list)):
+        return [_identity_value(item) for item in value]
+    if isinstance(value, datetime):
+        return {"$datetime": value.isoformat()}
+    if isinstance(value, date):
+        return {"$date": value.isoformat()}
+    if type(value) is float:
+        return {"$float_hex": value.hex()}
+    return value
 
 
-def sql_evidence_id(*, dataset_id: str, schema_fingerprint: str, query_id: str, result_hash: str) -> str:
-    return "sql_" + sha256(
-        f"{dataset_id}:{schema_fingerprint}:{query_id}:{result_hash}".encode("utf-8")
-    ).hexdigest()
-
-
-def retrieval_evidence_id(
-    *, build_id: str, collection_name: str, source_identity: str, source_type: str,
-    document_id: str, chunk_id: str, content_hash: str, fact_type: str,
-) -> str:
+def _identity_hash(branch: Literal["sql", "rag"], identity: Mapping[str, Any]) -> str:
     canonical = json.dumps(
-        {
-            "build_id": build_id,
-            "collection_name": collection_name,
-            "source_identity": source_identity,
-            "source_type": source_type,
-            "document_id": document_id,
-            "chunk_id": chunk_id,
-            "content_hash": content_hash,
-            "fact_type": fact_type,
-        },
+        {"branch": branch, "identity_version": "evidence-v2", "payload": _identity_value(identity)},
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
+        allow_nan=False,
     )
-    return "rag_" + sha256(canonical.encode("utf-8")).hexdigest()
+    return branch + "_" + sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def sql_evidence_id(*, identity: Mapping[str, Any]) -> str:
+    """Hash a length-safe canonical SQL provenance and semantic payload."""
+    return _identity_hash("sql", identity)
+
+
+def retrieval_evidence_id(*, identity: Mapping[str, Any]) -> str:
+    """Hash a published RAG locator and its public semantic payload."""
+    return _identity_hash("rag", identity)
 
 
 class _Contract(BaseModel):
@@ -70,14 +74,27 @@ def _nonblank(value: str | None) -> str | None:
     return value
 
 
-def _public_url(value: str | None) -> str | None:
+def canonical_public_url(value: str | None) -> str | None:
     if value is None:
         return None
     parsed = urlsplit(value)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
         raise ValueError("public source URL must be credential-free HTTP(S)")
-    if any(name.casefold() in _SENSITIVE_QUERY_NAMES for name, _ in parse_qsl(parsed.query, keep_blank_values=True)):
-        raise ValueError("public source URL must not contain secret query parameters")
+    host = parsed.hostname.lower()
+    if ":" in host:
+        host = f"[{host}]"
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("public source URL has an invalid port") from exc
+    netloc = host if port is None else f"{host}:{port}"
+    return urlunsplit((parsed.scheme.lower(), netloc, parsed.path or "/", "", ""))
+
+
+def _public_url(value: str | None) -> str | None:
+    canonical = canonical_public_url(value)
+    if canonical != value:
+        raise ValueError("public source URL must already be canonical and omit query or fragment")
     return value
 
 
@@ -120,6 +137,7 @@ class RetrievalEvidenceLocator(_Contract):
     """Published-build locator sufficient to replay one selected chunk."""
     branch: Literal["rag"] = "rag"
     manifest_id: StrictStr
+    manifest_fingerprint: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
     build_id: StrictStr
     collection_name: StrictStr
     source_identity: StrictStr
@@ -176,6 +194,7 @@ class RetrievalProvenance(_Contract):
     """Ranking trace. Scores select context; they do not measure factual truth."""
     branch: Literal["rag"] = "rag"
     build_id: StrictStr
+    manifest_fingerprint: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
     collection_name: StrictStr
     profile_id: StrictStr
     profile_version: StrictStr
@@ -220,6 +239,8 @@ class SqlProvenance(_Contract):
     effective_end_date: date
     aggregation_grain: tuple[StrictStr, ...]
     time_grain: StrictStr
+    metric_names: tuple[StrictStr, ...]
+    content_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
     execution_ms: StrictFloat = Field(ge=0)
     row_count: StrictInt = Field(ge=0)
     result_hash: StrictStr
@@ -229,6 +250,78 @@ class SqlProvenance(_Contract):
 
 
 Locator = Annotated[EvidenceLocator | RetrievalEvidenceLocator, Field(discriminator="branch")]
+
+
+def _canonical_sql_content(content: str) -> tuple[str, dict[str, Any]]:
+    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("SQL Evidence content has duplicate JSON keys")
+            result[key] = value
+        return result
+
+    try:
+        payload = json.loads(content, object_pairs_hook=reject_duplicates)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise ValueError("SQL Evidence content must be canonical JSON") from exc
+    if not isinstance(payload, dict) or set(payload) != {"metrics", "rows"}:
+        raise ValueError("SQL Evidence content must contain only metrics and rows")
+    if (
+        not isinstance(payload["metrics"], list)
+        or not payload["metrics"]
+        or any(not isinstance(item, str) or not item.strip() for item in payload["metrics"])
+        or not isinstance(payload["rows"], list)
+        or any(not isinstance(row, dict) for row in payload["rows"])
+    ):
+        raise ValueError("SQL Evidence content has invalid metrics or rows")
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    if canonical != content:
+        raise ValueError("SQL Evidence content must use canonical JSON serialization")
+    return canonical, payload
+
+
+def _row_values(rows: list[dict[str, Any]], field: str) -> tuple[str, ...]:
+    values = {row[field] for row in rows if row.get(field) is not None}
+    if any(not isinstance(value, str) or not value.strip() for value in values):
+        raise ValueError(f"SQL Evidence {field} values must be nonblank strings")
+    return tuple(sorted(values))
+
+
+def _evidence_identity(evidence: "Evidence") -> dict[str, Any]:
+    common = {
+        "entity_id": evidence.entity_id,
+        "company_name": evidence.company_name,
+        "country_code": evidence.country_code,
+        "hs_code": evidence.hs_code,
+        "fact_type": evidence.fact_type,
+        "source_type": evidence.source_type,
+        "source_id": evidence.source_id,
+        "source_weight": evidence.source_weight,
+        "content_sha256": sha256(evidence.content.encode("utf-8")).hexdigest(),
+        "source_url": evidence.source_url,
+        "canonical_url": evidence.canonical_url,
+        "locator": evidence.locator,
+        "raw_record_id": evidence.raw_record_id,
+        "publish_time": evidence.publish_time,
+        "valid_from": evidence.valid_from,
+        "valid_to": evidence.valid_to,
+        "time_grain": evidence.time_grain,
+        "currencies": evidence.currencies,
+        "units": evidence.units,
+        "aggregation_grain": evidence.aggregation_grain,
+        "confidence": evidence.confidence,
+        "confidence_basis": evidence.confidence_basis,
+        "is_synthetic": evidence.is_synthetic,
+    }
+    if evidence.locator.branch == "sql":
+        provenance = evidence.sql_provenance
+        if provenance is None:
+            raise ValueError("SQL Evidence is missing SQL provenance")
+        common["sql_provenance"] = provenance.model_dump(
+            mode="python", exclude={"execution_ms", "estimated_scan_rows"}
+        )
+    return common
 
 
 class Evidence(_Contract):
@@ -288,6 +381,19 @@ class Evidence(_Contract):
                 raise ValueError("SQL Evidence requires only SQL provenance")
             if self.sql_provenance.query_id != self.locator.query_id:
                 raise ValueError("SQL locator and provenance query IDs differ")
+            canonical_content, content_payload = _canonical_sql_content(self.content)
+            content_digest = sha256(canonical_content.encode("utf-8")).hexdigest()
+            row_result_hash = sha256(
+                json.dumps(
+                    content_payload["rows"], sort_keys=True,
+                    separators=(",", ":"), allow_nan=False,
+                ).encode("utf-8")
+            ).hexdigest()
+            expected_fact_type = (
+                self.sql_provenance.metric_names[0]
+                if len(self.sql_provenance.metric_names) == 1
+                else "trade_aggregate"
+            )
             if (
                 self.source_id != self.sql_provenance.dataset_id
                 or self.valid_from != self.sql_provenance.effective_start_date
@@ -297,15 +403,34 @@ class Evidence(_Contract):
                 or self.is_synthetic != self.sql_provenance.is_synthetic
             ):
                 raise ValueError("SQL Evidence fields do not match SQL provenance")
-            expected_id = sql_evidence_id(
-                dataset_id=self.sql_provenance.dataset_id,
-                schema_fingerprint=self.sql_provenance.schema_fingerprint,
-                query_id=self.locator.query_id,
-                result_hash=self.sql_provenance.result_hash,
-            )
+            if (
+                self.source_type != "sql"
+                or self.fact_type != expected_fact_type
+                or self.source_weight != 1.0
+                or self.confidence != 1.0
+                or self.confidence_basis != "validated_query_execution"
+            ):
+                raise ValueError("SQL Evidence fixed semantics do not match validated execution")
+            if tuple(content_payload["metrics"]) != self.sql_provenance.metric_names:
+                raise ValueError("SQL Evidence metrics do not match SQL provenance")
+            if len(content_payload["rows"]) != self.sql_provenance.row_count:
+                raise ValueError("SQL Evidence row count does not match SQL provenance")
+            if content_digest != self.sql_provenance.content_sha256:
+                raise ValueError("SQL Evidence content digest does not match SQL provenance")
+            if row_result_hash != self.sql_provenance.result_hash:
+                raise ValueError("SQL Evidence result hash does not match content rows")
+            if self.currencies != _row_values(content_payload["rows"], "currency"):
+                raise ValueError("SQL Evidence currencies do not match content rows")
+            if self.units != _row_values(content_payload["rows"], "unit"):
+                raise ValueError("SQL Evidence units do not match content rows")
+            expected_id = sql_evidence_id(identity=_evidence_identity(self))
         elif self.retrieval_provenance is None or self.sql_provenance is not None:
             raise ValueError("RAG Evidence requires only retrieval provenance")
-        elif self.retrieval_provenance.build_id != self.locator.build_id or self.retrieval_provenance.collection_name != self.locator.collection_name:
+        elif (
+            self.retrieval_provenance.build_id != self.locator.build_id
+            or self.retrieval_provenance.collection_name != self.locator.collection_name
+            or self.retrieval_provenance.manifest_fingerprint != self.locator.manifest_fingerprint
+        ):
             raise ValueError("RAG locator and provenance build identities differ")
         else:
             if sha256(self.content.encode("utf-8")).hexdigest() != self.locator.content_hash:
@@ -314,16 +439,7 @@ class Evidence(_Contract):
                 raise ValueError("RAG Evidence source identity does not match its locator")
             if self.raw_record_id != self.locator.source_record_id:
                 raise ValueError("RAG Evidence raw record identity does not match its locator")
-            expected_id = retrieval_evidence_id(
-                build_id=self.locator.build_id,
-                collection_name=self.locator.collection_name,
-                source_identity=self.locator.source_identity,
-                source_type=self.source_type,
-                document_id=self.locator.document_id,
-                chunk_id=self.locator.chunk_id,
-                content_hash=self.locator.content_hash,
-                fact_type=self.fact_type,
-            )
+            expected_id = retrieval_evidence_id(identity=_evidence_identity(self))
         if self.evidence_id != expected_id:
             raise ValueError("evidence_id does not match its content-addressed scope")
         return self
@@ -409,6 +525,32 @@ class PublicTrace(_Contract):
         return self
 
 
+def _as_date(value: date | datetime | None) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    return value
+
+
+def _claim_matches_evidence(claim: Claim, evidence: Evidence) -> bool:
+    if claim.entity_id is not None and claim.entity_id != evidence.entity_id:
+        return False
+    if claim.fact_type is not None and claim.fact_type != evidence.fact_type:
+        return False
+    if claim.currency is not None and claim.currency not in evidence.currencies:
+        return False
+    if claim.unit is not None and claim.unit not in evidence.units:
+        return False
+    claim_start, claim_end = _as_date(claim.period_start), _as_date(claim.period_end)
+    evidence_start, evidence_end = _as_date(evidence.valid_from), _as_date(evidence.valid_to)
+    if claim_start is None and claim_end is None:
+        return True
+    if claim_end is not None and evidence_start is not None and claim_end < evidence_start:
+        return False
+    if claim_start is not None and evidence_end is not None and claim_start > evidence_end:
+        return False
+    return True
+
+
 class IntelligenceAnswer(_Contract):
     answer: StrictStr | None
     claims: tuple[Claim, ...]
@@ -428,14 +570,23 @@ class IntelligenceAnswer(_Contract):
         conflict_cited = {item for conflict in self.conflicts for item in conflict.evidence_ids}
         if not cited.issubset(known) or not conflict_cited.issubset(known):
             raise ValueError("claim or conflict cites evidence outside generation evidence")
+        evidence_by_id = {item.evidence_id: item for item in self.evidence}
+        for claim in self.claims:
+            if claim.status != "supported":
+                continue
+            if not any(
+                _claim_matches_evidence(claim, evidence_by_id[evidence_id])
+                for evidence_id in claim.evidence_ids
+            ):
+                raise ValueError("supported claim has no semantically compatible Evidence")
         conflict_ids = tuple(item.conflict_id for item in self.conflicts)
         if set(self.public_trace.evidence_ids) != known or set(self.public_trace.conflict_ids) != set(conflict_ids):
             raise ValueError("public trace does not match answer evidence and conflicts")
         actual_branches = tuple(sorted({item.locator.branch for item in self.evidence}))
         if self.public_trace.branches != actual_branches:
             raise ValueError("public trace branches do not match answer evidence")
-        if self.answer is None and self.refusal_reason is None:
-            raise ValueError("an answer or refusal reason is required")
+        if (self.answer is None) == (self.refusal_reason is None):
+            raise ValueError("exactly one of answer or refusal_reason is required")
         if self.answer is not None and not self.answer.strip():
             raise ValueError("answer must not be blank")
         if self.refusal_reason is not None and not self.refusal_reason.strip():
