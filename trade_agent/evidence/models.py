@@ -574,11 +574,11 @@ class IntelligenceAnswer(_Contract):
         for claim in self.claims:
             if claim.status != "supported":
                 continue
-            if not any(
+            if not all(
                 _claim_matches_evidence(claim, evidence_by_id[evidence_id])
                 for evidence_id in claim.evidence_ids
             ):
-                raise ValueError("supported claim has no semantically compatible Evidence")
+                raise ValueError("supported claim cites semantically incompatible Evidence")
         conflict_ids = tuple(item.conflict_id for item in self.conflicts)
         if set(self.public_trace.evidence_ids) != known or set(self.public_trace.conflict_ids) != set(conflict_ids):
             raise ValueError("public trace does not match answer evidence and conflicts")

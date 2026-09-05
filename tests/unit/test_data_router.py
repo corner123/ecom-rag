@@ -794,8 +794,12 @@ def test_reserved_metadata_ownership_is_uniform_across_structured_routes(tmp_pat
     assert document.attributes["fact_type"] == "market_signal"
     assert document.attributes["license_scope"] == "catalog-license"
     assert document.attributes["publish_time"] == NOW.isoformat()
-    assert document.attributes["source_payload"]["item_source_url"] == "https://evil.example/item"
-    assert document.attributes["source_payload"]["ocr_confidence"] == 1
+    if kind == "profile":
+        assert "item_source_url" not in document.attributes["source_payload"]
+        assert "ocr_confidence" not in document.attributes["source_payload"]
+    else:
+        assert document.attributes["source_payload"]["item_source_url"] == "https://evil.example/item"
+        assert document.attributes["source_payload"]["ocr_confidence"] == 1
     assert chunk.metadata.source_weight == 0.4
     assert chunk.metadata.fact_type.value == "market_signal"
     assert chunk.metadata.publish_time == NOW

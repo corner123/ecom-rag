@@ -91,6 +91,41 @@ def published_build(tmp_path_factory: pytest.TempPathFactory) -> BuildManifest:
         ),
         encoding="utf-8",
     )
+    profile = root / "profile.json"
+    profile.write_text(
+        json.dumps(
+            {
+                "aggregation_grain": "company_country_hs_calendar_month",
+                "aggregation_window": {
+                    "calendar_month": "2026-08",
+                    "start": "2026-08-01",
+                    "GoldAnswer": "PROFILE-NESTED-LEAK",
+                },
+                "calendar_month": "2026-08",
+                "company": "Example Components",
+                "company_id": 42,
+                "country_code": "US",
+                "currency": "USD",
+                "export_amount_usd": "12.30",
+                "export_quantity_kg": "4.00",
+                "hs_code": "850440",
+                "import_amount_usd": "0",
+                "import_quantity_kg": "0",
+                "raw_record_summary": {
+                    "record_id_hash": "d" * 64,
+                    "record_ids": ["ROW-9"],
+                    "goldAnswer": "PROFILE-SUMMARY-LEAK",
+                },
+                "roles_included": ["export"],
+                "source_record_count": 1,
+                "synthetic_notice": "test-only",
+                "total_amount_usd": "12.30",
+                "total_quantity_kg": "4.00",
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
     (root / "manifests" / "corpus_manifest.json").write_text(
         json.dumps(
             {
@@ -108,6 +143,19 @@ def published_build(tmp_path_factory: pytest.TempPathFactory) -> BuildManifest:
                         "is_synthetic": True,
                         "locator": {"row": 1, "expectedOutput": "do-not-index"},
                         "reference_claim_ids": ["CLAIM-1"],
+                    },
+                    {
+                        "path": "profile.json",
+                        "content_hash": hashlib.sha256(profile.read_bytes()).hexdigest(),
+                        "entity_id": "company-42",
+                        "fact_type": "trade_activity",
+                        "file_type": "generated_profile",
+                        "source_type": "customs_profile",
+                        "ingested_at": NOW.isoformat(),
+                        "publish_time": NOW.isoformat(),
+                        "valid_from": NOW.isoformat(),
+                        "is_synthetic": True,
+                        "locator": {"profile": "monthly_company_hs"},
                     }
                 ]
             },
@@ -127,6 +175,10 @@ def published_build(tmp_path_factory: pytest.TempPathFactory) -> BuildManifest:
                 "    file_types: [json]",
                 "    paths: [products.json]",
                 "    url_pattern: https://marketplace.example/*",
+                "  - source_type: customs_profile",
+                "    file_types: [generated_profile]",
+                "    paths: [profile.json]",
+                "    url_pattern: https://profiles.example/*",
             ]
         ),
         encoding="utf-8",
@@ -134,8 +186,19 @@ def published_build(tmp_path_factory: pytest.TempPathFactory) -> BuildManifest:
     return IngestionPipeline().run(SourceCatalog.from_yaml(catalog), tmp_path / "build.json")
 
 
-def _outcome(build: BuildManifest, *, duplicate: bool = False) -> RetrievalOutcome:
-    record = build.chunks[0].restore()
+def _outcome(
+    build: BuildManifest,
+    *,
+    duplicate: bool = False,
+    source_type: SourceType = SourceType.B2B,
+) -> RetrievalOutcome:
+    matching = tuple(
+        snapshot.restore()
+        for snapshot in build.chunks
+        if snapshot.restore().metadata.source_type is source_type
+    )
+    assert matching, build.quarantined
+    record = matching[0]
     component = ComponentRank(rank=4, raw_score=12.5, retriever_weight=0.6, relevance_contribution=0.01)
     trace = HitTrace(
         build_id=build.build_id,
@@ -252,8 +315,11 @@ def test_router_strips_normalized_supervision_keys_but_preserves_business_labels
                     {
                         "product_id": "P-1", "product_name": "Pump", "sku": "PUMP-1",
                         "supplier": "Maker", "hs_code": "841370", "url": "https://marketplace.example/p-1",
-                        "label": "retail carton", "labels": ["CE", "FRAGILE"],
+                        "label": "GOLD", "labels": ["REFERENCE"],
                         "complianceLabel": "RoHS", "packaging-labels": ["KEEP DRY"],
+                        "productLabels": ["industrial", "export"],
+                        "referencePrice": "12.30", "expectedDeliveryDate": "2026-10-01",
+                        "goldPurity": "99.9%",
                         "goldAnswer": "secret-a", "REFERENCE-label": "secret-b",
                         "nested": [{"Expected_Output": "secret-c", "referenceClaimId": "secret-d"}],
                     }
@@ -273,10 +339,45 @@ def test_router_strips_normalized_supervision_keys_but_preserves_business_labels
     for sentinel in ("secret-a", "secret-b", "secret-c", "secret-d", "secret-e", "secret-f"):
         assert sentinel not in payload
     source_payload = document.attributes["source_payload"]
-    assert source_payload["label"] == "retail carton"
-    assert source_payload["labels"] == ["CE", "FRAGILE"]
+    assert "label" not in source_payload and "labels" not in source_payload
     assert source_payload["complianceLabel"] == "RoHS"
     assert source_payload["packaging-labels"] == ["KEEP DRY"]
+    assert source_payload["productLabels"] == ["industrial", "export"]
+    assert source_payload["referencePrice"] == "12.30"
+    assert source_payload["expectedDeliveryDate"] == "2026-10-01"
+    assert source_payload["goldPurity"] == "99.9%"
+    assert "GOLD" not in payload and "REFERENCE" not in payload
+
+
+def test_profile_uses_one_safe_payload_for_content_attributes_locator_and_currency(
+    published_build: BuildManifest,
+) -> None:
+    outcome = _outcome(published_build, source_type=SourceType.CUSTOMS_PROFILE)
+    record = outcome.hits[0].record
+    serialized_record = record.model_dump_json()
+    assert "PROFILE-NESTED-LEAK" not in serialized_record
+    assert "PROFILE-SUMMARY-LEAK" not in serialized_record
+    assert record.metadata.aggregation_info["currency"] == "USD"
+
+    evidence = normalize_retrieval(outcome, published_manifest=published_build)[0]
+    assert evidence.currencies == ("USD",)
+    claim = Claim(
+        claim_id="claim_" + "9" * 64,
+        text="The profile reports USD aggregates.",
+        status="supported",
+        evidence_ids=(evidence.evidence_id,),
+        entity_id="company-42",
+        fact_type="trade_activity",
+        currency="USD",
+        period_start=date(2026, 8, 1),
+        period_end=date(2026, 8, 31),
+        confidence=0.9,
+    )
+    assert IntelligenceAnswer(
+        answer="Supported.", claims=(claim,), evidence=(evidence,), conflicts=(),
+        refusal_reason=None, degraded_components=(),
+        public_trace=PublicTrace(branches=("rag",), evidence_ids=(evidence.evidence_id,), conflict_ids=()),
+    )
 
 
 def test_answer_requires_semantically_compatible_evidence_and_answer_xor_refusal(
@@ -311,6 +412,24 @@ def test_answer_requires_semantically_compatible_evidence_and_answer_xor_refusal
             IntelligenceAnswer(**{**values, "claims": (claim.model_copy(update=update),)})
     with pytest.raises(ValidationError, match="exactly one"):
         IntelligenceAnswer(**{**values, "refusal_reason": "also refusing"})
+    incompatible = build_sql_evidence(_sql_result())[0]
+    with pytest.raises(ValidationError, match="semantic"):
+        IntelligenceAnswer(
+            **{
+                **values,
+                "claims": (
+                    claim.model_copy(
+                        update={"evidence_ids": (evidence.evidence_id, incompatible.evidence_id)}
+                    ),
+                ),
+                "evidence": (evidence, incompatible),
+                "public_trace": PublicTrace(
+                    branches=("rag", "sql"),
+                    evidence_ids=(evidence.evidence_id, incompatible.evidence_id),
+                    conflict_ids=(),
+                ),
+            }
+        )
 
 
 def test_same_identity_duplicate_must_differ_only_by_ranking(

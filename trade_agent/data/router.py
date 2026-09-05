@@ -98,8 +98,23 @@ _SYSTEM_ATTRIBUTE_KEYS = {
     "source_payload",
 }
 _EVALUATION_ONLY_KEYS = frozenset({
-    "claim_id", "claim_ids", "manifest_claim_ids", "ground_truth", "answer_key",
-    "answerable", "dataset_role", "label_version",
+    "answer_key", "answerable", "claim", "claims", "claim_id", "claim_ids",
+    "dataset_role", "eval", "evaluation", "evaluation_metadata",
+    "evaluation_answer", "evaluation_claim", "evaluation_label", "evaluation_output",
+    "expected_answer", "expected_claim", "expected_claim_id", "expected_claim_ids",
+    "expected_entity", "expected_label", "expected_output", "expected_route",
+    "gold_answer", "gold_claim", "gold_claim_id", "gold_claim_ids", "gold_label",
+    "gold_output",
+    "ground_truth", "ground_truth_answer", "ground_truth_label",
+    "label", "labels", "label_version", "manifest_claim_ids",
+    "reference_answer", "reference_claim", "reference_claim_id",
+    "reference_claim_ids", "reference_claims", "reference_label", "reference_output",
+    "target", "target_answer", "target_claim", "target_claim_id", "target_claim_ids",
+    "target_label", "target_output",
+})
+_B2B_BUSINESS_LABEL_KEYS = frozenset({
+    "compliance_label", "compliance_labels", "packaging_label", "packaging_labels",
+    "product_label", "product_labels",
 })
 _PROFILE_FACT_KEYS = frozenset({
     "aggregation_grain", "aggregation_window", "calendar_month", "company", "company_id",
@@ -107,6 +122,10 @@ _PROFILE_FACT_KEYS = frozenset({
     "import_amount_usd", "import_quantity_kg", "raw_record_summary", "roles_included",
     "source_record_count", "synthetic_notice", "total_amount_usd", "total_quantity_kg",
 })
+_PROFILE_NESTED_FACT_KEYS = {
+    "aggregation_window": frozenset({"calendar_month", "end", "start"}),
+    "raw_record_summary": frozenset({"record_id_hash", "record_ids"}),
+}
 
 
 def _normalized_key(value: str) -> str:
@@ -114,54 +133,56 @@ def _normalized_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", value.casefold()).strip("_")
 
 
-def _is_evaluation_key(
-    key: str, *, drop_plain_claim_ids: bool, preserve_business_labels: bool
-) -> bool:
+def _is_evaluation_key(key: str) -> bool:
     normalized = _normalized_key(key)
-    if normalized in {"label", "labels"}:
-        return not preserve_business_labels
-    if normalized in _EVALUATION_ONLY_KEYS:
-        return drop_plain_claim_ids or normalized not in {"claim_id", "claim_ids"}
-    if normalized.startswith(("gold", "reference", "expected", "ground_truth")):
-        return True
-    if normalized.startswith("target_") and any(
-        token in normalized for token in ("answer", "label", "claim", "output")
-    ):
-        return True
-    return normalized in {"claim", "claims"} if drop_plain_claim_ids else False
+    return normalized in _EVALUATION_ONLY_KEYS
 
 
 def _without_evaluation_fields(
     value: Any,
     *,
-    drop_plain_claim_ids: bool = True,
-    preserve_business_labels: bool = False,
+    source_type: SourceType | None = None,
+    path: tuple[str, ...] = (),
 ) -> Any:
-    """Remove dataset supervision while preserving factual source payload."""
+    """Apply exact supervision rules and source/path-aware business fields."""
     if isinstance(value, dict):
-        return {
-            key: _without_evaluation_fields(
-                item,
-                drop_plain_claim_ids=drop_plain_claim_ids,
-                preserve_business_labels=preserve_business_labels,
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            normalized = _normalized_key(key)
+            if _is_evaluation_key(key):
+                continue
+            if normalized in _B2B_BUSINESS_LABEL_KEYS and not (
+                source_type is SourceType.B2B and path == ()
+            ):
+                continue
+            result[key] = _without_evaluation_fields(
+                item, source_type=source_type, path=(*path, normalized)
             )
-            for key, item in value.items()
-            if not _is_evaluation_key(
-                key,
-                drop_plain_claim_ids=drop_plain_claim_ids,
-                preserve_business_labels=preserve_business_labels,
-            )
-        }
+        return result
     if isinstance(value, list):
         return [
-            _without_evaluation_fields(
-                item,
-                drop_plain_claim_ids=drop_plain_claim_ids,
-                preserve_business_labels=preserve_business_labels,
-            )
+            _without_evaluation_fields(item, source_type=source_type, path=path)
             for item in value
         ]
     return deepcopy(value)
+
+
+def _safe_profile_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    sanitized = _without_evaluation_fields(
+        payload, source_type=SourceType.CUSTOMS_PROFILE
+    )
+    result = {
+        key: deepcopy(sanitized[key])
+        for key in sorted(_PROFILE_FACT_KEYS)
+        if key in sanitized and key not in _PROFILE_NESTED_FACT_KEYS
+    }
+    for field, allowed in _PROFILE_NESTED_FACT_KEYS.items():
+        nested = sanitized.get(field)
+        if isinstance(nested, dict):
+            result[field] = {
+                key: deepcopy(nested[key]) for key in sorted(allowed) if key in nested
+            }
+    return result
 
 
 class MediaKind(str, Enum):
@@ -523,9 +544,7 @@ class DocumentRouter:
     ) -> dict[str, Any]:
         feed_source_url, feed_canonical_url = self._feed_urls(source)
         catalog = source.manifest_attributes
-        safe_item = _without_evaluation_fields(
-            item, preserve_business_labels=source.source_type is SourceType.B2B
-        )
+        safe_item = _without_evaluation_fields(item, source_type=source.source_type)
         safe_catalog = _without_evaluation_fields(catalog)
         attrs = {
             key: deepcopy(value)
@@ -616,9 +635,9 @@ class DocumentRouter:
             "item_source_url": item_source_url or feed_source_url,
             "item_canonical_url": item_canonical_url or feed_canonical_url or item_source_url or feed_source_url,
             "manifest_locator": _without_evaluation_fields(
-                source.manifest_attributes.get("locator"), drop_plain_claim_ids=True
+                source.manifest_attributes.get("locator")
             ),
-            **_without_evaluation_fields(values or {}),
+            **_without_evaluation_fields(values or {}, source_type=source.source_type),
         }
         return {key: value for key, value in raw.items() if value is not None and value != ""}
 
@@ -704,27 +723,28 @@ class DocumentRouter:
             raise ParseFailure("INVALID_DOCUMENT_SHAPE", "json", "top-level payload must be object")
         if source.file_type is FileType.GENERATED_PROFILE:
             self._validate_profile(payload)
-            safe_payload = _without_evaluation_fields(payload)
-            profile_content = {
-                key: safe_payload[key] for key in sorted(_PROFILE_FACT_KEYS) if key in safe_payload
-            }
+            safe_payload = _safe_profile_payload(payload)
+            profile_content = safe_payload
             content = json.dumps(profile_content, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             item_url = str(source.source_url) if source.source_url else None
             canonical_url = str(source.canonical_url) if source.canonical_url else item_url
-            attrs = self._attrs(source, payload, item_source_url=item_url, item_canonical_url=canonical_url)
+            attrs = self._attrs(source, safe_payload, item_source_url=item_url, item_canonical_url=canonical_url)
             attrs["aggregation_info"] = {
-                key: payload[key]
-                for key in ("aggregation_grain", "aggregation_window", "calendar_month", "source_record_count", "raw_record_summary")
+                key: safe_payload[key]
+                for key in (
+                    "aggregation_grain", "aggregation_window", "calendar_month", "currency",
+                    "source_record_count", "raw_record_summary",
+                )
             }
             raw = self._raw_provenance(
                 source,
                 item_source_url=item_url,
                 item_canonical_url=canonical_url,
-                values={key: payload[key] for key in ("company_id", "country_code", "hs_code", "calendar_month", "aggregation_grain", "source_record_count")},
+                values={key: safe_payload[key] for key in ("company_id", "country_code", "hs_code", "calendar_month", "aggregation_grain", "source_record_count")},
             )
             locator = {"profile": "monthly_company_hs", "raw": raw}
-            identity = f"{payload['company_id']}:{payload['country_code']}:{payload['hs_code']}:{payload['calendar_month']}"
-            return [self._record(source, payload["company"], content, attrs, [{"text": content, "locator": locator}], identity)]
+            identity = f"{safe_payload['company_id']}:{safe_payload['country_code']}:{safe_payload['hs_code']}:{safe_payload['calendar_month']}"
+            return [self._record(source, safe_payload["company"], content, attrs, [{"text": content, "locator": locator}], identity)]
 
         key = "products" if source.source_type is SourceType.B2B else "stories"
         values = payload.get(key)
@@ -765,7 +785,7 @@ class DocumentRouter:
                 identity = str(item["product_id"])
                 title = item["product_name"]
                 content = self._b2b_evidence_text(
-                    _without_evaluation_fields(item, preserve_business_labels=True)
+                    _without_evaluation_fields(item, source_type=SourceType.B2B)
                 )
                 item_url = item["url"]
                 canonical_url = item.get("canonical_url") or item_url
