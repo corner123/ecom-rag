@@ -47,6 +47,9 @@ def _sql(
     truncated: bool = False,
     scope: str = "top",
     metric_value: object = Decimal("12.30"),
+    result_rows: tuple[dict[str, object], ...] | None = None,
+    where_override: str | None = None,
+    filter_names_override: tuple[str, ...] | None = None,
 ) -> Evidence:
     dimensions: dict[str, object] = {}
     if currency is not None:
@@ -56,7 +59,7 @@ def _sql(
     if time_grain == "month":
         dimensions["trade_date"] = "2026-08"
     row = {"importer_company": "Acme", **dimensions, metric: metric_value}
-    result_rows = (row,) if rows else ()
+    effective_rows = result_rows if result_rows is not None else (row,) if rows else ()
     grain = aggregation_grain
     if grain is None:
         grain = ("importer_company",) + (("trade_date",) if time_grain == "month" else ())
@@ -76,6 +79,8 @@ def _sql(
             "AND tr.trade_date BETWEEN :filter_2_start AND :filter_2_end"
         )
         filter_names = ("filter_0_0", "filter_1_0", "filter_2_end", "filter_2_start")
+    where = where_override or where
+    filter_names = filter_names if filter_names_override is None else filter_names_override
     result = SqlExecutionResult(
         query_id="sqlq_" + "a" * 64,
         normalized_sql=(
@@ -84,7 +89,10 @@ def _sql(
             "JOIN companies AS importer ON tr.importer_id = importer.id "
             "JOIN countries AS import_country ON tr.import_country_id = import_country.id "
             "JOIN hs_codes AS hs ON tr.hs_code_id = hs.id "
-            f"WHERE {where} LIMIT 50"
+            "JOIN data_sources AS data_scope ON tr.source_id = data_scope.id "
+            "WHERE data_scope.is_synthetic = :policy_is_synthetic "
+            "AND tr.trade_date BETWEEN :policy_start_date AND :policy_end_date "
+            f"AND {where} LIMIT 50"
         ),
         bound_filter_names=(*filter_names,
             "policy_end_date", "policy_is_synthetic", "policy_start_date",
@@ -97,10 +105,10 @@ def _sql(
         aggregation_grain=grain,
         time_grain=time_grain,
         metric_names=(metric,),
-        rows=result_rows,
-        row_count=len(result_rows),
-        result_hash=ReadOnlySqlExecutor._hash_rows(result_rows),
-        raw_record_locators=(RawRecordLocator(source_id=7, raw_record_id="ROW-9"),) if rows else (),
+        rows=effective_rows,
+        row_count=len(effective_rows),
+        result_hash=ReadOnlySqlExecutor._hash_rows(effective_rows),
+        raw_record_locators=(RawRecordLocator(source_id=7, raw_record_id="ROW-9"),) if effective_rows else (),
         raw_record_locators_truncated=truncated,
         estimated_scan_rows=3,
         execution_ms=2.5,
@@ -130,6 +138,9 @@ def _rag(
     rerank_score: float | None = 0.2,
     source_weight: float = 0.8,
     conflict_group_id: str | None = None,
+    currencies: tuple[str, ...] = (),
+    units: tuple[str, ...] = (),
+    aggregation_grain: tuple[str, ...] = (),
 ) -> Evidence:
     if content is None:
         content = f"Acme opened audited production line {suffix} and remains operational."
@@ -203,9 +214,9 @@ def _rag(
         valid_from=valid_from,
         valid_to=valid_to,
         time_grain="document",
-        currencies=(),
-        units=(),
-        aggregation_grain=(),
+        currencies=currencies,
+        units=units,
+        aggregation_grain=aggregation_grain,
         confidence=1.0,
         confidence_basis="content_hash_verified",
         is_synthetic=True,
@@ -242,9 +253,19 @@ def _context_for(intent: QueryIntent, evidence: tuple[Evidence, ...]):
     reports = []
     for branch in sorted(branches):
         branch_evidence = tuple(item for item in evidence if item.locator.branch == branch)
-        degraded = tuple(sorted({component for item in branch_evidence if item.retrieval_provenance for component in item.retrieval_provenance.degraded_components}))
+        observed = {component for item in branch_evidence if item.retrieval_provenance for component in item.retrieval_provenance.degraded_components}
+        fatal = observed & {
+            "all_retrievers_unavailable", "branch_timeout", "required_branch_timeout",
+            "retrieval_timeout", "retrieval_unavailable", "sql_timeout", "sql_unavailable",
+        }
+        degraded = tuple(sorted(observed - fatal))
+        errors = ()
+        if any("timeout" in item for item in fatal):
+            errors = ("timeout",)
+        elif fatal:
+            errors = ("unavailable",)
         reports.append(BranchExecutionReport(branch=branch, attempted=True, completed=True,
-            zero_hits=not branch_evidence, degraded_components=degraded, error_codes=()))
+            zero_hits=not branch_evidence, degraded_components=degraded, error_codes=errors))
     return ValidationContext(branch_reports=tuple(reports))
 
 
@@ -464,7 +485,7 @@ def test_validator_uses_the_injected_versioned_source_policy() -> None:
     policy = base.model_copy(update={
         "fact_sources": sources,
         "authority_rules": tuple(sorted((*base.authority_rules, SourceAuthorityRule(
-            rule_id="social.reviewed", source_type="social",
+            rule_id="social.reviewed", publisher_id="social-demo", source_type="social",
             domain_suffixes=("social.example",), directness="secondary",
         )), key=lambda item: item.rule_id)),
     })
@@ -538,7 +559,7 @@ def test_unresolved_relevant_conflict_blocks_generation(validator) -> None:
         fact_type="company_status",
         evidence_ids=(left.evidence_id, right.evidence_id),
         status="unresolved",
-        valid_from=date(2026, 8, 1),
+        valid_from=date(2026, 8, 20),
         explanation="Current sources disagree.",
     )
 
@@ -561,7 +582,7 @@ def test_resolved_conflict_uses_only_selected_support_and_is_order_independent(v
         fact_type="company_status",
         evidence_ids=tuple(sorted((selected.evidence_id, rejected.evidence_id))),
         status="resolved",
-        valid_from=date(2026, 8, 1),
+        valid_from=date(2026, 8, 20),
         explanation="The official correction supersedes the report.",
         selected_evidence_ids=(selected.evidence_id,),
     )
@@ -760,7 +781,7 @@ def test_review_branch_reports_prevent_clean_hit_dilution_and_describe_zero_hit_
         branch_reports=(
             BranchExecutionReport(
                 branch="rag", attempted=True, completed=False, zero_hits=False,
-                degraded_components=("retrieval_timeout",), error_codes=("retrieval_timeout",),
+                degraded_components=(), error_codes=("timeout",),
             ),
         )
     )
@@ -772,8 +793,8 @@ def test_review_branch_reports_prevent_clean_hit_dilution_and_describe_zero_hit_
         branch_reports=(
             BranchExecutionReport(
                 branch="rag", attempted=True, completed=True, zero_hits=True,
-                degraded_components=("retrieval_unavailable",),
-                error_codes=("retrieval_unavailable",),
+                degraded_components=(),
+                error_codes=("unavailable",),
             ),
         )
     )
@@ -883,3 +904,248 @@ def test_review_policy_fingerprint_changes_with_semantics_and_rejects_tamper() -
     forged["policy_fingerprint"] = original.policy_fingerprint
     with pytest.raises(ValidationError):
         SufficiencyPolicy.model_validate(forged)
+
+
+def test_round2_branch_taxonomy_is_closed_coherent_and_hard_errors_refuse() -> None:
+    from trade_agent.evidence.validator import BranchExecutionReport, EvidenceValidator, ValidationContext
+
+    with pytest.raises(ValidationError):
+        BranchExecutionReport(
+            branch="rag", attempted=True, completed=False, zero_hits=False,
+            error_codes=("invented_error",),
+        )
+    with pytest.raises(ValidationError):
+        BranchExecutionReport(
+            branch="rag", attempted=False, completed=False, zero_hits=False,
+            error_codes=(),
+        )
+    intent = _intent("Acme 官网最近状态", filters=RetrievalFilter(entity_ids=("company:acme",)))
+    context = ValidationContext(branch_reports=(BranchExecutionReport(
+        branch="rag", attempted=True, completed=False, zero_hits=False,
+        error_codes=("policy_denied",),
+    ),))
+    outcome = EvidenceValidator().validate(
+        intent, (_rag(suffix="hard-error"),), (), AS_OF, context=context,
+    )
+
+    assert outcome.decision == "refuse"
+    assert "branch_hard_error" in _codes(outcome)
+
+
+def test_round2_sql_scope_requires_exact_columns_placeholders_and_no_unused() -> None:
+    intent = _intent(
+        "最近半年美国采购 HS850440 金额最高的 10 家公司",
+        filters=RetrievalFilter(entity_ids=("company:one", "company:two")),
+    )
+    wrong_alias = _sql(
+        where_override=(
+            "exporter.id IN (:filter_0_0, :filter_0_1) "
+            "AND import_country.country_code = :filter_1_0 "
+            "AND hs.hs_code = :filter_2_0 "
+            "AND tr.trade_date BETWEEN :filter_3_start AND :filter_3_end"
+        ),
+        filter_names_override=(
+            "filter_0_0", "filter_0_1", "filter_1_0", "filter_2_0",
+            "filter_3_end", "filter_3_start",
+        ),
+    )
+    unused = _sql(filter_names_override=(
+        "filter_0_0", "filter_1_0", "filter_2_end", "filter_2_start", "filter_9_0",
+    ))
+    disguised_unused = _sql(
+        where_override=(
+            "import_country.country_code = :filter_0_0 "
+            "AND hs.hs_code = :filter_1_0 "
+            "AND tr.trade_date BETWEEN :filter_2_start AND :filter_2_end "
+            "AND importer.id = :misc_scope"
+        ),
+        filter_names_override=(
+            "filter_0_0", "filter_1_0", "filter_2_end", "filter_2_start",
+            "misc_scope",
+        ),
+    )
+
+    assert "dimension_mismatch" in _codes(validator := _validated(intent, (wrong_alias,)))
+    assert not validator.can_answer
+    assert "invalid_contract" in _codes(_validated(
+        _intent("最近半年美国采购 HS850440 金额最高的 10 家公司"), (unused,),
+    ))
+    assert "invalid_contract" in _codes(_validated(
+        _intent("最近半年美国采购 HS850440 金额最高的 10 家公司"),
+        (disguised_unused,),
+    ))
+
+
+def test_round2_sql_scope_accepts_all_atomic_values_on_canonical_columns() -> None:
+    intent = _intent(
+        "最近半年美国采购 HS850440 金额最高的 10 家公司",
+        filters=RetrievalFilter(entity_ids=("company:one", "company:two")),
+    )
+    evidence = _sql(
+        where_override=(
+            "importer.id IN (:filter_0_0, :filter_0_1) "
+            "AND import_country.country_code = :filter_1_0 "
+            "AND hs.hs_code = :filter_2_0 "
+            "AND tr.trade_date BETWEEN :filter_3_start AND :filter_3_end"
+        ),
+        filter_names_override=(
+            "filter_0_0", "filter_0_1", "filter_1_0", "filter_2_0",
+            "filter_3_end", "filter_3_start",
+        ),
+    )
+
+    assert _validated(intent, (evidence,)).can_answer is True
+
+
+def test_round2_date_as_of_is_end_of_day_but_datetime_is_exact(validator) -> None:
+    intent = _intent("Acme 官网最近状态", filters=RetrievalFilter(entity_ids=("company:acme",)))
+    same_day = _rag(
+        suffix="same-day-evening",
+        publish_time=datetime(2026, 9, 4, 23, 59, 59, tzinfo=timezone.utc),
+        valid_from=datetime(2026, 9, 4, 23, 59, 59, tzinfo=timezone.utc),
+    )
+
+    assert validator.validate(intent, (same_day,), (), AS_OF).can_answer is True
+    exact_noon = validator.validate(
+        intent, (same_day,), (), datetime(2026, 9, 4, 12, tzinfo=timezone.utc),
+    )
+    assert not exact_noon.can_answer and "out_of_scope" in _codes(exact_noon)
+
+
+def test_round2_same_publisher_pages_are_not_independent_and_policy_axes_execute(validator) -> None:
+    from trade_agent.evidence.requirements import SufficiencyPolicy
+
+    intent = _intent("Acme 是否值得跟进", filters=RetrievalFilter(entity_ids=("company:acme",)))
+    pages = (
+        _rag(suffix="publisher-page-one", source_id="https://official.example/page/one"),
+        _rag(suffix="publisher-page-two", source_id="https://official.example/page/two"),
+    )
+    evidence = (_sql(start=date(2025, 9, 4), scope="lead"), *pages)
+    strict = validator.validate(intent, evidence, (), AS_OF)
+    cluster_only = SufficiencyPolicy().model_copy(
+        update={"independence_dimensions": ("dedupe_cluster_id",)}
+    )
+    relaxed = _validated(intent, evidence, policy=cluster_only)
+
+    assert not strict.can_answer and "insufficient_diversity" in _codes(strict)
+    assert relaxed.can_answer is True
+    assert strict.policy_fingerprint != relaxed.policy_fingerprint
+
+
+def test_round2_conflict_scope_currency_unit_grain_and_validity_must_close(validator) -> None:
+    conflict_id = "conflict_" + "7" * 64
+    intent = _intent("Acme 官网最近状态", filters=RetrievalFilter(entity_ids=("company:acme",)))
+    first = _rag(suffix="scope-one", conflict_group_id=conflict_id)
+    second = _rag(
+        suffix="scope-two", source_type="industry_news", conflict_group_id=conflict_id,
+    )
+    conflict = Conflict(
+        conflict_id=conflict_id, entity_id="company:acme", fact_type="company_status",
+        evidence_ids=tuple(sorted((first.evidence_id, second.evidence_id))),
+        status="resolved", currency="USD", unit="kg",
+        aggregation_grain=("month",), valid_from=date(2026, 8, 1),
+        explanation="Scope does not match either Evidence item.",
+        selected_evidence_ids=(first.evidence_id,),
+    )
+
+    outcome = validator.validate(intent, (first, second), (conflict,), AS_OF)
+
+    assert not outcome.can_answer
+    assert "conflict_mismatch" in _codes(outcome)
+
+    hidden = _rag(suffix="hidden-status", conflict_group_id=conflict_id)
+    risk_left = _rag(
+        suffix="risk-left", fact_type="risk", content="Acme reported an active recall risk.",
+        conflict_group_id=conflict_id,
+    )
+    risk_right = _rag(
+        suffix="risk-right", fact_type="risk", content="Acme reported no recall risk.",
+        source_type="industry_news", conflict_group_id=conflict_id,
+    )
+    unrelated = Conflict(
+        conflict_id=conflict_id, entity_id="company:acme", fact_type="risk",
+        evidence_ids=tuple(sorted((risk_left.evidence_id, risk_right.evidence_id))),
+        status="resolved", valid_from=date(2026, 8, 20),
+        explanation="The risk report does not cover the hidden status Evidence.",
+        selected_evidence_ids=(risk_left.evidence_id,),
+    )
+    hidden_outcome = validator.validate(
+        intent, (hidden, risk_left, risk_right), (unrelated,), AS_OF,
+    )
+
+    assert not hidden_outcome.can_answer
+    assert "conflict_mismatch" in _codes(hidden_outcome)
+
+
+def test_round2_requirements_and_result_branches_reject_joint_forgery(validator) -> None:
+    from trade_agent.evidence.requirements import EvidenceRequirements
+    from trade_agent.evidence.validator import ValidationOutcome
+
+    intent = _intent("Acme 官网最近状态", filters=RetrievalFilter(entity_ids=("company:acme",)))
+    outcome = validator.validate(intent, (_rag(suffix="fingerprinted"),), (), AS_OF)
+    forged_requirements = outcome.requirements.model_dump(mode="python")
+    forged_requirements["items"][0]["maximum_age_days"] = 9_999
+    with pytest.raises(ValidationError):
+        EvidenceRequirements.model_validate(forged_requirements)
+    forged_outcome = outcome.model_dump(mode="python")
+    forged_outcome["satisfied_requirements"][0]["branch"] = "sql"
+    with pytest.raises(ValidationError):
+        ValidationOutcome.model_validate(forged_outcome)
+    insufficient = validator.validate(intent, (), (), AS_OF)
+    retryable_refusal = insufficient.model_dump(mode="python")
+    retryable_refusal["error_code"] = "evidence_retryable"
+    with pytest.raises(ValidationError):
+        ValidationOutcome.model_validate(retryable_refusal)
+
+
+def test_round2_sql_rows_require_complete_currency_or_unit_scope(validator) -> None:
+    amount = _intent("最近半年美国采购 HS850440 金额最高的 10 家公司")
+    amount_rows = (
+        {"importer_company": "Acme", "currency": "USD", "trade_amount": "12.30"},
+        {"importer_company": "Beta", "currency": None, "trade_amount": "10.00"},
+    )
+    quantity = _intent("中国出口 HS850440 的月度数量")
+    quantity_rows = (
+        {"importer_company": "Acme", "trade_date": "2026-08", "unit": "kg", "quantity": "12"},
+        {"importer_company": "Beta", "trade_date": "2026-08", "unit": None, "quantity": "10"},
+    )
+
+    amount_outcome = validator.validate(
+        amount, (_sql(result_rows=amount_rows),), (), AS_OF,
+    )
+    quantity_outcome = validator.validate(
+        quantity,
+        (_sql(metric="quantity", currency=None, unit="kg", time_grain="month",
+              aggregation_grain=("trade_date", "unit"), scope="quantity",
+              result_rows=quantity_rows),),
+        (), AS_OF,
+    )
+
+    assert "currency_missing" in _codes(amount_outcome)
+    assert "unit_missing" in _codes(quantity_outcome)
+
+
+def test_round2_partial_degradation_mode_changes_fingerprint_and_result() -> None:
+    from trade_agent.evidence.requirements import SufficiencyPolicy
+
+    intent = _intent("Acme 官网最近状态", filters=RetrievalFilter(entity_ids=("company:acme",)))
+    evidence = (_rag(suffix="partial-policy"),)
+    audit_policy = SufficiencyPolicy()
+    block_policy = audit_policy.model_copy(update={"partial_degradation_mode": "block"})
+    from trade_agent.evidence.validator import BranchExecutionReport, EvidenceValidator, ValidationContext
+    context = ValidationContext(branch_reports=(BranchExecutionReport(
+        branch="rag", attempted=True, completed=True, zero_hits=False,
+        degraded_components=("dense_unavailable",), error_codes=(),
+    ),))
+
+    audit = EvidenceValidator(audit_policy).validate(
+        intent, evidence, (), AS_OF, context=context,
+    )
+    blocked = EvidenceValidator(block_policy).validate(
+        intent, evidence, (), AS_OF, context=context,
+    )
+
+    assert audit.can_answer is True
+    assert blocked.decision == "refuse"
+    assert "partial_degradation" in _codes(blocked)
+    assert audit.policy_fingerprint != blocked.policy_fingerprint

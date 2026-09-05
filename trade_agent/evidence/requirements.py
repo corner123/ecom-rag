@@ -13,6 +13,26 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, Strict
 from trade_agent.agents.intent import QueryIntent
 
 Branch = Literal["sql", "rag"]
+BranchErrorCode = Literal[
+    "invalid_contract", "policy_denied", "schema_drift", "timeout", "transport",
+    "unavailable", "unknown",
+]
+PartialDegradationCode = Literal[
+    "dense_unavailable", "reranker_unavailable", "sparse_unavailable",
+    "structured_output_unavailable",
+]
+FatalDegradationCode = Literal[
+    "all_retrievers_unavailable", "branch_timeout", "required_branch_timeout",
+    "retrieval_timeout", "retrieval_unavailable", "sql_timeout", "sql_unavailable",
+]
+IndependenceDimension = Literal[
+    "content_sha256", "dedupe_cluster_id", "publisher_identity",
+]
+SqlScopeColumn = Literal[
+    "export_country.country_code", "exporter.company_name", "exporter.id",
+    "hs.hs_code", "import_country.country_code", "importer.company_name",
+    "importer.id",
+]
 
 
 class InvalidIntentContract(ValueError):
@@ -56,6 +76,7 @@ class FactSourcePolicy(_Contract):
 
 class SourceAuthorityRule(_Contract):
     rule_id: StrictStr
+    publisher_id: StrictStr
     source_type: StrictStr
     exact_source_identities: tuple[StrictStr, ...] = ()
     domain_suffixes: tuple[StrictStr, ...] = ()
@@ -63,8 +84,8 @@ class SourceAuthorityRule(_Contract):
 
     @model_validator(mode="after")
     def stable(self) -> Self:
-        if not self.rule_id.strip() or not self.source_type.strip():
-            raise ValueError("authority rule identity and source type are required")
+        if not self.rule_id.strip() or not self.publisher_id.strip() or not self.source_type.strip():
+            raise ValueError("authority rule, publisher, and source type are required")
         for values in (self.exact_source_identities, self.domain_suffixes):
             if values != tuple(sorted(set(values))) or any(not item.strip() for item in values):
                 raise ValueError("authority identities must be nonblank, sorted and unique")
@@ -73,25 +94,15 @@ class SourceAuthorityRule(_Contract):
         return self
 
 
-_DEFAULT_AUTHORITY_RULES = (
-    SourceAuthorityRule(rule_id="b2b.reviewed", source_type="b2b", domain_suffixes=("marketplace.example",), directness="secondary"),
-    SourceAuthorityRule(rule_id="customs.reviewed", source_type="customs_profile", domain_suffixes=("profiles.example",), directness="authoritative"),
-    SourceAuthorityRule(rule_id="news.reviewed", source_type="industry_news", domain_suffixes=("news.example", "newsroom.example", "syndication.example"), directness="secondary"),
-    SourceAuthorityRule(rule_id="official.acme", source_type="official_website", domain_suffixes=("acme.example",), directness="direct"),
-    SourceAuthorityRule(
-        rule_id="official.reviewed",
-        source_type="official_website",
-        domain_suffixes=(
-            "company-01.example", "company-02.example", "company-03.example",
-            "company-04.example", "company-05.example", "company-06.example",
-            "company-07.example", "company-08.example", "company-09.example",
-            "company-10.example", "company-11.example", "company-12.example",
-            "official.example",
-        ),
-        directness="direct",
-    ),
-    SourceAuthorityRule(rule_id="regulator.reviewed", source_type="regulator", domain_suffixes=("regulator.example",), directness="authoritative"),
-)
+_DEFAULT_AUTHORITY_RULES = tuple(sorted((
+    SourceAuthorityRule(rule_id="b2b.reviewed", publisher_id="synthetic-marketplace", source_type="b2b", domain_suffixes=("marketplace.example",), directness="secondary"),
+    SourceAuthorityRule(rule_id="customs.reviewed", publisher_id="synthetic-customs", source_type="customs_profile", domain_suffixes=("profiles.example",), directness="authoritative"),
+    SourceAuthorityRule(rule_id="news.reviewed", publisher_id="synthetic-newswire", source_type="industry_news", domain_suffixes=("news.example", "newsroom.example", "syndication.example"), directness="secondary"),
+    SourceAuthorityRule(rule_id="official.acme", publisher_id="acme", source_type="official_website", domain_suffixes=("acme.example",), directness="direct"),
+    *(SourceAuthorityRule(rule_id=f"official.company-{index:02d}", publisher_id=f"company-{index:02d}", source_type="official_website", domain_suffixes=(f"company-{index:02d}.example",), directness="direct") for index in range(1, 13)),
+    SourceAuthorityRule(rule_id="official.reviewed", publisher_id="official-demo", source_type="official_website", domain_suffixes=("official.example",), directness="direct"),
+    SourceAuthorityRule(rule_id="regulator.reviewed", publisher_id="synthetic-regulator", source_type="regulator", domain_suffixes=("regulator.example",), directness="authoritative"),
+), key=lambda item: item.rule_id))
 
 
 class SufficiencyPolicy(_Contract):
@@ -121,12 +132,18 @@ class SufficiencyPolicy(_Contract):
     lead_status_independent_sources: StrictInt = Field(default=2, ge=1)
     external_independent_sources: StrictInt = Field(default=1, ge=1)
     lead_sql_maximum_age_days: StrictInt = Field(default=365, gt=0)
-    independence_dimensions: tuple[Literal["content_sha256", "dedupe_cluster_id", "source_identity"], ...] = ("content_sha256", "dedupe_cluster_id", "source_identity")
-    fatal_degraded_components: tuple[StrictStr, ...] = (
+    independence_dimensions: tuple[IndependenceDimension, ...] = ("content_sha256", "dedupe_cluster_id", "publisher_identity")
+    fatal_error_codes: tuple[BranchErrorCode, ...] = ("timeout", "transport", "unavailable")
+    hard_error_codes: tuple[BranchErrorCode, ...] = ("invalid_contract", "policy_denied", "schema_drift", "unknown")
+    fatal_evidence_degraded_components: tuple[FatalDegradationCode, ...] = (
         "all_retrievers_unavailable", "branch_timeout", "required_branch_timeout",
         "retrieval_timeout", "retrieval_unavailable", "sql_timeout", "sql_unavailable",
     )
-    partial_degraded_components_are_blocking: Literal[False] = False
+    partial_degraded_components: tuple[PartialDegradationCode, ...] = (
+        "dense_unavailable", "reranker_unavailable", "sparse_unavailable",
+        "structured_output_unavailable",
+    )
+    partial_degradation_mode: Literal["audit_only", "block"] = "audit_only"
     policy_fingerprint: StrictStr = ""
 
     @model_validator(mode="after")
@@ -138,11 +155,20 @@ class SufficiencyPolicy(_Contract):
         rule_ids = tuple(item.rule_id for item in self.authority_rules)
         if rule_ids != tuple(sorted(set(rule_ids))):
             raise ValueError("authority rules must be sorted by unique rule ID")
-        for values in (self.accepted_authority_directness, self.independence_dimensions, self.fatal_degraded_components):
+        for values in (
+            self.accepted_authority_directness, self.independence_dimensions,
+            self.fatal_error_codes, self.hard_error_codes,
+            self.fatal_evidence_degraded_components, self.partial_degraded_components,
+        ):
             if values != tuple(sorted(set(values))):
                 raise ValueError("policy tuple values must be sorted and unique")
+        if not self.independence_dimensions:
+            raise ValueError("at least one independence dimension is required")
+        all_errors = {"invalid_contract", "policy_denied", "schema_drift", "timeout", "transport", "unavailable", "unknown"}
+        if set(self.fatal_error_codes) & set(self.hard_error_codes) or set(self.fatal_error_codes) | set(self.hard_error_codes) != all_errors:
+            raise ValueError("fatal and hard branch errors must exactly partition the closed taxonomy")
         expected = _policy_fingerprint(self)
-        if self.policy_fingerprint and self.policy_fingerprint != expected:
+        if "policy_fingerprint" in self.model_fields_set and self.policy_fingerprint != expected:
             raise ValueError("policy_fingerprint does not match policy semantics")
         object.__setattr__(self, "policy_fingerprint", expected)
         return self
@@ -154,7 +180,6 @@ class SufficiencyPolicy(_Contract):
         values.pop("policy_fingerprint", None)
         if update:
             values.update(update)
-        values.setdefault("policy_fingerprint", "")
         return type(self).model_validate(values)
 
     @property
@@ -190,6 +215,10 @@ class EvidenceRequirement(_Contract):
     required_hs_codes: tuple[StrictStr, ...] = ()
     required_metrics: tuple[StrictStr, ...] = ()
     required_dimensions: tuple[StrictStr, ...] = ()
+    required_entity_column: SqlScopeColumn | None = None
+    required_company_column: SqlScopeColumn | None = None
+    required_country_column: SqlScopeColumn | None = None
+    required_hs_column: SqlScopeColumn | None = None
     required_time_grain: StrictStr | None = None
     require_currency: StrictBool = False
     require_unit: StrictBool = False
@@ -223,6 +252,7 @@ class EvidenceRequirements(_Contract):
     intent_valid: StrictBool = True
     required_branches: tuple[Branch, ...]
     items: tuple[EvidenceRequirement, ...]
+    requirements_fingerprint: StrictStr = ""
 
     @model_validator(mode="after")
     def stable_contract(self) -> Self:
@@ -235,7 +265,20 @@ class EvidenceRequirements(_Contract):
             raise ValueError("required branches must equal requirement branches")
         if self.intent_valid and self.intent_kind != "out_of_scope" and not self.items:
             raise ValueError("a supported intent must produce requirements")
+        expected = _requirements_fingerprint(self)
+        if "requirements_fingerprint" in self.model_fields_set and self.requirements_fingerprint != expected:
+            raise ValueError("requirements_fingerprint does not match requirement semantics")
+        object.__setattr__(self, "requirements_fingerprint", expected)
         return self
+
+    def model_copy(self, *, update: Mapping[str, object] | None = None, deep: bool = False) -> Self:
+        values = self.model_dump(mode="python")
+        if deep:
+            values = deepcopy(values)
+        values.pop("requirements_fingerprint", None)
+        if update:
+            values.update(update)
+        return type(self).model_validate(values)
 
     @classmethod
     def invalid(cls, kind: str, policy: SufficiencyPolicy) -> "EvidenceRequirements":
@@ -251,6 +294,8 @@ class EvidenceRequirements(_Contract):
         countries = _union(intent.filters.country_codes, intent.retrieval_filter.country_codes)
         hs_codes = _union(intent.filters.hs_codes, intent.retrieval_filter.hs_codes)
         company_names = tuple(sorted(set(intent.filters.company_names)))
+        company_alias = "importer" if intent.filters.company_role == "importer_company" else "exporter"
+        country_alias = "import_country" if intent.filters.company_role == "importer_company" else "export_country"
         synthetic = intent.retrieval_filter.is_synthetic
 
         if intent.need_trade_data:
@@ -263,6 +308,10 @@ class EvidenceRequirements(_Contract):
                 maximum_age_days=policy.lead_sql_maximum_age_days if intent.kind == "lead_assessment" and intent.time_range.end is None else None,
                 required_entity_ids=entity_ids, required_company_names=company_names, required_country_codes=countries, required_hs_codes=hs_codes,
                 required_metrics=(metric,), required_dimensions=dimensions, required_time_grain=intent.time_range.grain,
+                required_entity_column=f"{company_alias}.id",
+                required_company_column=f"{company_alias}.company_name",
+                required_country_column=f"{country_alias}.country_code",
+                required_hs_column="hs.hs_code",
                 require_currency=metric == "trade_amount", require_unit=metric == "quantity", temporal_start=intent.time_range.start,
                 temporal_end=intent.time_range.end, require_synthetic=synthetic))
 
@@ -295,6 +344,12 @@ class EvidenceRequirements(_Contract):
         ordered = tuple(sorted(items, key=lambda item: item.requirement_id))
         return cls(policy_version=policy.policy_version, policy_fingerprint=policy.policy_fingerprint, intent_kind=intent.kind,
             required_branches=tuple(sorted({item.branch for item in ordered})), items=ordered)
+
+
+def _requirements_fingerprint(requirements: EvidenceRequirements) -> str:
+    payload = requirements.model_dump(mode="json", exclude={"requirements_fingerprint"})
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return sha256(canonical.encode()).hexdigest()
 
 
 def validated_intent(value: QueryIntent) -> QueryIntent:

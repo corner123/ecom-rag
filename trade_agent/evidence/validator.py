@@ -16,25 +16,27 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, Strict
 from trade_agent.agents.intent import QueryIntent
 from trade_agent.evidence.models import Conflict, Evidence
 from trade_agent.evidence.requirements import (
+    BranchErrorCode,
     DEFAULT_SUFFICIENCY_POLICY,
     EvidenceRequirement,
     EvidenceRequirements,
     InvalidIntentContract,
+    PartialDegradationCode,
     SourceAuthorityRule,
     SufficiencyPolicy,
 )
 
 ReasonCode = Literal[
-    "branch_report_missing", "branch_zero_hits", "conflict_mismatch", "contradictory",
+    "branch_hard_error", "branch_report_missing", "branch_zero_hits", "conflict_mismatch", "contradictory",
     "currency_missing", "degraded_branch", "dimension_mismatch", "empty_result",
     "fact_type_mismatch", "grain_mismatch", "insufficient_diversity", "invalid_contract",
     "invalid_intent", "invalid_metric", "low_authority", "metric_mismatch", "missing", "missing_locator",
-    "out_of_scope", "stale", "temporal_gap", "truncated_locator", "unit_missing",
+    "out_of_scope", "partial_degradation", "stale", "temporal_gap", "truncated_locator", "unit_missing",
     "unknown_fact", "unresolved_entity", "unsupported_fact_content",
 ]
 _ORDERED_CODES = (
     "out_of_scope", "invalid_intent", "conflict_mismatch", "contradictory", "invalid_contract",
-    "branch_report_missing", "degraded_branch", "branch_zero_hits", "missing", "empty_result",
+    "branch_report_missing", "branch_hard_error", "degraded_branch", "partial_degradation", "branch_zero_hits", "missing", "empty_result",
     "missing_locator", "truncated_locator", "unresolved_entity", "unknown_fact",
     "fact_type_mismatch", "unsupported_fact_content", "low_authority", "dimension_mismatch",
     "metric_mismatch", "invalid_metric", "grain_mismatch", "currency_missing", "unit_missing", "temporal_gap",
@@ -61,8 +63,8 @@ class BranchExecutionReport(_Contract):
     attempted: StrictBool
     completed: StrictBool
     zero_hits: StrictBool
-    degraded_components: tuple[StrictStr, ...] = ()
-    error_codes: tuple[StrictStr, ...] = ()
+    degraded_components: tuple[PartialDegradationCode, ...] = ()
+    error_codes: tuple[BranchErrorCode, ...] = ()
 
     @model_validator(mode="after")
     def coherent(self) -> Self:
@@ -73,6 +75,12 @@ class BranchExecutionReport(_Contract):
             raise ValueError("completed branch must have been attempted")
         if self.zero_hits and (not self.attempted or not self.completed):
             raise ValueError("zero_hits requires a completed attempt")
+        if not self.attempted and (self.completed or self.zero_hits or self.degraded_components or not self.error_codes):
+            raise ValueError("an unattempted branch requires an error and no execution state")
+        if self.attempted and not self.completed and not self.error_codes:
+            raise ValueError("an incomplete attempted branch requires an error")
+        if self.degraded_components and not self.attempted:
+            raise ValueError("partial degradation requires an attempted branch")
         return self
 
 
@@ -150,9 +158,6 @@ class ValidationOutcome(_Contract):
             raise ValueError("outcome policy fingerprint differs from requirements")
         if self.can_answer != (self.decision == "answer") or self.can_answer != (self.error_code is None):
             raise ValueError("answer, decision and error code disagree")
-        expected_error = {"answer": None, "rewrite_once": "evidence_retryable"}
-        if self.decision in expected_error and self.error_code != expected_error[self.decision]:
-            raise ValueError("decision and error code disagree")
         for values in (self.eligible_evidence_ids, self.excluded_evidence_ids, self.conflict_ids, self.degraded_components):
             if values != tuple(sorted(set(values))):
                 raise ValueError("outcome tuple must be sorted and unique")
@@ -165,6 +170,16 @@ class ValidationOutcome(_Contract):
             raise ValueError("requirement results must be sorted and unique")
         if set(satisfied_ids) & set(missing_ids) or set(satisfied_ids) | set(missing_ids) != required_ids:
             raise ValueError("satisfied and missing must exactly partition requirements")
+        requirement_by_id = {item.requirement_id: item for item in self.requirements.items}
+        for item in (*self.satisfied_requirements, *self.missing_requirements):
+            if requirement_by_id[item.requirement_id].branch != item.branch:
+                raise ValueError("requirement result branch differs from its requirement")
+        for reason in self.reasons:
+            if reason.requirement_id is not None and (
+                reason.requirement_id not in requirement_by_id
+                or reason.branch != requirement_by_id[reason.requirement_id].branch
+            ):
+                raise ValueError("reason requirement/branch does not exist in requirements")
         eligible = {evidence_id for item in self.satisfied_requirements for evidence_id in item.evidence_ids}
         if eligible != set(self.eligible_evidence_ids):
             raise ValueError("eligible Evidence must equal satisfied support")
@@ -176,20 +191,34 @@ class ValidationOutcome(_Contract):
             present = {reason.code for reason in self.reasons if reason.blocking and reason.requirement_id == item.requirement_id}
             if not set(item.reason_codes).issubset(present):
                 raise ValueError("missing reason codes lack matching blocking reasons")
+        expected_error = (
+            None if self.decision == "answer"
+            else "evidence_retryable" if self.decision == "rewrite_once"
+            else "invalid_intent" if "invalid_intent" in blocking
+            else "out_of_scope" if blocking == {"out_of_scope"} and not required_ids
+            else "evidence_conflict" if {"contradictory", "conflict_mismatch"} & blocking
+            else "evidence_insufficient"
+        )
+        if self.error_code != expected_error:
+            raise ValueError("decision, blockers, and error code disagree")
         if self.decision == "answer" and (self.missing_requirements or blocking or not required_ids):
             raise ValueError("answer requires nonempty fully satisfied unblocked requirements")
         if self.decision == "rewrite_once" and (not self.missing_requirements or "degraded_branch" not in blocking or blocking - {"degraded_branch", "branch_zero_hits", "missing"}):
             raise ValueError("rewrite_once is reserved for fatal branch degradation")
         if self.error_code == "evidence_conflict" and not ({"contradictory", "conflict_mismatch"} & blocking):
             raise ValueError("conflict error requires a conflict blocker")
-        if self.error_code == "invalid_intent" and "invalid_intent" not in blocking:
+        if (self.error_code == "invalid_intent") != ("invalid_intent" in blocking):
             raise ValueError("invalid intent error requires its blocker")
         if self.decision != "answer" and not blocking:
             raise ValueError("a non-answer requires a blocking reason")
         if self.error_code == "out_of_scope" and (blocking != {"out_of_scope"} or required_ids):
             raise ValueError("out-of-scope outcome requires only its terminal blocker")
+        if self.error_code != "out_of_scope" and not required_ids and "invalid_intent" not in blocking:
+            raise ValueError("zero-requirement outcomes must be out-of-scope or invalid intent")
         if self.error_code == "evidence_insufficient" and ({"contradictory", "conflict_mismatch"} & blocking):
             raise ValueError("conflict blockers require evidence_conflict")
+        if self.error_code == "evidence_insufficient" and "degraded_branch" in blocking and not (blocking - {"degraded_branch", "branch_zero_hits", "missing"}):
+            raise ValueError("fatal-only blockers require rewrite_once")
         return self
 
 
@@ -205,6 +234,7 @@ class EvidenceValidator:
         if isinstance(conflicts, (str, bytes)) or not isinstance(conflicts, Sequence):
             raise TypeError("conflicts must be a sequence")
         as_of_instant = _as_of_instant(as_of)
+        as_of_is_date = type(as_of) is date
         try:
             requirements = EvidenceRequirements.for_intent(intent, policy=self.policy)
         except InvalidIntentContract as error:
@@ -234,11 +264,13 @@ class EvidenceValidator:
             for item in branch_evidence:
                 if item.evidence_id in blocked_ids:
                     continue
-                item_failures = _check_evidence(requirement, item, as_of_instant, self.policy)
+                item_failures = _check_evidence(
+                    requirement, item, as_of_instant, as_of_is_date, self.policy
+                )
                 failures.extend(item_failures)
                 if not branch_blocked and not any(reason.blocking for reason in item_failures):
                     valid.append(item)
-            source_count = _independent_source_count(valid)
+            source_count = _independent_source_count(valid, self.policy)
             if not branch_blocked and source_count >= requirement.minimum_independent_sources:
                 ids = tuple(sorted(item.evidence_id for item in valid))
                 eligible_ids.update(ids)
@@ -290,7 +322,10 @@ def _context_reasons(requirements: EvidenceRequirements, context: ValidationCont
         except Exception:
             verified_context = ValidationContext(branch_reports=())
         reports = {item.branch: item for item in verified_context.branch_reports}
-    fatal = set(policy.fatal_degraded_components)
+    fatal_errors = set(policy.fatal_error_codes)
+    hard_errors = set(policy.hard_error_codes)
+    fatal_evidence = set(policy.fatal_evidence_degraded_components)
+    partial_evidence = set(policy.partial_degraded_components)
     degraded = {component for item in evidence if item.retrieval_provenance for component in item.retrieval_provenance.degraded_components}
     reasons: list[ValidationReason] = []
     fatal_branches: set[str] = set()
@@ -302,16 +337,30 @@ def _context_reasons(requirements: EvidenceRequirements, context: ValidationCont
                 reasons.append(ValidationReason(code="branch_report_missing", requirement_id=requirement.requirement_id, branch=branch, blocking=True, detail="required branch has no execution report"))
             continue
         degraded.update(report.degraded_components)
-        evidence_fatal = {component for item in evidence if item.locator.branch == branch and item.retrieval_provenance for component in item.retrieval_provenance.degraded_components} & fatal
-        report_fatal = (set(report.degraded_components) | set(report.error_codes)) & fatal
-        is_fatal = bool(evidence_fatal or report_fatal or not report.attempted or not report.completed)
+        evidence_components = {
+            component
+            for item in evidence
+            if item.locator.branch == branch and item.retrieval_provenance
+            for component in item.retrieval_provenance.degraded_components
+        }
+        evidence_fatal = evidence_components & fatal_evidence
+        report_unknown = set(report.degraded_components) - partial_evidence
+        evidence_unknown = evidence_components - fatal_evidence - partial_evidence
+        report_fatal = set(report.error_codes) & fatal_errors
+        report_hard = set(report.error_codes) & hard_errors
+        is_fatal = bool(evidence_fatal or report_fatal)
         if is_fatal:
             fatal_branches.add(branch)
             for requirement in branch_items:
                 reasons.append(ValidationReason(code="degraded_branch", requirement_id=requirement.requirement_id, branch=branch, blocking=True, detail="required branch execution is fatally degraded"))
-        elif report.degraded_components or report.error_codes:
+        if report_hard or report_unknown or evidence_unknown:
             for requirement in branch_items:
-                reasons.append(ValidationReason(code="degraded_branch", requirement_id=requirement.requirement_id, branch=branch, blocking=False, detail="required branch execution is partially degraded"))
+                reasons.append(ValidationReason(code="branch_hard_error", requirement_id=requirement.requirement_id, branch=branch, blocking=True, detail="required branch reported a non-retryable hard error"))
+        partial = (set(report.degraded_components) & partial_evidence) | (evidence_components & partial_evidence)
+        if partial:
+            blocks = policy.partial_degradation_mode == "block"
+            for requirement in branch_items:
+                reasons.append(ValidationReason(code="partial_degradation", requirement_id=requirement.requirement_id, branch=branch, blocking=blocks, detail="required branch execution is partially degraded"))
         if report.zero_hits:
             for requirement in branch_items:
                 reasons.append(ValidationReason(code="branch_zero_hits", requirement_id=requirement.requirement_id, branch=branch, blocking=True, detail="required branch completed with zero hits"))
@@ -379,6 +428,7 @@ def _conflict_reasons(requirements: EvidenceRequirements, evidence: tuple[Eviden
             or item.conflict_group_id != conflict.conflict_id
             or item.fact_type != conflict.fact_type
             or item.entity_id != conflict.entity_id
+            or not _conflict_scope_matches(item, conflict)
             for item in referenced
         )
         mismatch = mismatch or any(by_id[item].conflict_group_id != conflict.conflict_id for item in conflict.selected_evidence_ids if item in by_id)
@@ -403,12 +453,36 @@ def _conflict_reasons(requirements: EvidenceRequirements, evidence: tuple[Eviden
             for requirement in relevant:
                 reasons.append(ValidationReason(code="contradictory", requirement_id=requirement.requirement_id, branch=requirement.branch, evidence_ids=tuple(sorted(set(conflict.evidence_ids) & set(by_id))), blocking=True, detail=f"unresolved conflict {conflict.conflict_id} covers a core fact"))
     for item in evidence:
-        if item.conflict_group_id and item.conflict_group_id not in conflicts_by_id:
+        group = conflicts_by_id.get(item.conflict_group_id) if item.conflict_group_id else None
+        if item.conflict_group_id and (
+            group is None or item.evidence_id not in group.evidence_ids
+        ):
             blocked.add(item.evidence_id)
             for requirement in requirements.items:
                 if _evidence_relevant(requirement, item, as_of):
-                    reasons.append(ValidationReason(code="conflict_mismatch", requirement_id=requirement.requirement_id, branch=requirement.branch, evidence_ids=(item.evidence_id,), blocking=True, detail="Evidence names an unreported conflict group"))
+                    reasons.append(ValidationReason(code="conflict_mismatch", requirement_id=requirement.requirement_id, branch=requirement.branch, evidence_ids=(item.evidence_id,), blocking=True, detail="Evidence is not reported as a member of its named conflict group"))
     return reasons, blocked, tuple(sorted(relevant_ids))
+
+
+def _conflict_scope_matches(evidence: Evidence, conflict: Conflict) -> bool:
+    expected_currencies = () if conflict.currency is None else (conflict.currency,)
+    expected_units = () if conflict.unit is None else (conflict.unit,)
+    return (
+        evidence.currencies == expected_currencies
+        and evidence.units == expected_units
+        and evidence.aggregation_grain == conflict.aggregation_grain
+        and _temporal_scope_key(evidence.valid_from) == _temporal_scope_key(conflict.valid_from)
+        and _temporal_scope_key(evidence.valid_to) == _temporal_scope_key(conflict.valid_to)
+    )
+
+
+def _temporal_scope_key(value: date | datetime | None) -> tuple[str, str] | None:
+    if isinstance(value, datetime):
+        aware = _aware_instant(value)
+        return None if aware is None else ("instant", aware.isoformat())
+    if isinstance(value, date):
+        return ("date", value.isoformat())
+    return None
 
 
 def _conflict_relevant(requirement: EvidenceRequirement, conflict: Conflict, as_of: datetime) -> bool:
@@ -424,14 +498,14 @@ def _evidence_relevant(requirement: EvidenceRequirement, evidence: Evidence, as_
     return evidence.locator.branch == requirement.branch and evidence.fact_type in requirement.fact_types and (not requirement.required_entity_ids or evidence.entity_id in requirement.required_entity_ids)
 
 
-def _check_evidence(requirement: EvidenceRequirement, evidence: Evidence, as_of: datetime, policy: SufficiencyPolicy) -> list[ValidationReason]:
+def _check_evidence(requirement: EvidenceRequirement, evidence: Evidence, as_of: datetime, as_of_is_date: bool, policy: SufficiencyPolicy) -> list[ValidationReason]:
     failures: list[ValidationReason] = []
     def add(code: ReasonCode, detail: str, *, blocking: bool = True) -> None:
         failures.append(ValidationReason(code=code, requirement_id=requirement.requirement_id, branch=requirement.branch, evidence_ids=(evidence.evidence_id,), blocking=blocking, detail=detail))
     if evidence.locator.branch == "sql":
         _check_sql(requirement, evidence, as_of, add)
     else:
-        _check_rag(requirement, evidence, as_of, policy, add)
+        _check_rag(requirement, evidence, as_of, as_of_is_date, policy, add)
     return failures
 
 
@@ -454,10 +528,28 @@ def _check_sql(requirement: EvidenceRequirement, evidence: Evidence, as_of: date
     expected_grain = set(requirement.required_dimensions)
     if requirement.require_currency:
         expected_grain.add("currency")
-        if not evidence.currencies or "currency" not in provenance.aggregation_grain: add("currency_missing", "currency-valued aggregate lacks currency grain")
+        row_currencies = {
+            row.get("currency") for row in rows
+            if isinstance(row, dict) and isinstance(row.get("currency"), str) and row.get("currency")
+        }
+        if (
+            not evidence.currencies
+            or "currency" not in provenance.aggregation_grain
+            or any(not isinstance(row, dict) or not isinstance(row.get("currency"), str) or not row.get("currency") for row in rows)
+            or tuple(sorted(row_currencies)) != evidence.currencies
+        ): add("currency_missing", "every currency-valued row needs a nonblank currency matching Evidence scope")
     if requirement.require_unit:
         expected_grain.add("unit")
-        if not evidence.units or "unit" not in provenance.aggregation_grain: add("unit_missing", "quantity aggregate lacks unit grain")
+        row_units = {
+            row.get("unit") for row in rows
+            if isinstance(row, dict) and isinstance(row.get("unit"), str) and row.get("unit")
+        }
+        if (
+            not evidence.units
+            or "unit" not in provenance.aggregation_grain
+            or any(not isinstance(row, dict) or not isinstance(row.get("unit"), str) or not row.get("unit") for row in rows)
+            or tuple(sorted(row_units)) != evidence.units
+        ): add("unit_missing", "every quantity row needs a nonblank unit matching Evidence scope")
     if len(set(provenance.aggregation_grain)) != len(provenance.aggregation_grain) or set(provenance.aggregation_grain) != expected_grain: add("grain_mismatch", "SQL aggregation grain differs from requested claim grain")
     if provenance.time_grain != requirement.required_time_grain: add("grain_mismatch", "SQL time grain differs from requested time grain")
     as_of_date = as_of.date()
@@ -467,24 +559,86 @@ def _check_sql(requirement: EvidenceRequirement, evidence: Evidence, as_of: date
     elif requirement.maximum_age_days is not None and provenance.effective_end_date < as_of_date - timedelta(days=requirement.maximum_age_days): add("stale", "SQL effective end is older than lead policy permits")
     if provenance.effective_start_date > as_of_date or provenance.effective_end_date > as_of_date: add("out_of_scope", "SQL validity extends beyond as_of")
     if requirement.require_synthetic is not None and evidence.is_synthetic != requirement.require_synthetic: add("dimension_mismatch", "SQL dataset synthetic scope differs from request")
-    where_sql = provenance.normalized_sql.casefold().partition(" where ")[2]
-    dimension_markers = ((requirement.required_country_codes, ".country_code"), (requirement.required_hs_codes, ".hs_code"), (requirement.required_company_names, ".company_name"), (requirement.required_entity_ids, ".id"))
-    for expected, marker in dimension_markers:
-        if expected and marker not in where_sql: add("dimension_mismatch", f"validated SQL omits required {marker[1:]} scope")
-    expected_filters = sum(len(values) for values in (requirement.required_country_codes, requirement.required_hs_codes, requirement.required_company_names, requirement.required_entity_ids)) + (2 if requirement.temporal_start is not None else 0)
-    actual_filters = len({name for name in provenance.bound_filter_names if name.startswith("filter_")})
-    if actual_filters < expected_filters: add("dimension_mismatch", "validated SQL has fewer user filter values than request")
+    placeholders = re.findall(r":([a-z][a-z0-9_]*)\b", provenance.normalized_sql.casefold())
+    if (
+        tuple(provenance.bound_filter_names) != tuple(sorted(set(provenance.bound_filter_names)))
+        or tuple(sorted(placeholders)) != tuple(provenance.bound_filter_names)
+        or len(placeholders) != len(set(placeholders))
+    ):
+        add("invalid_contract", "SQL placeholders and bound filter names do not close exactly")
+    policy_names = {"policy_end_date", "policy_is_synthetic", "policy_start_date"}
+    if not policy_names.issubset(placeholders):
+        add("invalid_contract", "SQL omits required policy placeholders")
+    bindings = _sql_scope_bindings(provenance.normalized_sql.casefold())
+    expected_scopes = (
+        (requirement.required_entity_ids, requirement.required_entity_column),
+        (requirement.required_company_names, requirement.required_company_column),
+        (requirement.required_country_codes, requirement.required_country_column),
+        (requirement.required_hs_codes, requirement.required_hs_column),
+    )
+    covered: set[str] = set()
+    for values, column in expected_scopes:
+        if not values:
+            continue
+        names = bindings.get(column or "", ())
+        if len(names) != len(values) or not _sequential_value_placeholders(names):
+            add("dimension_mismatch", f"SQL does not bind every requested value on {column}")
+        covered.update(names)
+    if requirement.temporal_start is not None:
+        date_names = bindings.get("tr.trade_date", ())
+        if len(date_names) != 2 or not _paired_range_placeholders(date_names):
+            add("dimension_mismatch", "SQL does not bind the requested trade-date interval")
+        covered.update(date_names)
+    user_names = set(provenance.bound_filter_names) - policy_names
+    if any(not name.startswith("filter_") for name in user_names):
+        add("invalid_contract", "SQL contains an unclassified non-policy placeholder")
+    if user_names != covered:
+        add("invalid_contract", "SQL contains an unused or unclassified user filter placeholder")
 
 
-def _check_rag(requirement: EvidenceRequirement, evidence: Evidence, as_of: datetime, policy: SufficiencyPolicy, add) -> None:
+def _sql_scope_bindings(sql: str) -> dict[str, tuple[str, ...]]:
+    found: dict[str, list[str]] = {}
+    patterns = (
+        r"\b([a-z][a-z0-9_]*\.[a-z][a-z0-9_]*)\s*=\s*:(filter_[a-z0-9_]+)\b",
+        r"\b([a-z][a-z0-9_]*\.[a-z][a-z0-9_]*)\s+in\s*\(([^)]*)\)",
+        r"\b([a-z][a-z0-9_]*\.[a-z][a-z0-9_]*)\s+between\s+:(filter_[a-z0-9_]+)\s+and\s+:(filter_[a-z0-9_]+)\b",
+    )
+    for column, name in re.findall(patterns[0], sql):
+        found.setdefault(column, []).append(name)
+    for column, body in re.findall(patterns[1], sql):
+        found.setdefault(column, []).extend(re.findall(r":(filter_[a-z0-9_]+)\b", body))
+    for column, start, end in re.findall(patterns[2], sql):
+        found.setdefault(column, []).extend((start, end))
+    return {column: tuple(sorted(names)) for column, names in found.items()}
+
+
+def _sequential_value_placeholders(names: tuple[str, ...]) -> bool:
+    parsed = [re.fullmatch(r"filter_(\d+)_(\d+)", name) for name in names]
+    if not parsed or any(item is None for item in parsed):
+        return False
+    groups = {item.group(1) for item in parsed if item is not None}
+    indexes = sorted(int(item.group(2)) for item in parsed if item is not None)
+    return len(groups) == 1 and indexes == list(range(len(names)))
+
+
+def _paired_range_placeholders(names: tuple[str, ...]) -> bool:
+    parsed = [re.fullmatch(r"filter_(\d+)_(start|end)", name) for name in names]
+    return (
+        all(item is not None for item in parsed)
+        and len({item.group(1) for item in parsed if item is not None}) == 1
+        and {item.group(2) for item in parsed if item is not None} == {"start", "end"}
+    )
+
+
+def _check_rag(requirement: EvidenceRequirement, evidence: Evidence, as_of: datetime, as_of_is_date: bool, policy: SufficiencyPolicy, add) -> None:
     provenance = evidence.retrieval_provenance
     if provenance is None: add("invalid_contract", "RAG Evidence lacks retrieval provenance"); return
-    partial = set(provenance.degraded_components) - set(policy.fatal_degraded_components)
-    if partial: add("degraded_branch", "retrieval branch is partially degraded", blocking=False)
+    # Branch degradation is evaluated once from the explicit execution report
+    # plus Task 4 provenance in _context_reasons; ranking metadata is irrelevant.
     if evidence.fact_type == "unknown": add("unknown_fact", "unknown fact types cannot satisfy a factual requirement")
     elif evidence.fact_type not in requirement.fact_types: add("fact_type_mismatch", "Evidence fact type differs from requested fact")
     elif not _content_supports(evidence.fact_type, evidence.content): add("unsupported_fact_content", "content lacks a factual signal for declared fact type")
-    if evidence.source_type not in policy.sources_by_fact.get(evidence.fact_type, ()) or not _is_authoritative(evidence, policy.authority_rules, set(policy.accepted_authority_directness)):
+    if evidence.source_type not in policy.sources_by_fact.get(evidence.fact_type, ()) or _authority_publisher(evidence, policy.authority_rules, set(policy.accepted_authority_directness)) is None:
         add("low_authority", "source category and reviewed identity do not establish authority")
     if requirement.requested_source_types and evidence.source_type not in requirement.requested_source_types: add("dimension_mismatch", "source category is outside requested retrieval scope")
     if requirement.require_resolved_entity and (provenance.entity_resolution_status != "resolved" or provenance.entity_resolution_id is None or evidence.entity_id != provenance.entity_resolution_id): add("unresolved_entity", "company-scoped Evidence lacks a resolved consistent entity")
@@ -498,18 +652,33 @@ def _check_rag(requirement: EvidenceRequirement, evidence: Evidence, as_of: date
     if mismatch: add("dimension_mismatch", "Evidence entity/company/country/HS/synthetic scope differs from request")
     published = _aware_instant(evidence.publish_time)
     valid_from, valid_to = _utc_date(evidence.valid_from), _utc_date(evidence.valid_to)
+    valid_from_instant = _aware_instant(evidence.valid_from) if isinstance(evidence.valid_from, datetime) else None
+    valid_to_instant = _aware_instant(evidence.valid_to) if isinstance(evidence.valid_to, datetime) else None
     if evidence.publish_time is not None and published is None: add("out_of_scope", "publish_time must be timezone-aware")
     if isinstance(evidence.valid_from, datetime) and _aware_instant(evidence.valid_from) is None: add("out_of_scope", "valid_from datetime must be timezone-aware")
     if isinstance(evidence.valid_to, datetime) and _aware_instant(evidence.valid_to) is None: add("out_of_scope", "valid_to datetime must be timezone-aware")
     if published is not None and published > as_of: add("out_of_scope", "publication is after as_of")
-    if valid_from is not None and valid_from > as_of.date(): add("out_of_scope", "validity starts after as_of")
-    if valid_to is not None and valid_to < as_of.date() and requirement.temporal_start is None: add("stale", "Evidence validity ended before as_of")
+    if (
+        valid_from_instant is not None and valid_from_instant > as_of
+        or valid_from_instant is None and valid_from is not None and valid_from > as_of.date()
+    ): add("out_of_scope", "validity starts after as_of")
+    if requirement.temporal_start is None and (
+        valid_to_instant is not None and valid_to_instant < as_of
+        or valid_to_instant is None and valid_to is not None and valid_to < as_of.date()
+    ): add("stale", "Evidence validity ended before as_of")
     if requirement.temporal_start is not None:
         start, end = _aware_boundary(requirement.temporal_start, False), _aware_boundary(requirement.temporal_end, True)
         if published is None or not start <= published <= end: add("temporal_gap", "publication is outside requested interval")
     elif requirement.maximum_age_days is not None:
-        observed = published or (_aware_boundary(valid_from, False) if valid_from is not None else None)
-        if observed is None or observed < as_of - timedelta(days=requirement.maximum_age_days): add("stale", "Evidence observation is older than fact policy permits")
+        observed = published or valid_from_instant or (_aware_boundary(valid_from, False) if valid_from is not None else None)
+        stale = observed is None
+        if observed is not None:
+            stale = (
+                observed.date() < as_of.date() - timedelta(days=requirement.maximum_age_days)
+                if as_of_is_date
+                else observed < as_of - timedelta(days=requirement.maximum_age_days)
+            )
+        if stale: add("stale", "Evidence observation is older than fact policy permits")
 
 
 def _finite_number(value: object) -> bool:
@@ -523,7 +692,7 @@ def _finite_number(value: object) -> bool:
     return False
 
 
-def _is_authoritative(evidence: Evidence, rules: tuple[SourceAuthorityRule, ...], accepted: set[str]) -> bool:
+def _authority_publisher(evidence: Evidence, rules: tuple[SourceAuthorityRule, ...], accepted: set[str]) -> str | None:
     identity = evidence.locator.source_identity
     parsed = urlsplit(identity)
     if (
@@ -535,14 +704,14 @@ def _is_authoritative(evidence: Evidence, rules: tuple[SourceAuthorityRule, ...]
         or parsed.fragment
         or identity not in {evidence.source_url, evidence.canonical_url}
     ):
-        return False
+        return None
     host = parsed.hostname.casefold().rstrip(".")
     for rule in rules:
         if rule.source_type != evidence.source_type or rule.directness not in accepted:
             continue
         if identity in rule.exact_source_identities or any(host == suffix.casefold() or host.endswith("." + suffix.casefold()) for suffix in rule.domain_suffixes):
-            return True
-    return False
+            return rule.publisher_id
+    return None
 
 
 _CONTENT_SIGNALS = {
@@ -560,17 +729,41 @@ def _content_supports(fact_type: str, content: str) -> bool:
     return any(signal in re.sub(r"\s+", " ", content.casefold()) for signal in _CONTENT_SIGNALS.get(fact_type, ()))
 
 
-def _independent_source_count(evidence: Sequence[Evidence]) -> int:
+def _independent_source_count(evidence: Sequence[Evidence], policy: SufficiencyPolicy) -> int:
     sql_count = len({item.source_id for item in evidence if item.locator.branch == "sql"})
-    keys = sorted({(_canonical_source_identity(item.locator.source_identity), item.locator.content_hash, item.retrieval_provenance.dedupe_cluster_id) for item in evidence if item.locator.branch == "rag" and item.retrieval_provenance})
-    used_sources: set[str] = set(); used_hashes: set[str] = set(); used_clusters: set[str] = set(); count = 0
-    for source, digest, cluster in keys:
-        if source in used_sources or digest in used_hashes or cluster in used_clusters: continue
-        used_sources.add(source); used_hashes.add(digest); used_clusters.add(cluster); count += 1
-    return sql_count + count
+    dimensions = policy.independence_dimensions
+    candidates: list[dict[str, str]] = []
+    for item in evidence:
+        if item.locator.branch != "rag" or item.retrieval_provenance is None:
+            continue
+        publisher = _authority_publisher(
+            item, policy.authority_rules, set(policy.accepted_authority_directness)
+        ) or _source_origin(item.locator.source_identity)
+        candidates.append({
+            "publisher_identity": publisher,
+            "content_sha256": item.locator.content_hash,
+            "dedupe_cluster_id": item.retrieval_provenance.dedupe_cluster_id,
+        })
+    ordered = sorted({tuple((dimension, item[dimension]) for dimension in dimensions) for item in candidates})
+
+    def maximum(index: int, used: dict[str, set[str]]) -> int:
+        if index == len(ordered):
+            return 0
+        best = maximum(index + 1, used)
+        candidate = dict(ordered[index])
+        if all(candidate[dimension] not in used[dimension] for dimension in dimensions):
+            for dimension in dimensions:
+                used[dimension].add(candidate[dimension])
+            best = max(best, 1 + maximum(index + 1, used))
+            for dimension in dimensions:
+                used[dimension].remove(candidate[dimension])
+        return best
+
+    used = {dimension: set() for dimension in dimensions}
+    return sql_count + maximum(0, used)
 
 
-def _canonical_source_identity(value: str) -> str:
+def _source_origin(value: str) -> str:
     parsed = urlsplit(value)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         return value
@@ -580,8 +773,7 @@ def _canonical_source_identity(value: str) -> str:
         return value
     default_port = port is None or parsed.scheme == "http" and port == 80 or parsed.scheme == "https" and port == 443
     authority = parsed.hostname.casefold() if default_port else f"{parsed.hostname.casefold()}:{port}"
-    path = parsed.path or "/"
-    return f"{parsed.scheme.casefold()}://{authority}{path}"
+    return f"{parsed.scheme.casefold()}://{authority}"
 
 
 def _stable_reasons(values: Sequence[ValidationReason]) -> tuple[ValidationReason, ...]:
@@ -594,7 +786,7 @@ def _as_of_instant(value: date | datetime) -> datetime:
         aware = _aware_instant(value)
         if aware is None: raise ValueError("datetime as_of must be timezone-aware")
         return aware
-    if type(value) is date: return datetime.combine(value, time.min, timezone.utc)
+    if type(value) is date: return datetime.combine(value, time.max, timezone.utc)
     raise TypeError("as_of must be date or timezone-aware datetime")
 
 
