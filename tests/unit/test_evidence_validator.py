@@ -46,6 +46,7 @@ def _sql(
     rows: bool = True,
     truncated: bool = False,
     scope: str = "top",
+    metric_value: object = Decimal("12.30"),
 ) -> Evidence:
     dimensions: dict[str, object] = {}
     if currency is not None:
@@ -54,7 +55,7 @@ def _sql(
         dimensions["unit"] = unit
     if time_grain == "month":
         dimensions["trade_date"] = "2026-08"
-    row = {"importer_company": "Acme", **dimensions, metric: Decimal("12.30")}
+    row = {"importer_company": "Acme", **dimensions, metric: metric_value}
     result_rows = (row,) if rows else ()
     grain = aggregation_grain
     if grain is None:
@@ -112,7 +113,7 @@ def _sql(
 def _rag(
     *,
     suffix: str,
-    content: str = "Acme opened a new audited production line and remains operational.",
+    content: str | None = None,
     fact_type: str = "company_status",
     source_type: str = "official_website",
     entity_id: str | None = "company:acme",
@@ -128,8 +129,20 @@ def _rag(
     fusion_score: float = 0.01,
     rerank_score: float | None = 0.2,
     source_weight: float = 0.8,
+    conflict_group_id: str | None = None,
 ) -> Evidence:
-    source = source_id or f"https://source-{suffix}.example/status"
+    if content is None:
+        content = f"Acme opened audited production line {suffix} and remains operational."
+    domains = {
+        "b2b": "marketplace.example",
+        "customs_profile": "profiles.example",
+        "industry_news": "news.example",
+        "official_website": "official.example",
+        "regulator": "regulator.example",
+        "social": "social.example",
+    }
+    source = source_id or f"https://{domains[source_type]}/status/{suffix}"
+    public_url = source if source.startswith(("http://", "https://")) else None
     digest = sha256(content.encode("utf-8")).hexdigest()
     locator = RetrievalEvidenceLocator(
         manifest_id=BUILD_ID,
@@ -182,8 +195,8 @@ def _rag(
         source_id=source,
         source_weight=source_weight,
         content=content,
-        source_url=source,
-        canonical_url=source,
+        source_url=public_url,
+        canonical_url=public_url,
         locator=locator,
         raw_record_id=f"record-{suffix}",
         publish_time=publish_time,
@@ -198,6 +211,7 @@ def _rag(
         is_synthetic=True,
         retrieval_provenance=provenance,
         sql_provenance=None,
+        conflict_group_id=conflict_group_id,
     )
     provisional = Evidence.model_construct(evidence_id="rag_" + "0" * 64, **values)
     return Evidence(evidence_id=retrieval_evidence_id(identity=_evidence_identity(provisional)), **values)
@@ -207,7 +221,38 @@ def _rag(
 def validator():
     from trade_agent.evidence.validator import EvidenceValidator
 
-    return EvidenceValidator()
+    class ContextualValidator(EvidenceValidator):
+        def validate(self, intent, evidence, conflicts, as_of, *, context=None):
+            return super().validate(
+                intent, evidence, conflicts, as_of,
+                context=context if context is not None else _context_for(intent, evidence),
+            )
+
+    return ContextualValidator()
+
+
+def _context_for(intent: QueryIntent, evidence: tuple[Evidence, ...]):
+    from trade_agent.evidence.validator import BranchExecutionReport, ValidationContext
+
+    branches = []
+    if intent.need_external_intel:
+        branches.append("rag")
+    if intent.need_trade_data:
+        branches.append("sql")
+    reports = []
+    for branch in sorted(branches):
+        branch_evidence = tuple(item for item in evidence if item.locator.branch == branch)
+        degraded = tuple(sorted({component for item in branch_evidence if item.retrieval_provenance for component in item.retrieval_provenance.degraded_components}))
+        reports.append(BranchExecutionReport(branch=branch, attempted=True, completed=True,
+            zero_hits=not branch_evidence, degraded_components=degraded, error_codes=()))
+    return ValidationContext(branch_reports=tuple(reports))
+
+
+def _validated(intent, evidence, conflicts=(), as_of=AS_OF, *, policy=None):
+    from trade_agent.evidence.validator import EvidenceValidator
+
+    validator = EvidenceValidator() if policy is None else EvidenceValidator(policy)
+    return validator.validate(intent, evidence, conflicts, as_of, context=_context_for(intent, evidence))
 
 
 def _codes(outcome) -> set[str]:
@@ -356,13 +401,13 @@ def test_versioned_policy_age_boundaries_are_explicit_and_inclusive() -> None:
     exact = AS_OF - timedelta(days=requirement.maximum_age_days)
     old = exact - timedelta(days=1)
 
-    accepted = EvidenceValidator().validate(
+    accepted = _validated(
         intent,
         (_rag(suffix="exact-age", publish_time=datetime.combine(exact, datetime.min.time(), timezone.utc), valid_from=exact),),
         (),
         AS_OF,
     )
-    rejected = EvidenceValidator().validate(
+    rejected = _validated(
         intent,
         (_rag(suffix="too-old", publish_time=datetime.combine(old, datetime.min.time(), timezone.utc), valid_from=old),),
         (),
@@ -406,7 +451,7 @@ def test_requested_historical_publication_window_uses_interval_not_current_fresh
 
 
 def test_validator_uses_the_injected_versioned_source_policy() -> None:
-    from trade_agent.evidence.requirements import FactSourcePolicy, SufficiencyPolicy
+    from trade_agent.evidence.requirements import FactSourcePolicy, SourceAuthorityRule, SufficiencyPolicy
     from trade_agent.evidence.validator import EvidenceValidator
 
     base = SufficiencyPolicy()
@@ -416,11 +461,17 @@ def test_validator_uses_the_injected_versioned_source_policy() -> None:
         else item
         for item in base.fact_sources
     )
-    policy = base.model_copy(update={"fact_sources": sources})
+    policy = base.model_copy(update={
+        "fact_sources": sources,
+        "authority_rules": tuple(sorted((*base.authority_rules, SourceAuthorityRule(
+            rule_id="social.reviewed", source_type="social",
+            domain_suffixes=("social.example",), directness="secondary",
+        )), key=lambda item: item.rule_id)),
+    })
     intent = _intent("Acme 官网最近状态", filters=RetrievalFilter(entity_ids=("company:acme",)))
     social = _rag(suffix="policy-social", source_type="social")
 
-    outcome = EvidenceValidator(policy).validate(intent, (social,), (), AS_OF)
+    outcome = _validated(intent, (social,), (), AS_OF, policy=policy)
 
     assert outcome.can_answer is True
     assert outcome.requirements.policy_version == policy.policy_version
@@ -478,10 +529,11 @@ def test_empty_sql_result_and_truncated_locator_do_not_count(validator) -> None:
 
 def test_unresolved_relevant_conflict_blocks_generation(validator) -> None:
     intent = _intent("Acme 官网最近状态", filters=RetrievalFilter(entity_ids=("company:acme",)))
-    left = _rag(suffix="left")
-    right = _rag(suffix="right", source_type="industry_news", content="Acme permanently closed operations.")
+    conflict_id = "conflict_" + "3" * 64
+    left = _rag(suffix="left", conflict_group_id=conflict_id)
+    right = _rag(suffix="right", source_type="industry_news", content="Acme permanently closed operations.", conflict_group_id=conflict_id)
     conflict = Conflict(
-        conflict_id="conflict_" + "3" * 64,
+        conflict_id=conflict_id,
         entity_id="company:acme",
         fact_type="company_status",
         evidence_ids=(left.evidence_id, right.evidence_id),
@@ -500,10 +552,11 @@ def test_unresolved_relevant_conflict_blocks_generation(validator) -> None:
 
 def test_resolved_conflict_uses_only_selected_support_and_is_order_independent(validator) -> None:
     intent = _intent("Acme 官网最近状态", filters=RetrievalFilter(entity_ids=("company:acme",)))
-    selected = _rag(suffix="selected")
-    rejected = _rag(suffix="rejected", source_type="industry_news", content="Acme permanently closed operations.")
+    conflict_id = "conflict_" + "4" * 64
+    selected = _rag(suffix="selected", conflict_group_id=conflict_id)
+    rejected = _rag(suffix="rejected", source_type="industry_news", content="Acme permanently closed operations.", conflict_group_id=conflict_id)
     conflict = Conflict(
-        conflict_id="conflict_" + "4" * 64,
+        conflict_id=conflict_id,
         entity_id="company:acme",
         fact_type="company_status",
         evidence_ids=tuple(sorted((selected.evidence_id, rejected.evidence_id))),
@@ -597,3 +650,236 @@ def test_out_of_scope_intent_refuses_without_considering_evidence(validator) -> 
     assert outcome.decision == "refuse"
     assert outcome.error_code == "out_of_scope"
     assert _codes(outcome) == {"out_of_scope"}
+
+
+def test_review_lead_explicit_risk_cannot_replace_mandatory_status(validator) -> None:
+    intent = _intent(
+        "Acme 是否值得跟进",
+        filters=RetrievalFilter(
+            entity_ids=("company:acme",), fact_types=("risk",),
+        ),
+    )
+    risk = (
+        _rag(suffix="risk-one", fact_type="risk", content="Acme reports a current risk."),
+        _rag(
+            suffix="risk-two", fact_type="risk", source_type="industry_news",
+            content="Acme faces a current sanction risk.",
+        ),
+    )
+
+    outcome = validator.validate(
+        intent, (_sql(start=date(2025, 9, 4), scope="lead"), *risk), (), AS_OF
+    )
+
+    assert outcome.can_answer is False
+    assert any(item.requirement_id == "rag.company_status" for item in outcome.missing_requirements)
+
+
+def test_review_forged_route_flags_and_zero_requirements_fail_closed(validator) -> None:
+    valid = _intent("Acme 官网最近状态")
+    forged = QueryIntent.model_construct(
+        **{
+            **{name: getattr(valid, name) for name in QueryIntent.model_fields},
+            "need_external_intel": False,
+        }
+    )
+
+    outcome = validator.validate(forged, (), (), AS_OF)
+
+    assert outcome.can_answer is False
+    assert outcome.error_code == "invalid_intent"
+    assert "invalid_intent" in _codes(outcome)
+
+
+def test_review_all_requested_entities_and_fact_types_need_coverage(validator) -> None:
+    entities = _intent(
+        "官网最近状态",
+        filters=RetrievalFilter(entity_ids=("company:a", "company:b")),
+    )
+    only_a = _rag(
+        suffix="only-a", entity_id="company:a", company_name="A",
+        content="A opened a production line and remains operational.",
+    )
+    entity_outcome = validator.validate(entities, (only_a,), (), AS_OF)
+
+    facts = _intent(
+        "查询风险和状态",
+        filters=RetrievalFilter(fact_types=("company_status", "risk")),
+    )
+    only_status = _rag(suffix="only-status")
+    fact_outcome = validator.validate(facts, (only_status,), (), AS_OF)
+
+    assert entity_outcome.can_answer is False
+    assert fact_outcome.can_answer is False
+    assert len(entity_outcome.missing_requirements) >= 1
+    assert any(item.requirement_id.startswith("rag.risk") for item in fact_outcome.missing_requirements)
+
+
+@pytest.mark.parametrize("value", [None, "NaN", "Infinity", True])
+def test_review_sql_metric_value_must_be_nonnull_finite_numeric(validator, value) -> None:
+    intent = _intent("最近半年美国采购 HS850440 金额最高的 10 家公司")
+
+    outcome = validator.validate(intent, (_sql(metric_value=value),), (), AS_OF)
+
+    assert outcome.can_answer is False
+    assert "invalid_metric" in _codes(outcome)
+
+
+def test_review_unsupported_or_multiple_metrics_are_invalid_intents(validator) -> None:
+    from trade_agent.db.contracts import QueryConstraints
+
+    base = _intent("最近半年美国采购 HS850440 金额最高的 10 家公司")
+    unsupported = QueryIntent.model_construct(
+        **{
+            **{name: getattr(base, name) for name in QueryIntent.model_fields},
+            "constraints": QueryConstraints(metrics=["profit_margin"], dimensions=[], filters=[]),
+        }
+    )
+    multiple = QueryIntent.model_construct(
+        **{
+            **{name: getattr(base, name) for name in QueryIntent.model_fields},
+            "constraints": QueryConstraints(
+                metrics=["trade_amount", "quantity"], dimensions=[], filters=[]
+            ),
+        }
+    )
+
+    assert validator.validate(unsupported, (), (), AS_OF).error_code == "invalid_intent"
+    assert validator.validate(multiple, (), (), AS_OF).error_code == "invalid_intent"
+
+
+def test_review_branch_reports_prevent_clean_hit_dilution_and_describe_zero_hit_retry() -> None:
+    from trade_agent.evidence.validator import (
+        BranchExecutionReport,
+        EvidenceValidator,
+        ValidationContext,
+    )
+
+    intent = _intent("Acme 官网最近状态", filters=RetrievalFilter(entity_ids=("company:acme",)))
+    fatal_context = ValidationContext(
+        branch_reports=(
+            BranchExecutionReport(
+                branch="rag", attempted=True, completed=False, zero_hits=False,
+                degraded_components=("retrieval_timeout",), error_codes=("retrieval_timeout",),
+            ),
+        )
+    )
+    clean_hit = EvidenceValidator().validate(
+        intent, (_rag(suffix="clean-but-timeout"),), (), AS_OF,
+        context=fatal_context,
+    )
+    zero_context = ValidationContext(
+        branch_reports=(
+            BranchExecutionReport(
+                branch="rag", attempted=True, completed=True, zero_hits=True,
+                degraded_components=("retrieval_unavailable",),
+                error_codes=("retrieval_unavailable",),
+            ),
+        )
+    )
+    zero = EvidenceValidator().validate(intent, (), (), AS_OF, context=zero_context)
+    missing_report = EvidenceValidator().validate(intent, (_rag(suffix="no-report"),), (), AS_OF)
+
+    assert clean_hit.decision == "rewrite_once"
+    assert zero.decision == "rewrite_once"
+    assert missing_report.decision == "refuse"
+    assert "branch_report_missing" in _codes(missing_report)
+
+
+def test_review_future_subday_publish_and_future_valid_from_are_rejected(validator) -> None:
+    as_of = datetime(2026, 9, 4, 12, 0, tzinfo=timezone.utc)
+    intent = _intent("Acme 官网最近状态", filters=RetrievalFilter(entity_ids=("company:acme",)))
+    future_publish = _rag(
+        suffix="future-hour",
+        publish_time=datetime(2026, 9, 4, 12, 0, 1, tzinfo=timezone.utc),
+        valid_from=date(2026, 9, 4),
+    )
+    future_valid = _rag(
+        suffix="future-valid",
+        publish_time=datetime(2026, 9, 4, 11, 0, tzinfo=timezone.utc),
+        valid_from=date(2026, 9, 5),
+    )
+
+    assert not validator.validate(intent, (future_publish,), (), as_of).can_answer
+    valid_outcome = validator.validate(intent, (future_valid,), (), as_of)
+    assert not valid_outcome.can_answer
+    assert "out_of_scope" in _codes(valid_outcome)
+
+
+def test_review_same_content_with_forged_clusters_is_not_independent(validator) -> None:
+    intent = _intent("Acme 是否值得跟进", filters=RetrievalFilter(entity_ids=("company:acme",)))
+    content = "Acme opened a new audited production line and remains operational."
+    first = _rag(suffix="copy-one", content=content, cluster="claimed-one")
+    second = _rag(
+        suffix="copy-two", content=content, cluster="claimed-two",
+        source_type="industry_news",
+    )
+
+    outcome = validator.validate(
+        intent, (_sql(start=date(2025, 9, 4), scope="lead"), first, second), (), AS_OF
+    )
+
+    assert outcome.can_answer is False
+    assert "insufficient_diversity" in _codes(outcome)
+
+
+def test_review_source_type_alone_and_official_urn_are_not_authority(validator) -> None:
+    intent = _intent("Acme 官网最近状态", filters=RetrievalFilter(entity_ids=("company:acme",)))
+    unreviewed = _rag(
+        suffix="unreviewed", source_id="https://attacker.invalid/status",
+        source_type="official_website",
+    )
+    official_urn = _rag(
+        suffix="urn", source_id="urn:trade-agent:document:doc-urn",
+        source_type="official_website",
+    )
+
+    assert "low_authority" in _codes(validator.validate(intent, (unreviewed,), (), AS_OF))
+    assert "low_authority" in _codes(validator.validate(intent, (official_urn,), (), AS_OF))
+
+
+def test_review_conflict_group_must_match_conflict_and_selected_support(validator) -> None:
+    intent = _intent("Acme 官网最近状态", filters=RetrievalFilter(entity_ids=("company:acme",)))
+    evidence = _rag(suffix="conflict-mismatch")
+    conflict = Conflict(
+        conflict_id="conflict_" + "5" * 64,
+        entity_id="company:acme", fact_type="company_status",
+        evidence_ids=(evidence.evidence_id, "rag_" + "6" * 64),
+        status="resolved", explanation="Claims to resolve unrelated Evidence.",
+        selected_evidence_ids=(evidence.evidence_id,),
+    )
+
+    outcome = validator.validate(intent, (evidence,), (conflict,), AS_OF)
+
+    assert outcome.can_answer is False
+    assert "conflict_mismatch" in _codes(outcome)
+
+
+def test_review_validation_outcome_rejects_forged_partition_and_eligible_ids(validator) -> None:
+    from trade_agent.evidence.validator import ValidationOutcome
+
+    intent = _intent("Acme 官网最近状态", filters=RetrievalFilter(entity_ids=("company:acme",)))
+    outcome = validator.validate(intent, (_rag(suffix="outcome"),), (), AS_OF)
+    forged = outcome.model_dump(mode="python")
+    forged["satisfied_requirements"] = ()
+
+    with pytest.raises(ValidationError):
+        ValidationOutcome.model_validate(forged)
+    forged = outcome.model_dump(mode="python")
+    forged["eligible_evidence_ids"] = ()
+    with pytest.raises(ValidationError):
+        ValidationOutcome.model_validate(forged)
+
+
+def test_review_policy_fingerprint_changes_with_semantics_and_rejects_tamper() -> None:
+    from trade_agent.evidence.requirements import SufficiencyPolicy
+
+    original = SufficiencyPolicy()
+    changed = original.model_copy(update={"lead_status_independent_sources": 3})
+
+    assert original.policy_version == changed.policy_version
+    assert original.policy_fingerprint != changed.policy_fingerprint
+    forged = changed.model_dump(mode="python")
+    forged["policy_fingerprint"] = original.policy_fingerprint
+    with pytest.raises(ValidationError):
+        SufficiencyPolicy.model_validate(forged)
