@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date
+from datetime import date, datetime, timezone
 import json
 from pathlib import Path
 from threading import Event, Lock
@@ -395,6 +395,35 @@ def test_graph_discovers_conflict_across_overlapping_current_windows(tmp_path: P
     assert result["answer"] is None
 
 
+def test_graph_does_not_conflict_for_disjoint_instants_on_same_date(
+    tmp_path: Path,
+) -> None:
+    active = _rag(
+        suffix="instant-active",
+        content="Acme status: active and operational.",
+        valid_from=datetime(2026, 8, 20, tzinfo=timezone.utc),
+        valid_to=datetime(2026, 9, 4, 1, tzinfo=timezone.utc),
+    )
+    inactive = _rag(
+        suffix="instant-inactive",
+        source_type="industry_news",
+        content="Acme status: inactive; operations permanently closed.",
+        valid_from=datetime(2026, 9, 4, 23, tzinfo=timezone.utc),
+    )
+    graph = build_trade_graph(
+        _deps(tmp_path, rag=StaticEvidenceBranch((active, inactive)))
+    )
+
+    result = _invoke(graph, "Acme 官网最近是否扩产")
+
+    assert result["conflicts"] == []
+    assert result["validation"]["error_code"] != "evidence_conflict"
+    assert not any(
+        reason["code"] == "contradictory"
+        for reason in result["validation"]["reasons"]
+    )
+
+
 def test_branch_evidence_candidate_limit_fails_closed(tmp_path: Path) -> None:
     rag = StaticEvidenceBranch(
         (_rag(suffix="candidate-one"), _rag(suffix="candidate-two"))
@@ -422,19 +451,7 @@ def test_graph_passes_candidate_budget_into_branch_before_work(tmp_path: Path) -
 
 
 def test_contract_retrieval_uses_graph_candidate_budget(tmp_path: Path) -> None:
-    service, manifest, _store = _service(tmp_path)
-    seen: list[int] = []
-    original_search = service.search
-
-    def search(intent, *, top_k, transport_timeout_seconds=None):
-        seen.append(top_k)
-        return original_search(
-            intent,
-            top_k=top_k,
-            transport_timeout_seconds=transport_timeout_seconds,
-        )
-
-    service.search = search
+    service, manifest, store = _service(tmp_path)
     branch = ContractRetrievalBranch(service=service, published_manifest=manifest, top_k=50)
     intent = QueryIntent(
         question="Verified synthetic trade evidence",
@@ -444,7 +461,7 @@ def test_contract_retrieval_uses_graph_candidate_budget(tmp_path: Path) -> None:
 
     branch.run(intent, timeout_seconds=0.25, candidate_limit=4)
 
-    assert seen == [4]
+    assert store.last_top_k == 4
 
 
 def test_external_generation_must_fit_graph_token_budget(tmp_path: Path) -> None:

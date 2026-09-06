@@ -121,6 +121,7 @@ class FakeStore:
         self.contract = _contract(build)
         self.last_filter = "unset"
         self.last_timeout = None
+        self.last_top_k = None
 
     def search(
         self,
@@ -132,7 +133,8 @@ class FakeStore:
     ) -> tuple[DenseHit, ...]:
         self.last_filter = filter_
         self.last_timeout = timeout_seconds
-        del vector, top_k
+        self.last_top_k = top_k
+        del vector
         return ()
 
 
@@ -591,3 +593,75 @@ def test_effective_candidate_limits_bound_disjoint_recall_and_trace(disjoint_rec
     assert outcome.profile.candidate_limits == expected
     assert service.profile.candidate_limits == expected
     assert profile.model_dump(mode="python") == original
+
+
+def test_runtime_candidate_budget_caps_recall_fusion_rerank_and_trace(
+    disjoint_recall_build,
+) -> None:
+    from trade_agent.retrieval import BgeReranker, RerankerContract
+
+    build = disjoint_recall_build
+    chunks = tuple(snapshot.restore() for snapshot in build.chunks)
+    dense_chunks = [chunk for chunk in chunks if "needle" not in chunk.content][:512]
+    store = FakeStore(build)
+    seen_dense_limits: list[int] = []
+
+    def dense_search(vector, *, top_k, filter_):
+        del vector, filter_
+        seen_dense_limits.append(top_k)
+        return tuple(
+            DenseHit(
+                chunk_id=chunk.metadata.chunk_id,
+                record=chunk,
+                score=float(512 - index),
+                rank=index + 1,
+                build_id=build.build_id,
+                filter_expression="",
+                filter_expression_version="trade-filter-v1",
+            )
+            for index, chunk in enumerate(dense_chunks[:top_k])
+        )
+
+    store.search = dense_search
+
+    class Scores:
+        def predict(self, pairs, **kwargs):
+            return np.arange(len(pairs), dtype=np.float32)
+
+    contract = RerankerContract(
+        provider="test",
+        model_name="BAAI/bge-reranker-v2-m3",
+        revision="953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e",
+        max_length=32,
+        library_version="test",
+    )
+    profile = load_retrieval_profile().model_copy(
+        update={"candidate_limits": {"dense": 100, "bm25": 100, "output": 100}}
+    )
+    service = RetrievalService(
+        build=build,
+        bm25=BM25Index.build(chunks, build_id=build.build_id),
+        milvus=store,
+        embedding_manager=FakeEmbeddingManager(),
+        profile=profile,
+        reranker=BgeReranker(model=Scores(), contract=contract),
+    )
+
+    outcome = service.search(
+        QueryIntent(query="needle"), top_k=4, candidate_limit=4
+    )
+
+    assert seen_dense_limits == [4]
+    assert len(outcome.dense_hits) == 4
+    assert len(outcome.sparse_hits) == 4
+    assert len(outcome.fused_hits) == len(outcome.reranked_hits) == 4
+    assert outcome.profile.candidate_limits == {
+        "dense": 4,
+        "bm25": 4,
+        "output": 4,
+    }
+    assert service.profile.candidate_limits == {
+        "dense": 100,
+        "bm25": 100,
+        "output": 100,
+    }

@@ -574,6 +574,45 @@ def test_unresolved_relevant_conflict_blocks_generation(validator) -> None:
     assert "contradictory" in _codes(outcome)
 
 
+def test_conflict_interval_must_fit_exact_datetime_evidence_windows(validator) -> None:
+    intent = _intent(
+        "Acme 官网最近状态",
+        filters=RetrievalFilter(entity_ids=("company:acme",)),
+    )
+    conflict_id = "conflict_" + "8" * 64
+    active = _rag(
+        suffix="exact-active",
+        conflict_group_id=conflict_id,
+        content="Acme status: active and operational.",
+        valid_from=datetime(2026, 8, 20, tzinfo=timezone.utc),
+        valid_to=datetime(2026, 9, 4, 1, tzinfo=timezone.utc),
+    )
+    inactive = _rag(
+        suffix="exact-inactive",
+        source_type="industry_news",
+        conflict_group_id=conflict_id,
+        content="Acme status: inactive; operations permanently closed.",
+        valid_from=datetime(2026, 9, 4, 23, tzinfo=timezone.utc),
+    )
+    alleged_overlap = Conflict(
+        conflict_id=conflict_id,
+        entity_id="company:acme",
+        fact_type="company_status",
+        evidence_ids=tuple(sorted((active.evidence_id, inactive.evidence_id))),
+        status="unresolved",
+        valid_from=datetime(2026, 9, 4, 12, tzinfo=timezone.utc),
+        valid_to=datetime(2026, 9, 4, 12, tzinfo=timezone.utc),
+        explanation="Alleged overlap is outside both exact validity windows.",
+    )
+
+    outcome = validator.validate(
+        intent, (active, inactive), (alleged_overlap,), AS_OF
+    )
+
+    assert "conflict_mismatch" in _codes(outcome)
+    assert "contradictory" not in _codes(outcome)
+
+
 def test_resolved_conflict_uses_only_selected_support_and_is_order_independent(validator) -> None:
     intent = _intent("Acme 官网最近状态", filters=RetrievalFilter(entity_ids=("company:acme",)))
     conflict_id = "conflict_" + "4" * 64

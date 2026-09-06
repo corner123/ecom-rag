@@ -134,6 +134,7 @@ class RetrievalService:
         intent: QueryIntent,
         *,
         top_k: int,
+        candidate_limit: int | None = None,
         rerank: bool = True,
         transport_timeout_seconds: float | None = None,
     ) -> RetrievalOutcome:
@@ -142,18 +143,24 @@ class RetrievalService:
             plan.query,
             plan,
             top_k=top_k,
+            candidate_limit=candidate_limit,
             rerank=rerank,
             transport_timeout_seconds=transport_timeout_seconds,
         )
 
     def retrieve(self, query: str, plan: RetrievalPlan, *, top_k: int = 10,
-                 rerank: bool = True, transport_timeout_seconds: float | None = None) -> RetrievalOutcome:
+                 candidate_limit: int | None = None, rerank: bool = True,
+                 transport_timeout_seconds: float | None = None) -> RetrievalOutcome:
         if type(plan) is not RetrievalPlan:
             raise TypeError("plan must be an exact RetrievalPlan")
         if not isinstance(query, str) or not query.strip() or query != plan.query:
             raise ValueError("query must be nonblank and match the retrieval plan")
         if type(top_k) is not int or not 1 <= top_k <= 512:
             raise ValueError("top_k must be an integer from 1 through 512")
+        if candidate_limit is not None and (
+            type(candidate_limit) is not int or not 1 <= candidate_limit <= 512
+        ):
+            raise ValueError("candidate_limit must be an integer from 1 through 512")
         if transport_timeout_seconds is not None and (
             type(transport_timeout_seconds) is not float
             or not math.isfinite(transport_timeout_seconds)
@@ -162,6 +169,18 @@ class RetrievalService:
             raise ValueError("transport_timeout_seconds must be a positive finite float")
         if transport_timeout_seconds is not None and not self.supports_finite_transport_timeout:
             raise ValueError("Milvus adapter does not support a finite transport timeout")
+        effective_profile = self.profile
+        if candidate_limit is not None:
+            effective_profile = self.profile.model_copy(
+                update={
+                    "candidate_limits": {
+                        component: min(limit, candidate_limit)
+                        for component, limit in self.profile.candidate_limits.items()
+                    }
+                },
+                deep=True,
+            )
+        effective_top_k = min(top_k, effective_profile.candidate_limits["output"])
         compiled = compile_filter_binding(plan.filter)
         allowed = candidate_chunk_ids(self._metadata_universe, plan.filter)
         dense, sparse = (), ()
@@ -169,7 +188,7 @@ class RetrievalService:
             def dense_recall():
                 vector = self._embedding_manager.embed_query(query)
                 kwargs = dict(
-                    top_k=self.profile.candidate_limits["dense"], filter_=plan.filter
+                    top_k=effective_profile.candidate_limits["dense"], filter_=plan.filter
                 )
                 if transport_timeout_seconds is not None:
                     kwargs["timeout_seconds"] = transport_timeout_seconds
@@ -177,11 +196,11 @@ class RetrievalService:
             with ThreadPoolExecutor(max_workers=2, thread_name_prefix="trade-recall") as pool:
                 dense_future = pool.submit(dense_recall)
                 sparse_future = pool.submit(self._bm25.search, query,
-                    top_k=self.profile.candidate_limits["bm25"], allowed_chunk_ids=allowed)
+                    top_k=effective_profile.candidate_limits["bm25"], allowed_chunk_ids=allowed)
                 dense, sparse = dense_future.result(), tuple(sparse_future.result())
             self._validate_hits(dense, allowed, DenseHit)
             self._validate_hits(sparse, allowed, SparseHit)
-        fused = tuple(weighted_rrf({"dense": dense, "bm25": sparse}, self.profile))
+        fused = tuple(weighted_rrf({"dense": dense, "bm25": sparse}, effective_profile))
         reranked = None
         contract = None
         degraded, error, latency = False, None, 0.0
@@ -211,9 +230,11 @@ class RetrievalService:
                 degradation.append("reranker:" + (error or "unknown_error"))
         else:
             contract = getattr(self._reranker, "default_contract", None)
-        hits, dropped = self._select(ordered, plan, top_k, tuple(degradation), compiled.version)
+        hits, dropped = self._select(
+            ordered, plan, effective_top_k, tuple(degradation), compiled.version
+        )
         return RetrievalOutcome(build_id=self.build_id, query=query, plan=plan,
-            filter_expression=compiled.expression, profile=self.profile,
+            filter_expression=compiled.expression, profile=effective_profile,
             dense_hits=dense, sparse_hits=sparse, fused_hits=fused, reranked_hits=reranked,
             rerank_contract=contract, rerank_degraded=degraded, rerank_error_code=error,
             rerank_latency_ms=latency, hits=hits, degradation=tuple(degradation),

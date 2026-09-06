@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, time, timezone
 from hashlib import sha256
 from inspect import Parameter, signature
 import json
@@ -181,6 +181,7 @@ class ContractRetrievalBranch:
         outcome = self.service.search(
             to_retrieval_query_intent(intent),
             top_k=min(self.top_k, candidate_limit),
+            candidate_limit=candidate_limit,
             transport_timeout_seconds=timeout_seconds,
         )
         evidence = normalize_retrieval(
@@ -836,17 +837,29 @@ def entity_dedup_conflict_node(deps: NodeDependencies):
                 if len(independent) < 2 or polarities != {"active", "inactive"}:
                     continue
                 starts = tuple(
-                    value
+                    (_validity_boundary(value, end=False), value)
                     for item in members
-                    if (value := _date_value(item.valid_from)) is not None
+                    if (value := item.valid_from) is not None
                 )
                 ends = tuple(
-                    value
+                    (_validity_boundary(value, end=True), value)
                     for item in members
-                    if (value := _date_value(item.valid_to)) is not None
+                    if (value := item.valid_to) is not None
                 )
-                overlap_start = max(starts) if starts else None
-                overlap_end = min(ends) if ends else None
+                overlap_start_boundary, overlap_start = (
+                    max(starts, key=lambda item: item[0])
+                    if starts else (None, None)
+                )
+                overlap_end_boundary, overlap_end = (
+                    min(ends, key=lambda item: item[0])
+                    if ends else (None, None)
+                )
+                if (
+                    overlap_start_boundary is not None
+                    and overlap_end_boundary is not None
+                    and overlap_start_boundary > overlap_end_boundary
+                ):
+                    continue
                 identity = json.dumps(
                     {
                         "scope": [
@@ -954,14 +967,30 @@ def _status_polarity(content: str) -> str | None:
     return "active" if active else "inactive"
 
 
-def _date_value(value: date | datetime | None) -> date | None:
-    return value.date() if isinstance(value, datetime) else value
+def _validity_boundary(value: date | datetime, *, end: bool) -> datetime:
+    if isinstance(value, datetime):
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("validity datetime must be timezone-aware")
+        return value.astimezone(timezone.utc)
+    if type(value) is date:
+        return datetime.combine(value, time.max if end else time.min, timezone.utc)
+    raise TypeError("validity boundary must be a date or datetime")
 
 
 def _evidence_valid_on(evidence: Evidence, as_of: date) -> bool:
-    start = _date_value(evidence.valid_from)
-    end = _date_value(evidence.valid_to)
-    return (start is None or start <= as_of) and (end is None or as_of <= end)
+    target_start = datetime.combine(as_of, time.min, timezone.utc)
+    target_end = datetime.combine(as_of, time.max, timezone.utc)
+    start = (
+        _validity_boundary(evidence.valid_from, end=False)
+        if evidence.valid_from is not None else None
+    )
+    end = (
+        _validity_boundary(evidence.valid_to, end=True)
+        if evidence.valid_to is not None else None
+    )
+    return (start is None or start <= target_end) and (
+        end is None or target_start <= end
+    )
 
 
 def evidence_validator_node(deps: NodeDependencies):
