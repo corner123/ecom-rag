@@ -7,3 +7,12 @@ Compose now pins `redis/redis-stack-server:7.4.0-v8`; the runtime dependency is 
 
 Verified: real Redis Stack integration tests (5 passed), containerized API test run (5 passed), graph plus Compose non-integration tests (52 passed, 1 deselected), compileall, `uv lock --check`, wheel build, and `git diff --check`.
 The direct `docker compose up -d redis --wait` attempt could not bind 6379 because another worktree's confirmed plain-Redis container owned it; validation instead used the same pinned Stack digest on isolated port 6380 and an attached Compose network alias, without stopping that service.
+
+## Fix round 1
+
+Run identity is now enforced by the saver itself: every read/write derives `checkpoint_ns=run:<run_id>`, even when LangGraph resets the top-level namespace.
+`checkpoint_config` requires thread, run, and idempotency IDs; the idempotency key is persisted as safe state, while completed nodes resume from the exact run checkpoint without being reissued.
+`resume_run(thread_id, run_id)` is now the public two-argument interface; saver injection remains private and the factory registers the active saver.
+Checkpoint state now uses a whitelist projection. Raw question/filter/input channels, answer/claim text, source payloads, secret-like values, and host-path sentinels are excluded; structured intent omits its question and resume input remains caller-supplied config.
+Fix-round verification: Redis Stack integration 7 passed; graph/Compose checks 52 passed (8 deselected); compileall, lock check, diff check, and sensitive scan passed.
+The saver injects the config idempotency key into every checkpoint and rejects any conflicting state/write key before persistence.

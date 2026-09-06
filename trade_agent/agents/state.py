@@ -132,12 +132,14 @@ class TradeIntelInput(TypedDict, total=False):
 
     question: str
     explicit_filters: dict[str, object]
+    idempotency_key: str
 
 
 class TradeIntelState(TypedDict, total=False):
     """Minimal durable graph state; Evidence bodies are intentionally absent."""
 
     question: str
+    idempotency_key: str
     current_question: str
     explicit_filters: dict[str, object]
     intent: dict[str, object]

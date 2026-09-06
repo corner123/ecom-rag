@@ -446,8 +446,14 @@ def _remaining_seconds(deadline: float) -> float:
     return remaining
 
 
-def _intent(state: TradeIntelState) -> QueryIntent:
-    return _from_json_state(QueryIntent, state["intent"])
+def _intent(state: TradeIntelState, resume_question: str | None = None) -> QueryIntent:
+    payload = dict(state["intent"])
+    if "question" not in payload:
+        question = resume_question if resume_question is not None else state.get("question")
+        if not isinstance(question, str) or not question.strip():
+            raise ValueError("resume requires the original question")
+        payload["question"] = question
+    return _from_json_state(QueryIntent, payload)
 
 
 def _refs(values: Sequence[dict[str, object]]) -> tuple[EvidenceRef, ...]:
@@ -1296,7 +1302,7 @@ def query_rewrite_node(deps: NodeDependencies):
 
 
 def answer_draft_node(deps: NodeDependencies):
-    def node(state: TradeIntelState) -> dict[str, object]:
+    def node(state: TradeIntelState, config) -> dict[str, object]:
         limited = _begin(state, "answer_draft", deps)
         if limited:
             return limited
@@ -1348,7 +1354,7 @@ def answer_draft_node(deps: NodeDependencies):
             evidence = deps.evidence_repository.get_many(_refs(state.get("evidence_refs", [])))
             validation = _from_json_state(ValidationOutcome, state["validation"])
             draft = deps.external_call_runner.call(
-                lambda: deps.answer_generator.generate(_intent(state), evidence, validation),
+                lambda: deps.answer_generator.generate(_intent(state, config.get("configurable", {}).get("resume_question")), evidence, validation),
                 deps.budgets.node_timeout_seconds,
             )
             if type(draft) is not DraftAnswer:
@@ -1397,7 +1403,7 @@ def answer_draft_node(deps: NodeDependencies):
 
 
 def claim_guard_node(deps: NodeDependencies):
-    def node(state: TradeIntelState) -> dict[str, object]:
+    def node(state: TradeIntelState, config) -> dict[str, object]:
         limited = _begin(state, "claim_guard", deps)
         if limited:
             return limited
@@ -1410,7 +1416,7 @@ def claim_guard_node(deps: NodeDependencies):
                 lambda: deps.claim_guard.guard(
                     draft,
                     evidence,
-                    _intent(state),
+                    _intent(state, config.get("configurable", {}).get("resume_question")),
                     _from_json_state(ValidationOutcome, state["validation"]),
                 ),
                 deps.budgets.node_timeout_seconds,
