@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 from trade_agent.agents.intent import QueryIntent
 from trade_agent.evidence.models import Claim, Evidence
 from trade_agent.evidence.validator import ValidationOutcome
-from trade_agent.generation.base import AnswerGenerator, DraftAnswer, claim_id_for, generation_evidence, render_sql_claim
+from trade_agent.generation.base import AnswerGenerator, ClaimScope, DraftAnswer, claim_id_for, generation_evidence, render_sql_claim
 
 
 class DeterministicAnswerGenerator(AnswerGenerator):
@@ -22,7 +22,13 @@ class DeterministicAnswerGenerator(AnswerGenerator):
         retained = generation_evidence(intent, evidence, validation)
         if not validation.can_answer:
             return DraftAnswer(answer=None, claims=(), refusal_reason=validation.error_code or "evidence_insufficient")
-        claims = tuple(sorted((claim for item in retained for claim in _claims_for(item)), key=lambda item: item.claim_id))
+        supported = tuple(
+            sorted(
+                ((claim, item) for item in retained for claim in _claims_for(item)),
+                key=lambda item: item[0].claim_id,
+            )
+        )
+        claims = tuple(claim for claim, _ in supported)
         if not claims:
             return DraftAnswer(answer=None, claims=(), refusal_reason="evidence_insufficient")
         return DraftAnswer(
@@ -30,6 +36,7 @@ class DeterministicAnswerGenerator(AnswerGenerator):
             claims=claims,
             refusal_reason=None,
             core_claim_ids=tuple(sorted(item.claim_id for item in claims)),
+            claim_scopes=tuple(_claim_scope(claim, evidence) for claim, evidence in supported),
         )
 
 
@@ -83,4 +90,13 @@ def _retrieval_claim(evidence: Evidence) -> Claim:
         period_start=evidence.valid_from,
         period_end=evidence.valid_to,
         confidence=1.0,
+    )
+
+
+def _claim_scope(claim: Claim, evidence: Evidence) -> ClaimScope:
+    return ClaimScope(
+        claim_id=claim.claim_id,
+        country_code=evidence.country_code,
+        hs_code=evidence.hs_code,
+        aggregation_grain=evidence.aggregation_grain,
     )

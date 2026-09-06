@@ -8,12 +8,13 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 import json
-from typing import Any, Self
+from typing import Self
 
 from pydantic import BaseModel, ConfigDict, StrictStr, model_validator
 
 from trade_agent.agents.intent import QueryIntent
 from trade_agent.evidence.models import Claim, Evidence
+from trade_agent.evidence.requirements import EvidenceRequirements, InvalidIntentContract
 from trade_agent.evidence.validator import ValidationOutcome
 
 
@@ -30,6 +31,25 @@ class _Contract(BaseModel):
         return type(self).model_validate(values)
 
 
+class ClaimScope(_Contract):
+    """Structured dimensions which the frozen Claim contract does not carry."""
+
+    claim_id: StrictStr
+    country_code: StrictStr | None = None
+    hs_code: StrictStr | None = None
+    aggregation_grain: tuple[StrictStr, ...] = ()
+
+    @model_validator(mode="after")
+    def nonblank(self) -> Self:
+        if not self.claim_id.strip():
+            raise ValueError("claim scope requires a claim ID")
+        if any(value is not None and not value.strip() for value in (self.country_code, self.hs_code)):
+            raise ValueError("claim scope dimensions must not be blank")
+        if any(not value.strip() for value in self.aggregation_grain):
+            raise ValueError("aggregation grain values must not be blank")
+        return self
+
+
 class DraftAnswer(_Contract):
     """An untrusted provider draft whose claims still require a guard decision."""
 
@@ -37,6 +57,7 @@ class DraftAnswer(_Contract):
     claims: tuple[Claim, ...]
     refusal_reason: StrictStr | None
     core_claim_ids: tuple[StrictStr, ...] = ()
+    claim_scopes: tuple[ClaimScope, ...] = ()
 
     @model_validator(mode="after")
     def coherent(self) -> Self:
@@ -53,7 +74,10 @@ class DraftAnswer(_Contract):
             raise ValueError("core claim IDs must be sorted and unique")
         if not set(self.core_claim_ids).issubset(claim_ids):
             raise ValueError("core claim IDs must belong to draft claims")
-        if self.refusal_reason is not None and self.claims:
+        scope_ids = tuple(item.claim_id for item in self.claim_scopes)
+        if scope_ids != claim_ids:
+            raise ValueError("claim scopes must exactly and deterministically cover draft claims")
+        if self.refusal_reason is not None and (self.claims or self.claim_scopes):
             raise ValueError("refusal drafts must not contain claims")
         return self
 
@@ -84,6 +108,12 @@ def generation_evidence(
     if type(validation) is not ValidationOutcome:
         raise TypeError("validation must be an exact ValidationOutcome")
     checked_validation = ValidationOutcome.model_validate(validation.model_dump(mode="python"))
+    try:
+        expected_requirements = EvidenceRequirements.for_intent(intent)
+    except InvalidIntentContract as exc:
+        raise ValueError("intent cannot produce generation requirements") from exc
+    if checked_validation.requirements != expected_requirements:
+        raise ValueError("validation requirements do not match the current intent")
     if not checked_validation.can_answer:
         return ()
     checked: dict[str, Evidence] = {}

@@ -4,7 +4,6 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 import json
 import os
-from typing import Any
 from urllib.request import Request, urlopen
 
 from pydantic import ValidationError
@@ -28,17 +27,25 @@ class DeepSeekAnswerGenerator(AnswerGenerator):
         base_url: str | None = None,
         model: str = "deepseek-chat",
         timeout_seconds: float = 20.0,
+        max_output_tokens: int = 1_024,
+        max_response_bytes: int = 1_048_576,
         transport: Transport | None = None,
     ) -> None:
         resolved_key = api_key if api_key is not None else os.environ.get("DEEPSEEK_API_KEY")
         if not isinstance(resolved_key, str) or not resolved_key.strip():
             raise ValueError("DeepSeek generation requires DEEPSEEK_API_KEY")
-        if not isinstance(model, str) or not model.strip() or timeout_seconds <= 0:
+        if not isinstance(model, str) or not model.strip() or type(timeout_seconds) not in (int, float) or timeout_seconds <= 0:
             raise ValueError("DeepSeek configuration is invalid")
+        if type(max_output_tokens) is not int or not 1 <= max_output_tokens <= 8_192:
+            raise ValueError("max_output_tokens must be an integer from 1 through 8192")
+        if type(max_response_bytes) is not int or not 1 <= max_response_bytes <= 4_194_304:
+            raise ValueError("max_response_bytes must be an integer from 1 through 4194304")
         self._api_key = resolved_key
         self._base_url = (base_url or os.environ.get("DEEPSEEK_BASE_URL") or "https://api.deepseek.com").rstrip("/")
         self._model = model
         self._timeout_seconds = timeout_seconds
+        self._max_output_tokens = max_output_tokens
+        self._max_response_bytes = max_response_bytes
         self._transport = transport
 
     def generate(
@@ -64,6 +71,7 @@ class DeepSeekAnswerGenerator(AnswerGenerator):
         return {
             "model": self._model,
             "temperature": 0,
+            "max_tokens": self._max_output_tokens,
             "response_format": {"type": "json_schema", "json_schema": {"name": "draft_answer", "strict": True, "schema": schema}},
             "messages": (
                 {"role": "system", "content": "Return only JSON conforming to the supplied schema. Cite only supplied evidence IDs."},
@@ -79,7 +87,10 @@ class DeepSeekAnswerGenerator(AnswerGenerator):
             method="POST",
         )
         with urlopen(request, timeout=self._timeout_seconds) as response:  # noqa: S310 - endpoint is explicitly configured
-            body = json.loads(response.read().decode("utf-8"))
+            raw_body = response.read(self._max_response_bytes + 1)
+        if len(raw_body) > self._max_response_bytes:
+            raise ValueError("DeepSeek response exceeds the maximum response size")
+        body = json.loads(raw_body.decode("utf-8"))
         if not isinstance(body, dict):
             raise ValueError("DeepSeek response was not an object")
         return body
@@ -111,11 +122,11 @@ def _parse_response(response: Mapping[str, object]) -> DraftAnswer:
         message = choices[0].get("message")
         if isinstance(message, dict):
             content = message.get("content")
-    if isinstance(content, str):
-        content = json.loads(content)
-    if not isinstance(content, dict):
-        raise ValueError("DeepSeek response does not contain a JSON draft")
     try:
+        if isinstance(content, str):
+            return DraftAnswer.model_validate_json(content)
+        if not isinstance(content, dict):
+            raise ValueError("DeepSeek response does not contain a JSON draft")
         return DraftAnswer.model_validate(content)
-    except ValidationError as exc:
+    except (ValidationError, ValueError) as exc:
         raise ValueError("DeepSeek response violates DraftAnswer schema") from exc

@@ -3,13 +3,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
-from datetime import date, datetime
 from typing import Self
 
 from pydantic import BaseModel, ConfigDict, StrictBool, StrictStr, model_validator
 
 from trade_agent.evidence.models import Claim, Evidence
-from trade_agent.generation.base import DraftAnswer, sql_claim_rows
+from trade_agent.evidence.validator import ValidationOutcome
+from trade_agent.agents.intent import QueryIntent
+from trade_agent.generation.base import ClaimScope, DraftAnswer, generation_evidence, sql_claim_rows
 
 
 class _Contract(BaseModel):
@@ -50,9 +51,16 @@ class GuardOutcome(_Contract):
 class ClaimHallucinationGuard:
     """Accept only claims exactly supported by the supplied generation Evidence."""
 
-    def guard(self, draft: DraftAnswer, evidence: Sequence[Evidence]) -> GuardOutcome:
+    def guard(
+        self,
+        draft: DraftAnswer,
+        evidence: Sequence[Evidence],
+        intent: QueryIntent,
+        validation: ValidationOutcome,
+    ) -> GuardOutcome:
         checked_draft = _checked_draft(draft)
-        evidence_by_id = _checked_evidence(evidence)
+        retained_evidence = generation_evidence(intent, evidence, validation)
+        evidence_by_id = _checked_evidence(retained_evidence)
         if checked_draft.refusal_reason is not None:
             return GuardOutcome(
                 accepted=False,
@@ -64,12 +72,13 @@ class ClaimHallucinationGuard:
         retained: list[Claim] = []
         unsupported_core = False
         unsupported = False
+        scope_by_claim = {item.claim_id: item for item in checked_draft.claim_scopes}
         for claim in checked_draft.claims:
-            if _claim_supported(claim, evidence_by_id):
+            if _claim_supported(claim, scope_by_claim[claim.claim_id], evidence_by_id):
                 retained.append(claim)
             else:
                 unsupported = True
-                unsupported_core = unsupported_core or claim.claim_id in checked_draft.core_claim_ids
+                unsupported_core = unsupported_core or _is_required_core_claim(claim, validation)
         error_codes = ("claim_unsupported",) if unsupported else ()
         if unsupported_core:
             return GuardOutcome(
@@ -117,33 +126,44 @@ def _checked_evidence(value: Sequence[Evidence]) -> dict[str, Evidence]:
     return result
 
 
-def _claim_supported(claim: Claim, evidence_by_id: Mapping[str, Evidence]) -> bool:
+def _claim_supported(claim: Claim, scope: ClaimScope, evidence_by_id: Mapping[str, Evidence]) -> bool:
     if claim.status != "supported" or not claim.evidence_ids:
         return False
     cited = tuple(evidence_by_id.get(evidence_id) for evidence_id in claim.evidence_ids)
     if any(item is None for item in cited):
         return False
-    return all(_claim_matches_evidence(claim, item) for item in cited if item is not None)
+    return all(_claim_matches_evidence(claim, scope, item) for item in cited if item is not None)
 
 
-def _claim_matches_evidence(claim: Claim, evidence: Evidence) -> bool:
+def _claim_matches_evidence(claim: Claim, scope: ClaimScope, evidence: Evidence) -> bool:
     if claim.entity_id is not None and claim.entity_id != evidence.entity_id:
         return False
     if claim.fact_type != evidence.fact_type:
         return False
-    if _date_only(claim.period_start) != _date_only(evidence.valid_from):
+    if claim.period_start != evidence.valid_from:
         return False
-    if _date_only(claim.period_end) != _date_only(evidence.valid_to):
+    if claim.period_end != evidence.valid_to:
+        return False
+    if scope.country_code != evidence.country_code or scope.hs_code != evidence.hs_code:
+        return False
+    if scope.aggregation_grain != evidence.aggregation_grain:
         return False
     if evidence.locator.branch == "sql":
         return bool(sql_claim_rows(claim, evidence))
-    return (
-        claim.value is None
-        and claim.unit is None
-        and claim.currency is None
-        and claim.text == evidence.content
+    if claim.text != evidence.content:
+        return False
+    if claim.value is not None and claim.value not in evidence.content:
+        return False
+    if claim.unit is not None and (claim.unit not in evidence.units or claim.unit not in evidence.content):
+        return False
+    if claim.currency is not None and (claim.currency not in evidence.currencies or claim.currency not in evidence.content):
+        return False
+    return True
+
+
+def _is_required_core_claim(claim: Claim, validation: ValidationOutcome) -> bool:
+    """The validator, never a provider field, classifies required facts as core."""
+    return claim.fact_type is not None and any(
+        requirement.core and claim.fact_type in requirement.fact_types
+        for requirement in validation.requirements.items
     )
-
-
-def _date_only(value: date | datetime | None) -> date | None:
-    return value.date() if isinstance(value, datetime) else value
