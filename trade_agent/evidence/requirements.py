@@ -17,6 +17,13 @@ BranchErrorCode = Literal[
     "invalid_contract", "policy_denied", "schema_drift", "timeout", "transport",
     "unavailable", "unknown",
 ]
+RetryableBranchErrorCode = Literal["timeout", "transport", "unavailable"]
+RETRYABLE_BRANCH_ERROR_CODES: tuple[RetryableBranchErrorCode, ...] = (
+    "timeout", "transport", "unavailable",
+)
+HARD_BRANCH_ERROR_CODES: tuple[BranchErrorCode, ...] = (
+    "invalid_contract", "policy_denied", "schema_drift", "unknown",
+)
 PartialDegradationCode = Literal[
     "dense_unavailable", "reranker_unavailable", "sparse_unavailable",
     "structured_output_unavailable",
@@ -133,8 +140,7 @@ class SufficiencyPolicy(_Contract):
     external_independent_sources: StrictInt = Field(default=1, ge=1)
     lead_sql_maximum_age_days: StrictInt = Field(default=365, gt=0)
     independence_dimensions: tuple[IndependenceDimension, ...] = ("content_sha256", "dedupe_cluster_id", "publisher_identity")
-    fatal_error_codes: tuple[BranchErrorCode, ...] = ("timeout", "transport", "unavailable")
-    hard_error_codes: tuple[BranchErrorCode, ...] = ("invalid_contract", "policy_denied", "schema_drift", "unknown")
+    fatal_error_codes: tuple[RetryableBranchErrorCode, ...] = RETRYABLE_BRANCH_ERROR_CODES
     fatal_evidence_degraded_components: tuple[FatalDegradationCode, ...] = (
         "all_retrievers_unavailable", "branch_timeout", "required_branch_timeout",
         "retrieval_timeout", "retrieval_unavailable", "sql_timeout", "sql_unavailable",
@@ -157,16 +163,13 @@ class SufficiencyPolicy(_Contract):
             raise ValueError("authority rules must be sorted by unique rule ID")
         for values in (
             self.accepted_authority_directness, self.independence_dimensions,
-            self.fatal_error_codes, self.hard_error_codes,
+            self.fatal_error_codes,
             self.fatal_evidence_degraded_components, self.partial_degraded_components,
         ):
             if values != tuple(sorted(set(values))):
                 raise ValueError("policy tuple values must be sorted and unique")
         if not self.independence_dimensions:
             raise ValueError("at least one independence dimension is required")
-        all_errors = {"invalid_contract", "policy_denied", "schema_drift", "timeout", "transport", "unavailable", "unknown"}
-        if set(self.fatal_error_codes) & set(self.hard_error_codes) or set(self.fatal_error_codes) | set(self.hard_error_codes) != all_errors:
-            raise ValueError("fatal and hard branch errors must exactly partition the closed taxonomy")
         expected = _policy_fingerprint(self)
         if "policy_fingerprint" in self.model_fields_set and self.policy_fingerprint != expected:
             raise ValueError("policy_fingerprint does not match policy semantics")
@@ -189,6 +192,11 @@ class SufficiencyPolicy(_Contract):
     @property
     def sources_by_fact(self) -> Mapping[str, tuple[str, ...]]:
         return {item.fact_type: item.allowed_source_types for item in self.fact_sources}
+
+    @property
+    def hard_error_codes(self) -> tuple[BranchErrorCode, ...]:
+        """Deterministic contract and policy failures can never become retryable."""
+        return HARD_BRANCH_ERROR_CODES
 
 
 def _policy_fingerprint(policy: SufficiencyPolicy) -> str:
@@ -252,7 +260,7 @@ class EvidenceRequirements(_Contract):
     intent_valid: StrictBool = True
     required_branches: tuple[Branch, ...]
     items: tuple[EvidenceRequirement, ...]
-    requirements_fingerprint: StrictStr = ""
+    requirements_fingerprint: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def stable_contract(self) -> Self:
@@ -266,9 +274,8 @@ class EvidenceRequirements(_Contract):
         if self.intent_valid and self.intent_kind != "out_of_scope" and not self.items:
             raise ValueError("a supported intent must produce requirements")
         expected = _requirements_fingerprint(self)
-        if "requirements_fingerprint" in self.model_fields_set and self.requirements_fingerprint != expected:
+        if self.requirements_fingerprint != expected:
             raise ValueError("requirements_fingerprint does not match requirement semantics")
-        object.__setattr__(self, "requirements_fingerprint", expected)
         return self
 
     def model_copy(self, *, update: Mapping[str, object] | None = None, deep: bool = False) -> Self:
@@ -278,11 +285,27 @@ class EvidenceRequirements(_Contract):
         values.pop("requirements_fingerprint", None)
         if update:
             values.update(update)
-        return type(self).model_validate(values)
+        values.pop("requirements_fingerprint", None)
+        return type(self)._from_semantics(values)
+
+    @classmethod
+    def _from_semantics(cls, values: Mapping[str, object]) -> "EvidenceRequirements":
+        payload = dict(values)
+        payload.pop("requirements_fingerprint", None)
+        payload.setdefault("intent_valid", True)
+        payload["requirements_fingerprint"] = _requirements_payload_fingerprint(payload)
+        return cls.model_validate(payload)
 
     @classmethod
     def invalid(cls, kind: str, policy: SufficiencyPolicy) -> "EvidenceRequirements":
-        return cls(policy_version=policy.policy_version, policy_fingerprint=policy.policy_fingerprint, intent_kind=kind, intent_valid=False, required_branches=(), items=())
+        return cls._from_semantics({
+            "policy_version": policy.policy_version,
+            "policy_fingerprint": policy.policy_fingerprint,
+            "intent_kind": kind,
+            "intent_valid": False,
+            "required_branches": (),
+            "items": (),
+        })
 
     @classmethod
     def for_intent(cls, intent: QueryIntent, *, policy: SufficiencyPolicy = DEFAULT_SUFFICIENCY_POLICY) -> "EvidenceRequirements":
@@ -342,14 +365,40 @@ class EvidenceRequirements(_Contract):
                     temporal_start=start, temporal_end=end, require_synthetic=synthetic))
 
         ordered = tuple(sorted(items, key=lambda item: item.requirement_id))
-        return cls(policy_version=policy.policy_version, policy_fingerprint=policy.policy_fingerprint, intent_kind=intent.kind,
-            required_branches=tuple(sorted({item.branch for item in ordered})), items=ordered)
+        return cls._from_semantics({
+            "policy_version": policy.policy_version,
+            "policy_fingerprint": policy.policy_fingerprint,
+            "intent_kind": intent.kind,
+            "required_branches": tuple(sorted({item.branch for item in ordered})),
+            "items": ordered,
+        })
 
 
 def _requirements_fingerprint(requirements: EvidenceRequirements) -> str:
-    payload = requirements.model_dump(mode="json", exclude={"requirements_fingerprint"})
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    payload = requirements.model_dump(mode="python", exclude={"requirements_fingerprint"})
+    return _requirements_payload_fingerprint(payload)
+
+
+def _requirements_payload_fingerprint(payload: Mapping[str, object]) -> str:
+    canonical = json.dumps(
+        _fingerprint_value(payload), sort_keys=True, separators=(",", ":"),
+        ensure_ascii=False,
+    )
     return sha256(canonical.encode()).hexdigest()
+
+
+def _fingerprint_value(value: object) -> object:
+    if isinstance(value, BaseModel):
+        return _fingerprint_value(value.model_dump(mode="python"))
+    if isinstance(value, Mapping):
+        return {str(key): _fingerprint_value(item) for key, item in sorted(value.items())}
+    if isinstance(value, (tuple, list)):
+        return [_fingerprint_value(item) for item in value]
+    if isinstance(value, datetime):
+        return {"$datetime": value.isoformat()}
+    if isinstance(value, date):
+        return {"$date": value.isoformat()}
+    return value
 
 
 def validated_intent(value: QueryIntent) -> QueryIntent:

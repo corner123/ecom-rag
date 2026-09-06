@@ -1149,3 +1149,126 @@ def test_round2_partial_degradation_mode_changes_fingerprint_and_result() -> Non
     assert blocked.decision == "refuse"
     assert "partial_degradation" in _codes(blocked)
     assert audit.policy_fingerprint != blocked.policy_fingerprint
+
+
+@pytest.mark.parametrize("where", (
+    (
+        "import_country.country_code = :filter_0_0 "
+        "AND 1 = 1 /* hs.hs_code = :filter_1_0 */ "
+        "AND tr.trade_date BETWEEN :filter_2_start AND :filter_2_end"
+    ),
+    (
+        "import_country.country_code = :filter_0_0 "
+        "AND 'hs.hs_code = :filter_1_0' "
+        "AND tr.trade_date BETWEEN :filter_2_start AND :filter_2_end"
+    ),
+    (
+        "import_country.country_code = :filter_0_0 "
+        "OR hs.hs_code = :filter_1_0 "
+        "AND tr.trade_date BETWEEN :filter_2_start AND :filter_2_end"
+    ),
+))
+def test_round3_sql_scope_rejects_comment_string_and_or_pseudo_predicates(where: str) -> None:
+    evidence = _sql(where_override=where)
+
+    outcome = _validated(
+        _intent("最近半年美国采购 HS850440 金额最高的 10 家公司"),
+        (evidence,),
+    )
+
+    assert not outcome.can_answer
+    assert "invalid_contract" in _codes(outcome)
+
+
+def test_round3_sql_scope_rejects_in_literal_even_with_exact_placeholder_count() -> None:
+    intent = _intent(
+        "最近半年美国采购 HS850440 金额最高的 10 家公司",
+        filters=RetrievalFilter(entity_ids=("company:one", "company:two")),
+    )
+    evidence = _sql(
+        where_override=(
+            "importer.id IN (:filter_0_0, :filter_0_1, 999) "
+            "AND import_country.country_code = :filter_1_0 "
+            "AND hs.hs_code = :filter_2_0 "
+            "AND tr.trade_date BETWEEN :filter_3_start AND :filter_3_end"
+        ),
+        filter_names_override=(
+            "filter_0_0", "filter_0_1", "filter_1_0", "filter_2_0",
+            "filter_3_end", "filter_3_start",
+        ),
+    )
+
+    outcome = _validated(intent, (evidence,))
+
+    assert not outcome.can_answer
+    assert "invalid_contract" in _codes(outcome)
+
+    duplicate_eq = _sql(
+        where_override=(
+            "importer.id = :filter_0_0 AND importer.id = :filter_0_1 "
+            "AND import_country.country_code = :filter_1_0 "
+            "AND hs.hs_code = :filter_2_0 "
+            "AND tr.trade_date BETWEEN :filter_3_start AND :filter_3_end"
+        ),
+        filter_names_override=(
+            "filter_0_0", "filter_0_1", "filter_1_0", "filter_2_0",
+            "filter_3_end", "filter_3_start",
+        ),
+    )
+    duplicate_outcome = _validated(intent, (duplicate_eq,))
+
+    assert not duplicate_outcome.can_answer
+    assert "invalid_contract" in _codes(duplicate_outcome)
+
+
+def test_round3_policy_cannot_reclassify_deterministic_errors_as_retryable() -> None:
+    from trade_agent.evidence.requirements import SufficiencyPolicy
+    from trade_agent.evidence.validator import BranchExecutionReport, EvidenceValidator, ValidationContext
+
+    with pytest.raises(ValidationError):
+        SufficiencyPolicy().model_copy(update={
+            "fatal_error_codes": ("policy_denied", "timeout", "transport", "unavailable"),
+        })
+    timeout_only = SufficiencyPolicy().model_copy(update={"fatal_error_codes": ("timeout",)})
+    intent = _intent("Acme 官网最近状态", filters=RetrievalFilter(entity_ids=("company:acme",)))
+    transport = ValidationContext(branch_reports=(BranchExecutionReport(
+        branch="rag", attempted=True, completed=False, zero_hits=False,
+        error_codes=("transport",),
+    ),))
+    outcome = EvidenceValidator(timeout_only).validate(
+        intent, (_rag(suffix="transport-not-retryable"),), (), AS_OF, context=transport,
+    )
+
+    assert outcome.decision == "refuse"
+    assert "branch_hard_error" in _codes(outcome)
+
+
+def test_round3_requirements_fingerprint_is_mandatory_on_json_input() -> None:
+    from trade_agent.evidence.requirements import EvidenceRequirements
+
+    intent = _intent("Acme 官网最近状态", filters=RetrievalFilter(entity_ids=("company:acme",)))
+    payload = EvidenceRequirements.for_intent(intent).model_dump(mode="python")
+    payload.pop("requirements_fingerprint")
+
+    with pytest.raises(ValidationError):
+        EvidenceRequirements.model_validate(payload)
+
+
+def test_round3_outcome_requires_exact_missing_reasons_and_closed_source_count(validator) -> None:
+    from trade_agent.evidence.validator import ValidationOutcome
+
+    intent = _intent("Acme 官网最近状态", filters=RetrievalFilter(entity_ids=("company:acme",)))
+    insufficient = validator.validate(intent, (), (), AS_OF)
+    missing_forgery = insufficient.model_dump(mode="python")
+    assert len(missing_forgery["missing_requirements"][0]["reason_codes"]) > 1
+    missing_forgery["missing_requirements"][0]["reason_codes"] = (
+        missing_forgery["missing_requirements"][0]["reason_codes"][0],
+    )
+    with pytest.raises(ValidationError):
+        ValidationOutcome.model_validate(missing_forgery)
+
+    answer = validator.validate(intent, (_rag(suffix="count-proof"),), (), AS_OF)
+    count_forgery = answer.model_dump(mode="python")
+    count_forgery["satisfied_requirements"][0]["independent_source_count"] = 999
+    with pytest.raises(ValidationError):
+        ValidationOutcome.model_validate(count_forgery)

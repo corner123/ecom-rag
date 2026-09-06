@@ -5,6 +5,7 @@ from collections.abc import Sequence
 from copy import deepcopy
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from hashlib import sha256
 import json
 import math
 import re
@@ -12,6 +13,9 @@ from typing import Literal, Mapping, Self
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, model_validator
+import sqlglot
+from sqlglot import exp
+from sqlglot.errors import ParseError
 
 from trade_agent.agents.intent import QueryIntent
 from trade_agent.evidence.models import Conflict, Evidence
@@ -20,6 +24,7 @@ from trade_agent.evidence.requirements import (
     DEFAULT_SUFFICIENCY_POLICY,
     EvidenceRequirement,
     EvidenceRequirements,
+    RETRYABLE_BRANCH_ERROR_CODES,
     InvalidIntentContract,
     PartialDegradationCode,
     SourceAuthorityRule,
@@ -110,16 +115,33 @@ class ValidationReason(_Contract):
         return self
 
 
+class IndependentSourceProof(_Contract):
+    evidence_id: StrictStr = Field(pattern=r"^(?:sql|rag)_[0-9a-f]{64}$")
+    group_key: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class SatisfiedRequirement(_Contract):
     requirement_id: StrictStr
     branch: Literal["sql", "rag"]
     evidence_ids: tuple[StrictStr, ...]
     independent_source_count: StrictInt = Field(ge=1)
+    independence_proofs: tuple[IndependentSourceProof, ...]
 
     @model_validator(mode="after")
     def stable(self) -> Self:
         if not self.evidence_ids or self.evidence_ids != tuple(sorted(set(self.evidence_ids))):
             raise ValueError("satisfied evidence IDs must be nonempty, sorted and unique")
+        proof_keys = tuple((item.group_key, item.evidence_id) for item in self.independence_proofs)
+        if proof_keys != tuple(sorted(set(proof_keys))):
+            raise ValueError("independence proofs must be sorted and unique")
+        if (
+            self.independent_source_count != len(self.independence_proofs)
+            or self.independent_source_count > len(self.evidence_ids)
+            or len({item.group_key for item in self.independence_proofs}) != len(self.independence_proofs)
+            or len({item.evidence_id for item in self.independence_proofs}) != len(self.independence_proofs)
+            or not {item.evidence_id for item in self.independence_proofs}.issubset(self.evidence_ids)
+        ):
+            raise ValueError("independent source count must close over unique support proofs")
         return self
 
 
@@ -189,8 +211,8 @@ class ValidationOutcome(_Contract):
         blocking = {item.code for item in self.reasons if item.blocking}
         for item in self.missing_requirements:
             present = {reason.code for reason in self.reasons if reason.blocking and reason.requirement_id == item.requirement_id}
-            if not set(item.reason_codes).issubset(present):
-                raise ValueError("missing reason codes lack matching blocking reasons")
+            if set(item.reason_codes) != present:
+                raise ValueError("missing reason codes must equal all matching blocking reasons")
         expected_error = (
             None if self.decision == "answer"
             else "evidence_retryable" if self.decision == "rewrite_once"
@@ -270,11 +292,18 @@ class EvidenceValidator:
                 failures.extend(item_failures)
                 if not branch_blocked and not any(reason.blocking for reason in item_failures):
                     valid.append(item)
-            source_count = _independent_source_count(valid, self.policy)
+            independence_proofs = _independent_source_proofs(valid, self.policy)
+            source_count = len(independence_proofs)
             if not branch_blocked and source_count >= requirement.minimum_independent_sources:
                 ids = tuple(sorted(item.evidence_id for item in valid))
                 eligible_ids.update(ids)
-                satisfied.append(SatisfiedRequirement(requirement_id=requirement.requirement_id, branch=requirement.branch, evidence_ids=ids, independent_source_count=source_count))
+                satisfied.append(SatisfiedRequirement(
+                    requirement_id=requirement.requirement_id,
+                    branch=requirement.branch,
+                    evidence_ids=ids,
+                    independent_source_count=source_count,
+                    independence_proofs=independence_proofs,
+                ))
                 all_reasons.extend(reason.model_copy(update={"blocking": False}) for reason in failures)
                 continue
             all_reasons.extend(failures)
@@ -347,7 +376,9 @@ def _context_reasons(requirements: EvidenceRequirements, context: ValidationCont
         report_unknown = set(report.degraded_components) - partial_evidence
         evidence_unknown = evidence_components - fatal_evidence - partial_evidence
         report_fatal = set(report.error_codes) & fatal_errors
-        report_hard = set(report.error_codes) & hard_errors
+        report_hard = set(report.error_codes) & (
+            hard_errors | (set(RETRYABLE_BRANCH_ERROR_CODES) - fatal_errors)
+        )
         is_fatal = bool(evidence_fatal or report_fatal)
         if is_fatal:
             fatal_branches.add(branch)
@@ -559,17 +590,13 @@ def _check_sql(requirement: EvidenceRequirement, evidence: Evidence, as_of: date
     elif requirement.maximum_age_days is not None and provenance.effective_end_date < as_of_date - timedelta(days=requirement.maximum_age_days): add("stale", "SQL effective end is older than lead policy permits")
     if provenance.effective_start_date > as_of_date or provenance.effective_end_date > as_of_date: add("out_of_scope", "SQL validity extends beyond as_of")
     if requirement.require_synthetic is not None and evidence.is_synthetic != requirement.require_synthetic: add("dimension_mismatch", "SQL dataset synthetic scope differs from request")
-    placeholders = re.findall(r":([a-z][a-z0-9_]*)\b", provenance.normalized_sql.casefold())
-    if (
-        tuple(provenance.bound_filter_names) != tuple(sorted(set(provenance.bound_filter_names)))
-        or tuple(sorted(placeholders)) != tuple(provenance.bound_filter_names)
-        or len(placeholders) != len(set(placeholders))
-    ):
-        add("invalid_contract", "SQL placeholders and bound filter names do not close exactly")
-    policy_names = {"policy_end_date", "policy_is_synthetic", "policy_start_date"}
-    if not policy_names.issubset(placeholders):
-        add("invalid_contract", "SQL omits required policy placeholders")
-    bindings = _sql_scope_bindings(provenance.normalized_sql.casefold())
+    try:
+        bindings, ast_filter_names = _sql_scope_bindings(provenance.normalized_sql)
+    except _SqlScopeRejected as error:
+        add("invalid_contract", str(error))
+        return
+    if tuple(provenance.bound_filter_names) != tuple(sorted(ast_filter_names)):
+        add("invalid_contract", "SQL AST placeholders and bound filter names do not close exactly")
     expected_scopes = (
         (requirement.required_entity_ids, requirement.required_entity_column),
         (requirement.required_company_names, requirement.required_company_column),
@@ -589,27 +616,113 @@ def _check_sql(requirement: EvidenceRequirement, evidence: Evidence, as_of: date
         if len(date_names) != 2 or not _paired_range_placeholders(date_names):
             add("dimension_mismatch", "SQL does not bind the requested trade-date interval")
         covered.update(date_names)
-    user_names = set(provenance.bound_filter_names) - policy_names
-    if any(not name.startswith("filter_") for name in user_names):
-        add("invalid_contract", "SQL contains an unclassified non-policy placeholder")
+    policy_names = {"policy_end_date", "policy_is_synthetic", "policy_start_date"}
+    user_names = set(ast_filter_names) - policy_names
     if user_names != covered:
         add("invalid_contract", "SQL contains an unused or unclassified user filter placeholder")
 
 
-def _sql_scope_bindings(sql: str) -> dict[str, tuple[str, ...]]:
-    found: dict[str, list[str]] = {}
-    patterns = (
-        r"\b([a-z][a-z0-9_]*\.[a-z][a-z0-9_]*)\s*=\s*:(filter_[a-z0-9_]+)\b",
-        r"\b([a-z][a-z0-9_]*\.[a-z][a-z0-9_]*)\s+in\s*\(([^)]*)\)",
-        r"\b([a-z][a-z0-9_]*\.[a-z][a-z0-9_]*)\s+between\s+:(filter_[a-z0-9_]+)\s+and\s+:(filter_[a-z0-9_]+)\b",
+class _SqlScopeRejected(ValueError):
+    """The SQL provenance cannot prove an executable typed predicate scope."""
+
+
+def _sql_scope_bindings(sql: str) -> tuple[dict[str, tuple[str, ...]], tuple[str, ...]]:
+    try:
+        statements = sqlglot.parse(sql, read="mysql", error_level="RAISE")
+    except ParseError as error:
+        raise _SqlScopeRejected("SQL provenance is not valid MySQL") from error
+    if len(statements) != 1 or type(statements[0]) is not exp.Select:
+        raise _SqlScopeRejected("SQL provenance must contain exactly one SELECT")
+    tree = statements[0]
+    if tree.args.get("hint") is not None or any(node.comments for node in tree.walk()):
+        raise _SqlScopeRejected("SQL provenance comments and hints are forbidden")
+    where = tree.args.get("where")
+    if type(where) is not exp.Where:
+        raise _SqlScopeRejected("SQL provenance requires a WHERE predicate")
+
+    bindings: dict[str, list[str]] = {}
+    predicate_names: list[str] = []
+    policy_shapes: set[tuple[str, tuple[str, ...]]] = set()
+    for predicate in _and_predicates(where.this):
+        column, names = _executable_predicate(predicate)
+        predicate_names.extend(names)
+        shape = (column, names)
+        if shape in {
+            ("data_scope.is_synthetic", ("policy_is_synthetic",)),
+            ("tr.trade_date", ("policy_start_date", "policy_end_date")),
+        }:
+            policy_shapes.add(shape)
+            continue
+        if any(not name.startswith("filter_") for name in names):
+            raise _SqlScopeRejected("SQL contains an unclassified non-policy placeholder")
+        if column in bindings:
+            raise _SqlScopeRejected("SQL scope contains multiple predicates for one business column")
+        bindings[column] = list(names)
+
+    expected_policy = {
+        ("data_scope.is_synthetic", ("policy_is_synthetic",)),
+        ("tr.trade_date", ("policy_start_date", "policy_end_date")),
+    }
+    if policy_shapes != expected_policy:
+        raise _SqlScopeRejected("SQL omits or changes a required policy predicate")
+    all_placeholders = tuple(item.name.casefold() for item in tree.find_all(exp.Placeholder))
+    if (
+        len(predicate_names) != len(set(predicate_names))
+        or sorted(predicate_names) != sorted(all_placeholders)
+    ):
+        raise _SqlScopeRejected("SQL placeholders must occur once in executable WHERE predicates")
+    return (
+        {column: tuple(sorted(names)) for column, names in bindings.items()},
+        tuple(sorted(predicate_names)),
     )
-    for column, name in re.findall(patterns[0], sql):
-        found.setdefault(column, []).append(name)
-    for column, body in re.findall(patterns[1], sql):
-        found.setdefault(column, []).extend(re.findall(r":(filter_[a-z0-9_]+)\b", body))
-    for column, start, end in re.findall(patterns[2], sql):
-        found.setdefault(column, []).extend((start, end))
-    return {column: tuple(sorted(names)) for column, names in found.items()}
+
+
+def _and_predicates(node: exp.Expression) -> tuple[exp.Expression, ...]:
+    if type(node) is exp.Paren:
+        return _and_predicates(node.this)
+    if type(node) is exp.And:
+        return (*_and_predicates(node.this), *_and_predicates(node.expression))
+    if isinstance(node, exp.Or) or isinstance(node, exp.Not):
+        raise _SqlScopeRejected("SQL predicate scope cannot contain OR or NOT")
+    return (node,)
+
+
+def _executable_predicate(predicate: exp.Expression) -> tuple[str, tuple[str, ...]]:
+    if type(predicate) is exp.EQ:
+        column = _qualified_column(predicate.this)
+        names = (_placeholder_name(predicate.expression),)
+    elif type(predicate) is exp.In:
+        column = _qualified_column(predicate.this)
+        expressions = tuple(predicate.expressions)
+        if not expressions or predicate.args.get("query") is not None:
+            raise _SqlScopeRejected("SQL IN scope requires a nonempty placeholder list")
+        names = tuple(_placeholder_name(item) for item in expressions)
+    elif type(predicate) is exp.Between:
+        column = _qualified_column(predicate.this)
+        names = (
+            _placeholder_name(predicate.args.get("low")),
+            _placeholder_name(predicate.args.get("high")),
+        )
+    else:
+        raise _SqlScopeRejected("SQL WHERE contains an unsupported predicate")
+    return column, names
+
+
+def _qualified_column(value: exp.Expression | None) -> str:
+    if (
+        type(value) is not exp.Column
+        or not value.table
+        or value.args.get("db") is not None
+        or value.args.get("catalog") is not None
+    ):
+        raise _SqlScopeRejected("SQL scope predicates require qualified alias columns")
+    return f"{value.table.casefold()}.{value.name.casefold()}"
+
+
+def _placeholder_name(value: exp.Expression | None) -> str:
+    if type(value) is not exp.Placeholder or not value.name:
+        raise _SqlScopeRejected("SQL scope predicates accept only bound placeholders")
+    return value.name.casefold()
 
 
 def _sequential_value_placeholders(names: tuple[str, ...]) -> bool:
@@ -729,38 +842,61 @@ def _content_supports(fact_type: str, content: str) -> bool:
     return any(signal in re.sub(r"\s+", " ", content.casefold()) for signal in _CONTENT_SIGNALS.get(fact_type, ()))
 
 
-def _independent_source_count(evidence: Sequence[Evidence], policy: SufficiencyPolicy) -> int:
-    sql_count = len({item.source_id for item in evidence if item.locator.branch == "sql"})
+def _independent_source_proofs(
+    evidence: Sequence[Evidence], policy: SufficiencyPolicy
+) -> tuple[IndependentSourceProof, ...]:
+    sql_candidates = {
+        (("sql_source_id", item.source_id),): item.evidence_id
+        for item in sorted(evidence, key=lambda item: item.evidence_id, reverse=True)
+        if item.locator.branch == "sql"
+    }
     dimensions = policy.independence_dimensions
-    candidates: list[dict[str, str]] = []
+    rag_candidates: dict[tuple[tuple[str, str], ...], str] = {}
     for item in evidence:
         if item.locator.branch != "rag" or item.retrieval_provenance is None:
             continue
         publisher = _authority_publisher(
             item, policy.authority_rules, set(policy.accepted_authority_directness)
         ) or _source_origin(item.locator.source_identity)
-        candidates.append({
+        values = {
             "publisher_identity": publisher,
             "content_sha256": item.locator.content_hash,
             "dedupe_cluster_id": item.retrieval_provenance.dedupe_cluster_id,
-        })
-    ordered = sorted({tuple((dimension, item[dimension]) for dimension in dimensions) for item in candidates})
+        }
+        key = tuple((dimension, values[dimension]) for dimension in dimensions)
+        current = rag_candidates.get(key)
+        if current is None or item.evidence_id < current:
+            rag_candidates[key] = item.evidence_id
+    ordered = tuple(sorted(rag_candidates.items()))
 
-    def maximum(index: int, used: dict[str, set[str]]) -> int:
+    def maximum(
+        index: int, used: dict[str, set[str]]
+    ) -> tuple[tuple[tuple[tuple[str, str], ...], str], ...]:
         if index == len(ordered):
-            return 0
+            return ()
         best = maximum(index + 1, used)
-        candidate = dict(ordered[index])
+        key, evidence_id = ordered[index]
+        candidate = dict(key)
         if all(candidate[dimension] not in used[dimension] for dimension in dimensions):
             for dimension in dimensions:
                 used[dimension].add(candidate[dimension])
-            best = max(best, 1 + maximum(index + 1, used))
+            selected = ((key, evidence_id), *maximum(index + 1, used))
             for dimension in dimensions:
                 used[dimension].remove(candidate[dimension])
+            if len(selected) > len(best) or len(selected) == len(best) and selected < best:
+                best = selected
         return best
 
     used = {dimension: set() for dimension in dimensions}
-    return sql_count + maximum(0, used)
+    selected = (*sorted(sql_candidates.items()), *maximum(0, used))
+    proofs = (
+        IndependentSourceProof(
+            evidence_id=evidence_id,
+            group_key=sha256(json.dumps(key, separators=(",", ":")).encode()).hexdigest(),
+        )
+        for key, evidence_id in selected
+    )
+    return tuple(sorted(proofs, key=lambda item: (item.group_key, item.evidence_id)))
 
 
 def _source_origin(value: str) -> str:
