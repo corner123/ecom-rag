@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 from pathlib import Path
 from threading import Event, Lock
@@ -422,6 +422,75 @@ def test_graph_does_not_conflict_for_disjoint_instants_on_same_date(
         reason["code"] == "contradictory"
         for reason in result["validation"]["reasons"]
     )
+
+
+def test_graph_persists_cross_timezone_conflict_as_utc_instants(
+    tmp_path: Path,
+) -> None:
+    active = _rag(
+        suffix="cross-zone-active",
+        content="Acme status: active and operational.",
+        valid_from=datetime(
+            2026, 9, 5, tzinfo=timezone(timedelta(hours=14))
+        ),
+    )
+    inactive = _rag(
+        suffix="cross-zone-inactive",
+        source_type="industry_news",
+        content="Acme status: inactive; operations permanently closed.",
+        valid_to=datetime(2026, 9, 4, 11, tzinfo=timezone.utc),
+    )
+    graph = build_trade_graph(
+        _deps(tmp_path, rag=StaticEvidenceBranch((active, inactive)))
+    )
+
+    result = _invoke(graph, "Acme 官网最近是否扩产")
+
+    assert result["refusal_reason"] == "evidence_conflict"
+    assert len(result["conflicts"]) == 1
+    assert result["conflicts"][0]["valid_from"] == "2026-09-04T10:00:00Z"
+    assert result["conflicts"][0]["valid_to"] == "2026-09-04T11:00:00Z"
+
+
+def test_graph_discovers_overlapping_opposing_pair_despite_disjoint_peer(
+    tmp_path: Path,
+) -> None:
+    active = _rag(
+        suffix="morning-active",
+        content="Acme status: active and operational.",
+        valid_from=datetime(2026, 9, 4, tzinfo=timezone.utc),
+        valid_to=datetime(2026, 9, 4, 12, tzinfo=timezone.utc),
+    )
+    inactive = _rag(
+        suffix="morning-inactive",
+        source_type="industry_news",
+        content="Acme status: inactive; operations permanently closed.",
+        valid_from=datetime(2026, 9, 4, 1, tzinfo=timezone.utc),
+        valid_to=datetime(2026, 9, 4, 10, tzinfo=timezone.utc),
+    )
+    late_active = _rag(
+        suffix="late-active",
+        source_type="regulator",
+        content="Acme status: active and operational.",
+        valid_from=datetime(2026, 9, 4, 23, tzinfo=timezone.utc),
+    )
+    graph = build_trade_graph(
+        _deps(
+            tmp_path,
+            rag=StaticEvidenceBranch((active, inactive, late_active)),
+        )
+    )
+
+    result = _invoke(graph, "Acme 官网最近是否扩产")
+
+    assert result["refusal_reason"] == "evidence_conflict"
+    assert len(result["conflicts"]) == 1
+    assert set(result["conflicts"][0]["evidence_ids"]) == {
+        active.evidence_id,
+        inactive.evidence_id,
+    }
+    assert result["conflicts"][0]["valid_from"] == "2026-09-04T01:00:00Z"
+    assert result["conflicts"][0]["valid_to"] == "2026-09-04T10:00:00Z"
 
 
 def test_branch_evidence_candidate_limit_fails_closed(tmp_path: Path) -> None:

@@ -831,72 +831,60 @@ def entity_dedup_conflict_node(deps: NodeDependencies):
                         key=lambda item: item.evidence_id,
                     )
                 )
-                independent = {item.source_id for item in members}
-                polarities = {polarity_by_id[item.evidence_id] for item in members}
-                polarities.discard(None)
-                if len(independent) < 2 or polarities != {"active", "inactive"}:
-                    continue
-                starts = tuple(
-                    (_validity_boundary(value, end=False), value)
-                    for item in members
-                    if (value := item.valid_from) is not None
-                )
-                ends = tuple(
-                    (_validity_boundary(value, end=True), value)
-                    for item in members
-                    if (value := item.valid_to) is not None
-                )
-                overlap_start_boundary, overlap_start = (
-                    max(starts, key=lambda item: item[0])
-                    if starts else (None, None)
-                )
-                overlap_end_boundary, overlap_end = (
-                    min(ends, key=lambda item: item[0])
-                    if ends else (None, None)
-                )
-                if (
-                    overlap_start_boundary is not None
-                    and overlap_end_boundary is not None
-                    and overlap_start_boundary > overlap_end_boundary
-                ):
-                    continue
-                identity = json.dumps(
-                    {
-                        "scope": [
-                            *[str(value) for value in key],
-                            str(overlap_start),
-                            str(overlap_end),
-                        ],
-                        "evidence_ids": [item.evidence_id for item in members],
-                    },
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                )
-                conflict_id = "conflict_" + sha256(identity.encode("utf-8")).hexdigest()
-                for item in members:
-                    annotated[item.evidence_id] = item.model_copy(
-                        update={"conflict_group_id": conflict_id}
+                for (
+                    conflict_members,
+                    overlap_start,
+                    overlap_end,
+                ) in _status_conflict_groups(members, polarity_by_id):
+                    identity = json.dumps(
+                        {
+                            "scope": [
+                                *[str(value) for value in key],
+                                str(overlap_start),
+                                str(overlap_end),
+                            ],
+                            "evidence_ids": [
+                                item.evidence_id for item in conflict_members
+                            ],
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
                     )
-                conflicts.append(
-                    Conflict(
-                        conflict_id=conflict_id,
-                        entity_id=members[0].entity_id,
-                        fact_type=members[0].fact_type,
-                        evidence_ids=tuple(item.evidence_id for item in members),
-                        status="unresolved",
-                        valid_from=overlap_start,
-                        valid_to=overlap_end,
-                        unit=members[0].units[0] if members[0].units else None,
-                        currency=(
-                            members[0].currencies[0]
-                            if members[0].currencies
-                            else None
-                        ),
-                        aggregation_grain=members[0].aggregation_grain,
-                        explanation="independent sources report incompatible entity status",
+                    conflict_id = "conflict_" + sha256(
+                        identity.encode("utf-8")
+                    ).hexdigest()
+                    for item in conflict_members:
+                        annotated[item.evidence_id] = item.model_copy(
+                            update={"conflict_group_id": conflict_id}
+                        )
+                    conflicts.append(
+                        Conflict(
+                            conflict_id=conflict_id,
+                            entity_id=conflict_members[0].entity_id,
+                            fact_type=conflict_members[0].fact_type,
+                            evidence_ids=tuple(
+                                item.evidence_id for item in conflict_members
+                            ),
+                            status="unresolved",
+                            valid_from=overlap_start,
+                            valid_to=overlap_end,
+                            unit=(
+                                conflict_members[0].units[0]
+                                if conflict_members[0].units
+                                else None
+                            ),
+                            currency=(
+                                conflict_members[0].currencies[0]
+                                if conflict_members[0].currencies
+                                else None
+                            ),
+                            aggregation_grain=(
+                                conflict_members[0].aggregation_grain
+                            ),
+                            explanation="independent sources report incompatible entity status",
+                        )
                     )
-                )
             refs = deps.evidence_repository.put_many(
                 tuple(annotated[key] for key in sorted(annotated))
             )
@@ -975,6 +963,93 @@ def _validity_boundary(value: date | datetime, *, end: bool) -> datetime:
     if type(value) is date:
         return datetime.combine(value, time.max if end else time.min, timezone.utc)
     raise TypeError("validity boundary must be a date or datetime")
+
+
+def _conflict_interval(
+    members: Sequence[Evidence],
+) -> tuple[date | datetime | None, date | datetime | None] | None:
+    starts = tuple(
+        (_validity_boundary(value, end=False), value)
+        for item in members
+        if (value := item.valid_from) is not None
+    )
+    ends = tuple(
+        (_validity_boundary(value, end=True), value)
+        for item in members
+        if (value := item.valid_to) is not None
+    )
+    start_boundary = max((item[0] for item in starts), default=None)
+    end_boundary = min((item[0] for item in ends), default=None)
+    if (
+        start_boundary is not None
+        and end_boundary is not None
+        and start_boundary > end_boundary
+    ):
+        return None
+    start_values = tuple(
+        value for boundary, value in starts if boundary == start_boundary
+    )
+    end_values = tuple(
+        value for boundary, value in ends if boundary == end_boundary
+    )
+    overlap_start: date | datetime | None = (
+        start_boundary
+        if any(isinstance(value, datetime) for value in start_values)
+        else start_values[0] if start_values else None
+    )
+    overlap_end: date | datetime | None = (
+        end_boundary
+        if any(isinstance(value, datetime) for value in end_values)
+        else end_values[0] if end_values else None
+    )
+    return overlap_start, overlap_end
+
+
+def _status_conflict_groups(
+    members: Sequence[Evidence],
+    polarity_by_id: Mapping[str, str | None],
+) -> tuple[
+    tuple[tuple[Evidence, ...], date | datetime | None, date | datetime | None],
+    ...,
+]:
+    remaining = list(members)
+    groups: list[
+        tuple[tuple[Evidence, ...], date | datetime | None, date | datetime | None]
+    ] = []
+    while remaining:
+        seed: tuple[Evidence, Evidence] | None = None
+        interval: tuple[date | datetime | None, date | datetime | None] | None = None
+        for index, left in enumerate(remaining):
+            for right in remaining[index + 1:]:
+                if (
+                    left.source_id == right.source_id
+                    or polarity_by_id[left.evidence_id]
+                    == polarity_by_id[right.evidence_id]
+                ):
+                    continue
+                if (candidate_interval := _conflict_interval((left, right))) is not None:
+                    seed = (left, right)
+                    interval = candidate_interval
+                    break
+            if seed is not None:
+                break
+        if seed is None or interval is None:
+            break
+        group = list(seed)
+        seed_ids = {item.evidence_id for item in seed}
+        for candidate in remaining:
+            if candidate.evidence_id in seed_ids:
+                continue
+            candidate_interval = _conflict_interval((*group, candidate))
+            if candidate_interval is not None:
+                group.append(candidate)
+                interval = candidate_interval
+        group_ids = {item.evidence_id for item in group}
+        remaining = [
+            item for item in remaining if item.evidence_id not in group_ids
+        ]
+        groups.append((tuple(group), *interval))
+    return tuple(groups)
 
 
 def _evidence_valid_on(evidence: Evidence, as_of: date) -> bool:
