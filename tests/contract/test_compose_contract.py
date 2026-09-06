@@ -17,7 +17,7 @@ def test_compose_has_exact_pinned_foundation_services_and_loopback_ports() -> No
     assert services["milvus"]["image"] == "milvusdb/milvus:v2.6.22"
     assert services["etcd"]["image"] == "quay.io/coreos/etcd:v3.5.25"
     assert services["minio"]["image"] == "minio/minio:RELEASE.2024-12-18T13-15-44Z"
-    assert services["redis"]["image"] == "redis:7.4-alpine"
+    assert services["redis"]["image"] == "redis/redis-stack-server:7.4.0-v8"
     assert services["mysql"]["build"]["args"]["MYSQL_BASE_IMAGE"] == "mysql:8.4"
     for service in services.values():
         for port in service.get("ports", []):

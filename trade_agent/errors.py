@@ -28,6 +28,7 @@ GraphErrorCode = Literal[
     "generation_token_limit_exceeded",
     "guard_timeout",
     "evidence_repository_error",
+    "checkpoint_unavailable",
     "invalid_contract",
     "step_limit_exceeded",
     "retry_limit_exceeded",

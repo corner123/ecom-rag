@@ -1,7 +1,7 @@
 """Compilation of the bounded SQL and RAG workflow with real LangGraph."""
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 import json
@@ -51,7 +51,9 @@ class GraphDependencies:
 
 
 def build_trade_graph(
-    deps: GraphDependencies, checkpointer=None
+    deps: GraphDependencies,
+    checkpointer=None,
+    interrupt_before: Sequence[str] | None = None,
 ) -> CompiledStateGraph:
     """Build and compile the production graph; no local graph fake is used."""
 
@@ -110,7 +112,10 @@ def build_trade_graph(
     graph.add_conditional_edges("answer_draft", _after_regular_node, {"next": "claim_guard", "finalizer": "finalizer"})
     graph.add_conditional_edges("claim_guard", _after_regular_node, {"next": "finalizer", "finalizer": "finalizer"})
     graph.add_edge("finalizer", END)
-    return graph.compile(checkpointer=checkpointer)
+    return graph.compile(
+        checkpointer=checkpointer,
+        interrupt_before=list(interrupt_before or ()),
+    )
 
 
 def _after_policy(state: TradeIntelState) -> str:

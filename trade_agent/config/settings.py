@@ -38,6 +38,7 @@ class RedisSettings(BaseModel):
     host: str = "redis"
     port: int = Field(default=6379, ge=1, le=65535)
     database: int = Field(default=0, ge=0, le=15)
+    checkpoint_ttl_seconds: int = Field(default=3_600, ge=1, le=86_400)
 
 class ModelSettings(BaseModel):
     embedding_model: str = "BAAI/bge-m3"
