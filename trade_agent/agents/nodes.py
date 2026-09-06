@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from hashlib import sha256
 from inspect import Parameter, signature
 import json
@@ -12,13 +12,21 @@ from pathlib import Path
 from queue import Empty, Queue
 import re
 from threading import BoundedSemaphore, Thread
+from time import monotonic
 from typing import Any, Protocol, runtime_checkable
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt
 
 from trade_agent.agents.intent import QueryIntent
 from trade_agent.agents.intent import to_retrieval_query_intent
-from trade_agent.agents.state import DraftRef, EvidenceRef, RoutePlan, TradeIntelState
+from trade_agent.agents.state import (
+    DraftRef,
+    EvidenceRef,
+    GuardProjection,
+    RoutePlan,
+    TradeIntelState,
+)
 from trade_agent.data.manifest import BuildManifest
 from trade_agent.db.registry import RegistrySnapshot
 from trade_agent.db.sql_executor import (
@@ -82,6 +90,7 @@ class EvidenceBranch(Protocol):
         timeout_seconds: float,
         identity_hmac_key: bytes | None = None,
         entity_bindings: Mapping[str, int] | None = None,
+        candidate_limit: int = 100,
     ) -> tuple[Sequence[Evidence], Sequence[str]]: ...
 
 
@@ -115,7 +124,10 @@ class ContractSqlBranch:
         timeout_seconds: float,
         identity_hmac_key: bytes | None = None,
         entity_bindings: Mapping[str, int] | None = None,
+        candidate_limit: int = 100,
     ) -> tuple[Sequence[Evidence], Sequence[str]]:
+        if type(candidate_limit) is not int or candidate_limit < 1:
+            raise ValueError("candidate_limit must be a positive integer")
         plan = SqlPlanner(entity_bindings=entity_bindings).plan(intent, self.registry)
         rendered = SqlRenderer(scope=self.scope).render(plan)
         validated = SqlValidator(scope=self.scope).validate(rendered, self.registry)
@@ -132,7 +144,10 @@ class ContractSqlBranch:
             close = getattr(connection, "close", None)
             if callable(close):
                 close()
-        return tuple(build_sql_evidence(result)), ()
+        evidence = tuple(build_sql_evidence(result))
+        if len(evidence) > candidate_limit:
+            raise ValueError("SQL Evidence exceeds candidate limit")
+        return evidence, ()
 
 
 @dataclass(frozen=True)
@@ -142,6 +157,10 @@ class ContractRetrievalBranch:
     service: RetrievalService
     published_manifest: BuildManifest
     top_k: int = 10
+
+    def __post_init__(self) -> None:
+        if type(self.top_k) is not int or not 1 <= self.top_k <= 512:
+            raise ValueError("top_k must be an integer from 1 through 512")
 
     @property
     def supports_finite_timeout(self) -> bool:
@@ -154,11 +173,14 @@ class ContractRetrievalBranch:
         timeout_seconds: float,
         identity_hmac_key: bytes | None = None,
         entity_bindings: Mapping[str, int] | None = None,
+        candidate_limit: int = 100,
     ) -> tuple[Sequence[Evidence], Sequence[str]]:
         del identity_hmac_key, entity_bindings
+        if type(candidate_limit) is not int or candidate_limit < 1:
+            raise ValueError("candidate_limit must be a positive integer")
         outcome = self.service.search(
             to_retrieval_query_intent(intent),
-            top_k=self.top_k,
+            top_k=min(self.top_k, candidate_limit),
             transport_timeout_seconds=timeout_seconds,
         )
         evidence = normalize_retrieval(
@@ -198,7 +220,9 @@ class FileEvidenceRepository:
 
     @staticmethod
     def _atomic_replace(target: Path, payload: bytes) -> None:
-        temporary = target.parent / f".{target.name}.{os.getpid()}.tmp"
+        temporary = target.parent / (
+            f".{target.name}.{os.getpid()}.{uuid4().hex}.tmp"
+        )
         try:
             with temporary.open("xb") as stream:
                 stream.write(payload)
@@ -334,7 +358,7 @@ class NodeDependencies:
     answer_generator: AnswerGenerator
     claim_guard: ClaimHallucinationGuard
     policy: Callable[[str], bool]
-    query_rewriter: Callable[[str, int], str] | None
+    query_rewriter: Callable[..., str] | None
     branch_call_runner: "BoundedCallRunner"
     external_call_runner: "BoundedCallRunner"
 
@@ -398,6 +422,27 @@ class BoundedCallRunner:
         if ok:
             return value
         raise value
+
+
+def _accepts_keyword(function: Callable[..., object], keyword: str) -> bool:
+    try:
+        parameters = signature(function).parameters
+    except (TypeError, ValueError):
+        return False
+    parameter = parameters.get(keyword)
+    if parameter is not None and parameter.kind in {
+        Parameter.KEYWORD_ONLY,
+        Parameter.POSITIONAL_OR_KEYWORD,
+    }:
+        return True
+    return any(item.kind is Parameter.VAR_KEYWORD for item in parameters.values())
+
+
+def _remaining_seconds(deadline: float) -> float:
+    remaining = deadline - monotonic()
+    if remaining <= 0:
+        raise TimeoutError("node deadline exceeded")
+    return remaining
 
 
 def _intent(state: TradeIntelState) -> QueryIntent:
@@ -592,6 +637,7 @@ def _branch_node(deps: NodeDependencies, branch_name: str):
                     timeout_seconds=deps.budgets.node_timeout_seconds,
                     identity_hmac_key=deps.sql_identity_hmac_key if branch_name == "sql" else None,
                     entity_bindings=deps.entity_bindings if branch_name == "sql" else None,
+                    candidate_limit=deps.budgets.max_evidence_candidates,
                 ),
                 deps.budgets.node_timeout_seconds,
             )
@@ -758,8 +804,6 @@ def entity_dedup_conflict_node(deps: NodeDependencies):
                 key = (
                     item.entity_id,
                     item.fact_type,
-                    item.valid_from,
-                    item.valid_to,
                     item.currencies,
                     item.units,
                     item.aggregation_grain,
@@ -769,15 +813,47 @@ def entity_dedup_conflict_node(deps: NodeDependencies):
             conflicts: list[Conflict] = []
             annotated = {item.evidence_id: item for item in evidence}
             for key, candidates in sorted(groups.items(), key=lambda item: repr(item[0])):
-                independent = {item.source_id for item in candidates}
-                polarities = {_status_polarity(item.content) for item in candidates}
+                current = tuple(
+                    item for item in candidates if _evidence_valid_on(item, deps.as_of)
+                )
+                polarity_by_id = {
+                    item.evidence_id: _status_polarity(item.content)
+                    for item in current
+                }
+                members = tuple(
+                    sorted(
+                        (
+                            item
+                            for item in current
+                            if polarity_by_id[item.evidence_id] is not None
+                        ),
+                        key=lambda item: item.evidence_id,
+                    )
+                )
+                independent = {item.source_id for item in members}
+                polarities = {polarity_by_id[item.evidence_id] for item in members}
                 polarities.discard(None)
                 if len(independent) < 2 or polarities != {"active", "inactive"}:
                     continue
-                members = tuple(sorted(candidates, key=lambda item: item.evidence_id))
+                starts = tuple(
+                    value
+                    for item in members
+                    if (value := _date_value(item.valid_from)) is not None
+                )
+                ends = tuple(
+                    value
+                    for item in members
+                    if (value := _date_value(item.valid_to)) is not None
+                )
+                overlap_start = max(starts) if starts else None
+                overlap_end = min(ends) if ends else None
                 identity = json.dumps(
                     {
-                        "scope": [str(value) for value in key],
+                        "scope": [
+                            *[str(value) for value in key],
+                            str(overlap_start),
+                            str(overlap_end),
+                        ],
                         "evidence_ids": [item.evidence_id for item in members],
                     },
                     ensure_ascii=False,
@@ -796,8 +872,8 @@ def entity_dedup_conflict_node(deps: NodeDependencies):
                         fact_type=members[0].fact_type,
                         evidence_ids=tuple(item.evidence_id for item in members),
                         status="unresolved",
-                        valid_from=members[0].valid_from,
-                        valid_to=members[0].valid_to,
+                        valid_from=overlap_start,
+                        valid_to=overlap_end,
                         unit=members[0].units[0] if members[0].units else None,
                         currency=(
                             members[0].currencies[0]
@@ -838,6 +914,15 @@ def entity_dedup_conflict_node(deps: NodeDependencies):
                 "errors": [_error("invalid_contract", "entity_dedup_conflict", retryable=False, detail="conflict discovery contract failed")],
                 "node_status": {"entity_dedup_conflict": "failed"},
             }
+        except Exception as error:
+            return {
+                "step_count": _next_step(state),
+                "terminal": True,
+                "answer": None,
+                "refusal_reason": "workflow_failed",
+                "errors": [_error("internal_error", "entity_dedup_conflict", retryable=False, detail=type(error).__name__)],
+                "node_status": {"entity_dedup_conflict": "failed"},
+            }
 
     return node
 
@@ -867,6 +952,16 @@ def _status_polarity(content: str) -> str | None:
     if active == inactive:
         return None
     return "active" if active else "inactive"
+
+
+def _date_value(value: date | datetime | None) -> date | None:
+    return value.date() if isinstance(value, datetime) else value
+
+
+def _evidence_valid_on(evidence: Evidence, as_of: date) -> bool:
+    start = _date_value(evidence.valid_from)
+    end = _date_value(evidence.valid_to)
+    return (start is None or start <= as_of) and (end is None or as_of <= end)
 
 
 def evidence_validator_node(deps: NodeDependencies):
@@ -945,6 +1040,7 @@ def query_rewrite_node(deps: NodeDependencies):
                 "errors": [_error("retry_limit_exceeded", "query_rewrite", retryable=False, detail="rewrite/retry budget exhausted")],
                 "node_status": {"query_rewrite": "failed"},
             }
+        deadline = monotonic() + deps.budgets.node_timeout_seconds
         if deps.query_rewriter is None:
             rewritten = f"{state['question']} [rewrite-{count + 1}]"
             llm_calls = state.get("llm_calls", 0)
@@ -959,11 +1055,24 @@ def query_rewrite_node(deps: NodeDependencies):
                     "errors": [_error("llm_limit_exceeded", "query_rewrite", retryable=False, detail="LLM call budget exhausted")],
                     "node_status": {"query_rewrite": "failed"},
                 }
+            if not _accepts_keyword(deps.query_rewriter, "max_output_tokens"):
+                return {
+                    "step_count": _next_step(state),
+                    "terminal": True,
+                    "answer": None,
+                    "refusal_reason": "rewrite_token_budget_unsupported",
+                    "errors": [_error("rewrite_token_budget_unsupported", "query_rewrite", retryable=False, detail="query rewriter cannot enforce the graph token budget")],
+                    "node_status": {"query_rewrite": "failed"},
+                }
             llm_calls += 1
             try:
                 rewritten = deps.external_call_runner.call(
-                    lambda: deps.query_rewriter(state["current_question"], count + 1),
-                    deps.budgets.node_timeout_seconds,
+                    lambda: deps.query_rewriter(
+                        state["current_question"],
+                        count + 1,
+                        max_output_tokens=deps.budgets.max_generation_tokens,
+                    ),
+                    _remaining_seconds(deadline),
                 )
             except TimeoutError:
                 return {
@@ -1003,7 +1112,7 @@ def query_rewrite_node(deps: NodeDependencies):
             }
         try:
             allowed = deps.external_call_runner.call(
-                lambda: deps.policy(rewritten), deps.budgets.node_timeout_seconds
+                lambda: deps.policy(rewritten), _remaining_seconds(deadline)
             )
             if allowed is not True:
                 return {
@@ -1019,7 +1128,7 @@ def query_rewrite_node(deps: NodeDependencies):
             filters = _from_json_state(RetrievalFilter, raw_filters) if raw_filters else None
             rewritten_intent = deps.external_call_runner.call(
                 lambda: deps.intent_parser.parse(rewritten, filters),
-                deps.budgets.node_timeout_seconds,
+                _remaining_seconds(deadline),
             )
             if type(rewritten_intent) is not QueryIntent:
                 raise TypeError("intent parser returned a foreign contract")
@@ -1204,7 +1313,13 @@ def claim_guard_node(deps: NodeDependencies):
             )
             if type(outcome) is not GuardOutcome:
                 raise TypeError("claim guard returned a foreign contract")
-            return {"step_count": _next_step(state), "guard": outcome.model_dump(mode="json"), "node_status": {"claim_guard": "completed"}}
+            projection = GuardProjection(
+                accepted=outcome.accepted,
+                claims=outcome.claims,
+                refusal_reason=outcome.refusal_reason,
+                error_codes=outcome.error_codes,
+            )
+            return {"step_count": _next_step(state), "guard": projection.model_dump(mode="json"), "node_status": {"claim_guard": "completed"}}
         except TimeoutError:
             return {
                 "step_count": _next_step(state), "terminal": True, "answer": None,
@@ -1254,7 +1369,7 @@ def finalizer_node(deps: NodeDependencies):
                 "claims": [],
                 "node_status": {"finalizer": "completed"},
             }
-        outcome = _from_json_state(GuardOutcome, raw)
+        outcome = _from_json_state(GuardProjection, raw)
         refusal = outcome.refusal_reason
         validation = _from_json_state(ValidationOutcome, state["validation"])
         if validation.decision == "rewrite_once" and state.get("rewrite_count", 0) >= deps.budgets.max_rewrites:
@@ -1291,7 +1406,7 @@ def default_node_dependencies(
     answer_generator: AnswerGenerator | None = None,
     claim_guard: ClaimHallucinationGuard | None = None,
     policy: Callable[[str], bool] | None = None,
-    query_rewriter: Callable[[str, int], str] | None = None,
+    query_rewriter: Callable[..., str] | None = None,
 ) -> NodeDependencies:
     return NodeDependencies(
         intent_parser=intent_parser,

@@ -13,6 +13,7 @@ GraphErrorCode = Literal[
     "intent_timeout",
     "rewrite_timeout",
     "rewrite_scope_changed",
+    "rewrite_token_budget_unsupported",
     "missing_entity_binding",
     "missing_sql_hmac_key",
     "sql_connection_timeout_unsupported",

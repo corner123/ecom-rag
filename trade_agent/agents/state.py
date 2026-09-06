@@ -6,6 +6,30 @@ from typing import Annotated, Literal, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, model_validator
 
+from trade_agent.evidence.models import Claim
+
+
+NodeName = Literal[
+    "policy_gate",
+    "router",
+    "sql_node",
+    "rag_node",
+    "normalize",
+    "entity_dedup_conflict",
+    "evidence_validator",
+    "query_rewrite",
+    "answer_draft",
+    "claim_guard",
+    "finalizer",
+]
+NodeExecutionStatus = Literal["completed", "failed", "retryable_failed", "skipped"]
+_NODE_NAMES = {
+    "policy_gate", "router", "sql_node", "rag_node", "normalize",
+    "entity_dedup_conflict", "evidence_validator", "query_rewrite",
+    "answer_draft", "claim_guard", "finalizer",
+}
+_NODE_EXECUTION_STATUSES = {"completed", "failed", "retryable_failed", "skipped"}
+
 
 class EvidenceRef(BaseModel):
     """Content-addressed pointer to an Evidence payload outside the checkpoint."""
@@ -30,6 +54,30 @@ class DraftRef(BaseModel):
     def content_address_matches(self) -> "DraftRef":
         if self.draft_id != f"draft_{self.payload_sha256}":
             raise ValueError("draft identity must match its payload hash")
+        return self
+
+
+class GuardProjection(BaseModel):
+    """Checkpoint-safe result of guarding; untrusted answer text is omitted."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    accepted: StrictBool
+    claims: tuple[Claim, ...]
+    refusal_reason: StrictStr | None
+    error_codes: tuple[StrictStr, ...] = ()
+
+    @model_validator(mode="after")
+    def coherent(self) -> "GuardProjection":
+        if self.accepted:
+            if not self.claims or self.refusal_reason is not None:
+                raise ValueError("accepted guard projection requires only retained claims")
+        elif self.claims or self.refusal_reason is None or not self.refusal_reason.strip():
+            raise ValueError("refused guard projection requires only a refusal reason")
+        if self.error_codes != tuple(sorted(set(self.error_codes))):
+            raise ValueError("guard error codes must be sorted and unique")
+        if any(not value.strip() for value in self.error_codes):
+            raise ValueError("guard error codes must not be blank")
         return self
 
 
@@ -63,8 +111,16 @@ class RoutePlan(BaseModel):
         return self
 
 
-def merge_status(left: dict[str, str], right: dict[str, str]) -> dict[str, str]:
-    return {**left, **right}
+def merge_status(
+    left: dict[NodeName, NodeExecutionStatus],
+    right: dict[NodeName, NodeExecutionStatus],
+) -> dict[NodeName, NodeExecutionStatus]:
+    merged = {**left, **right}
+    if any(name not in _NODE_NAMES for name in merged):
+        raise ValueError("node status contains an unknown graph node")
+    if any(status not in _NODE_EXECUTION_STATUSES for status in merged.values()):
+        raise ValueError("node status contains an unknown execution status")
+    return merged
 
 
 def merge_step(left: int, right: int) -> int:
@@ -104,5 +160,5 @@ class TradeIntelState(TypedDict, total=False):
     llm_calls: int
     step_count: Annotated[int, merge_step]
     errors: Annotated[list[dict[str, object]], add]
-    node_status: Annotated[dict[str, str], merge_status]
+    node_status: Annotated[dict[NodeName, NodeExecutionStatus], merge_status]
     terminal: bool

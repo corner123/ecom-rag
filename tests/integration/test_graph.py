@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 import json
 from pathlib import Path
-from threading import Event
-from time import monotonic
+from threading import Event, Lock
+from time import monotonic, sleep
 
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
@@ -43,6 +44,7 @@ class StaticEvidenceBranch:
         self.error = error
         self.calls: list[tuple[float, bytes | None]] = []
         self.intents: list[QueryIntent] = []
+        self.candidate_limits: list[int] = []
 
     def run(
         self,
@@ -51,9 +53,11 @@ class StaticEvidenceBranch:
         timeout_seconds: float,
         identity_hmac_key: bytes | None = None,
         entity_bindings=None,
+        candidate_limit: int = 100,
     ):
         del entity_bindings
         self.intents.append(intent)
+        self.candidate_limits.append(candidate_limit)
         self.calls.append((timeout_seconds, identity_hmac_key))
         if self.error is not None:
             raise self.error
@@ -74,8 +78,9 @@ class HangingRetrievalBranch(StaticEvidenceBranch):
         timeout_seconds: float,
         identity_hmac_key: bytes | None = None,
         entity_bindings=None,
+        candidate_limit: int = 100,
     ):
-        del intent, timeout_seconds, identity_hmac_key, entity_bindings
+        del intent, timeout_seconds, identity_hmac_key, entity_bindings, candidate_limit
         self.call_count += 1
         self.started.set()
         self.release.wait()
@@ -100,6 +105,7 @@ def _deps(
     max_generation_tokens: int = 1_024,
     query_rewriter=None,
     policy=None,
+    evidence_repository=None,
 ) -> GraphDependencies:
     budget_values = {
         "max_steps": max_steps,
@@ -116,7 +122,7 @@ def _deps(
         intent_parser=parser or IntentParser(as_of=AS_OF),
         sql_branch=sql,
         rag_branch=rag,
-        evidence_repository=FileEvidenceRepository(tmp_path / "evidence"),
+        evidence_repository=evidence_repository or FileEvidenceRepository(tmp_path / "evidence"),
         entity_bindings=entity_bindings or {},
         sql_identity_hmac_key=hmac_key,
         budgets=GraphBudgets(**budget_values),
@@ -322,7 +328,7 @@ def test_rewrite_must_preserve_original_trade_scope_and_pass_policy(tmp_path: Pa
             sql=sql,
             rag=rag,
             policy=policy,
-            query_rewriter=lambda _question, _count: "最近半年中国 HS999999 贸易金额",
+            query_rewriter=lambda _question, _count, *, max_output_tokens: "最近半年中国 HS999999 贸易金额",
         )
     )
 
@@ -361,6 +367,34 @@ def test_graph_discovers_independent_unresolved_status_conflict(tmp_path: Path) 
     assert result["answer"] is None
 
 
+def test_graph_discovers_conflict_across_overlapping_current_windows(tmp_path: Path) -> None:
+    active = _rag(
+        suffix="overlap-active",
+        content="Acme status: active and operational.",
+        valid_from=date(2026, 8, 20),
+    )
+    inactive = _rag(
+        suffix="overlap-inactive",
+        source_type="industry_news",
+        content="Acme status: inactive; operations permanently closed.",
+        valid_from=date(2026, 8, 21),
+    )
+    graph = build_trade_graph(
+        _deps(tmp_path, rag=StaticEvidenceBranch((active, inactive)))
+    )
+
+    result = _invoke(graph, "Acme 官网最近是否扩产")
+
+    assert len(result["conflicts"]) == 1
+    assert result["conflicts"][0]["valid_from"] == "2026-08-21"
+    assert result["validation"]["error_code"] == "evidence_conflict"
+    assert any(
+        reason["code"] == "contradictory"
+        for reason in result["validation"]["reasons"]
+    )
+    assert result["answer"] is None
+
+
 def test_branch_evidence_candidate_limit_fails_closed(tmp_path: Path) -> None:
     rag = StaticEvidenceBranch(
         (_rag(suffix="candidate-one"), _rag(suffix="candidate-two"))
@@ -374,6 +408,43 @@ def test_branch_evidence_candidate_limit_fails_closed(tmp_path: Path) -> None:
     assert result["errors"][-1]["code"] == "candidate_limit_exceeded"
     assert result["rag_evidence_refs"] == []
     assert result["answer"] is None
+
+
+def test_graph_passes_candidate_budget_into_branch_before_work(tmp_path: Path) -> None:
+    rag = StaticEvidenceBranch((_rag(suffix="budget-seam"),))
+    graph = build_trade_graph(
+        _deps(tmp_path, rag=rag, max_evidence_candidates=3)
+    )
+
+    _invoke(graph, "官网最近是否扩产")
+
+    assert rag.candidate_limits == [3]
+
+
+def test_contract_retrieval_uses_graph_candidate_budget(tmp_path: Path) -> None:
+    service, manifest, _store = _service(tmp_path)
+    seen: list[int] = []
+    original_search = service.search
+
+    def search(intent, *, top_k, transport_timeout_seconds=None):
+        seen.append(top_k)
+        return original_search(
+            intent,
+            top_k=top_k,
+            transport_timeout_seconds=transport_timeout_seconds,
+        )
+
+    service.search = search
+    branch = ContractRetrievalBranch(service=service, published_manifest=manifest, top_k=50)
+    intent = QueryIntent(
+        question="Verified synthetic trade evidence",
+        kind="external_intelligence",
+        need_external_intel=True,
+    )
+
+    branch.run(intent, timeout_seconds=0.25, candidate_limit=4)
+
+    assert seen == [4]
 
 
 def test_external_generation_must_fit_graph_token_budget(tmp_path: Path) -> None:
@@ -434,6 +505,75 @@ def test_repeated_hanging_policy_calls_exhaust_shared_capacity(tmp_path: Path) -
     assert calls == 1
     assert first["errors"][-1]["code"] == "policy_timeout"
     assert second["errors"][-1]["code"] == "policy_timeout"
+
+
+def test_rewrite_uses_one_deadline_across_rewriter_policy_and_parser(
+    tmp_path: Path, monkeypatch
+) -> None:
+    parser_calls = 0
+    policy_calls = 0
+    base_parser = IntentParser(as_of=AS_OF)
+
+    class SlowParser:
+        def parse(self, question, explicit_filters=None):
+            nonlocal parser_calls
+            parser_calls += 1
+            return base_parser.parse(question, explicit_filters)
+
+    def policy(_question: str) -> bool:
+        nonlocal policy_calls
+        policy_calls += 1
+        return True
+
+    def rewriter(question: str, count: int, *, max_output_tokens: int) -> str:
+        del count
+        assert max_output_tokens == 1_024
+        return question + " retrieval"
+
+    clock = iter((0.0, 0.01, 0.03, 0.051))
+    monkeypatch.setattr("trade_agent.agents.nodes.monotonic", lambda: next(clock))
+
+    graph = build_trade_graph(
+        _deps(
+            tmp_path,
+            rag=StaticEvidenceBranch(error=TimeoutError("retrieval deadline")),
+            parser=SlowParser(),
+            policy=policy,
+            query_rewriter=rewriter,
+            timeout=0.04,
+        )
+    )
+    started = monotonic()
+
+    result = _invoke(graph, "官网最近是否扩产")
+
+    assert monotonic() - started < 0.2
+    assert parser_calls == 1
+    assert policy_calls == 2
+    assert result["errors"][-1]["code"] == "rewrite_timeout"
+
+
+def test_rewriter_without_token_budget_seam_is_rejected_before_call(tmp_path: Path) -> None:
+    calls = 0
+
+    def unsupported_rewriter(question: str, count: int) -> str:
+        nonlocal calls
+        del count
+        calls += 1
+        return question
+
+    graph = build_trade_graph(
+        _deps(
+            tmp_path,
+            rag=StaticEvidenceBranch(error=TimeoutError("retrieval deadline")),
+            query_rewriter=unsupported_rewriter,
+        )
+    )
+
+    result = _invoke(graph, "官网最近是否扩产")
+
+    assert calls == 0
+    assert result["errors"][-1]["code"] == "rewrite_token_budget_unsupported"
 
 
 def test_hanging_retrieval_transport_fails_closed_within_node_budget(tmp_path: Path) -> None:
@@ -519,7 +659,7 @@ def test_contract_retrieval_branch_uses_real_service_and_normalizer(tmp_path: Pa
         need_external_intel=True,
     )
 
-    evidence, degraded = branch.run(intent, timeout_seconds=0.25)
+    evidence, degraded = branch.run(intent, timeout_seconds=0.25, candidate_limit=3)
 
     assert evidence
     assert all(item.locator.branch == "rag" for item in evidence)
@@ -724,6 +864,98 @@ def test_finalizer_rebuilds_public_text_from_guard_retained_claims(tmp_path: Pat
     assert "forged provider text" not in result["answer"]
 
 
+def test_checkpoint_guard_projection_omits_untrusted_raw_answer(tmp_path: Path) -> None:
+    evidence = generation_sql_evidence()
+    checkpointer = InMemorySaver()
+
+    class RawAnswerGuard:
+        def guard(self, draft, evidence, intent, validation):
+            del intent, validation
+            return GuardOutcome(
+                accepted=True,
+                answer=evidence[0].content,
+                claims=draft.claims,
+                refusal_reason=None,
+            )
+
+    graph = build_trade_graph(
+        _deps(
+            tmp_path,
+            sql=StaticEvidenceBranch((evidence,)),
+            claim_guard=RawAnswerGuard(),
+        ),
+        checkpointer=checkpointer,
+    )
+    config = {"configurable": {"thread_id": "guard-projection"}, "recursion_limit": 64}
+
+    result = graph.invoke(
+        {"question": "最近半年美国采购 HS850440 金额最高的 10 家公司"},
+        config,
+    )
+    checkpoint = checkpointer.get_tuple(config)
+
+    assert checkpoint is not None
+    assert evidence.content not in repr(result)
+    assert evidence.content not in repr(checkpoint.checkpoint)
+    assert "answer" not in result["guard"]
+    assert result["answer"] == "\n".join(claim["text"] for claim in result["claims"])
+
+
+def test_conflict_repository_runtime_error_is_public_safe(tmp_path: Path) -> None:
+    class ExplodingRepository(FileEvidenceRepository):
+        def get_many(self, refs):
+            del refs
+            raise RuntimeError("repository secret detail")
+
+    repository = ExplodingRepository(tmp_path / "evidence")
+    graph = build_trade_graph(
+        _deps(
+            tmp_path,
+            rag=StaticEvidenceBranch((_rag(suffix="repo-error"),)),
+            evidence_repository=repository,
+        )
+    )
+
+    result = _invoke(graph, "官网最近是否扩产")
+
+    assert result["terminal"] is True
+    assert result["errors"][-1]["code"] == "internal_error"
+    assert "repository secret detail" not in repr(result)
+
+
+def test_concurrent_draft_publication_is_idempotent(tmp_path: Path, monkeypatch) -> None:
+    repository = FileEvidenceRepository(tmp_path / "evidence")
+    draft = DraftAnswer(answer=None, claims=(), refusal_reason="insufficient")
+    first_replace_entered = Event()
+    release_first_replace = Event()
+    replace_lock = Lock()
+    replace_calls = 0
+    real_replace = __import__("os").replace
+
+    def delayed_replace(source, target):
+        nonlocal replace_calls
+        with replace_lock:
+            replace_calls += 1
+            first = replace_calls == 1
+        if first:
+            first_replace_entered.set()
+            release_first_replace.wait(timeout=1)
+        return real_replace(source, target)
+
+    monkeypatch.setattr("trade_agent.agents.nodes.os.replace", delayed_replace)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(repository.put_draft, draft)
+        assert first_replace_entered.wait(timeout=1)
+        second = pool.submit(repository.put_draft, draft)
+        sleep(0.02)
+        release_first_replace.set()
+        refs = (first.result(timeout=1), second.result(timeout=1))
+
+    assert refs[0] == refs[1]
+    assert repository.get_draft(refs[0]) == draft
+    assert not tuple((tmp_path / "evidence").glob("*.tmp"))
+
+
 def test_provider_answer_generator_obeys_zero_llm_budget(tmp_path: Path) -> None:
     class ProviderGenerator:
         def __init__(self) -> None:
@@ -786,9 +1018,9 @@ def test_query_rewriter_failures_are_counted_and_classified(
 ) -> None:
     calls = 0
 
-    def rewriter(question: str, count: int) -> str:
+    def rewriter(question: str, count: int, *, max_output_tokens: int) -> str:
         nonlocal calls
-        del question, count
+        del question, count, max_output_tokens
         calls += 1
         raise failure
 

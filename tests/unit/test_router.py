@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from trade_agent.agents.intent import IntentParser
 from trade_agent.agents.nodes import GraphBudgets
 from trade_agent.agents.router import TradeRouter
+from trade_agent.agents.state import merge_status
 
 
 @pytest.fixture
@@ -55,3 +56,17 @@ def test_graph_budgets_enforce_single_rewrite_candidate_and_token_bounds(
 ) -> None:
     with pytest.raises(ValidationError):
         GraphBudgets(**overrides)
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        {"unknown_node": "completed"},
+        {"router": "invented_status"},
+    ],
+)
+def test_node_status_projection_rejects_unknown_names_and_values(
+    status: dict[str, str],
+) -> None:
+    with pytest.raises(ValueError):
+        merge_status({}, status)

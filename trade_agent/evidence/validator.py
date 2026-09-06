@@ -521,18 +521,34 @@ def _conflict_scope_matches(evidence: Evidence, conflict: Conflict) -> bool:
         evidence.currencies == expected_currencies
         and evidence.units == expected_units
         and evidence.aggregation_grain == conflict.aggregation_grain
-        and _temporal_scope_key(evidence.valid_from) == _temporal_scope_key(conflict.valid_from)
-        and _temporal_scope_key(evidence.valid_to) == _temporal_scope_key(conflict.valid_to)
+        and _conflict_interval_within_evidence(evidence, conflict)
     )
 
 
-def _temporal_scope_key(value: date | datetime | None) -> tuple[str, str] | None:
-    if isinstance(value, datetime):
-        aware = _aware_instant(value)
-        return None if aware is None else ("instant", aware.isoformat())
-    if isinstance(value, date):
-        return ("date", value.isoformat())
-    return None
+def _conflict_interval_within_evidence(
+    evidence: Evidence, conflict: Conflict
+) -> bool:
+    evidence_start = _utc_date(evidence.valid_from)
+    evidence_end = _utc_date(evidence.valid_to)
+    conflict_start = _utc_date(conflict.valid_from)
+    conflict_end = _utc_date(conflict.valid_to)
+    if conflict_start is None and evidence_start is not None:
+        return False
+    if conflict_end is None and evidence_end is not None:
+        return False
+    if (
+        evidence_start is not None
+        and conflict_start is not None
+        and evidence_start > conflict_start
+    ):
+        return False
+    if (
+        evidence_end is not None
+        and conflict_end is not None
+        and evidence_end < conflict_end
+    ):
+        return False
+    return True
 
 
 def _conflict_relevant(requirement: EvidenceRequirement, conflict: Conflict, as_of: datetime) -> bool:

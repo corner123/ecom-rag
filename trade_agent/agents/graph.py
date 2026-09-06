@@ -47,7 +47,7 @@ class GraphDependencies:
     answer_generator: AnswerGenerator | None = None
     claim_guard: ClaimHallucinationGuard | None = None
     policy: Callable[[str], bool] | None = None
-    query_rewriter: Callable[[str, int], str] | None = None
+    query_rewriter: Callable[..., str] | None = None
 
 
 def build_trade_graph(
