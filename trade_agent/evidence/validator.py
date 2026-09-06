@@ -164,6 +164,7 @@ class ValidationOutcome(_Contract):
     can_answer: StrictBool
     decision: Literal["answer", "rewrite_once", "refuse"]
     error_code: Literal["evidence_conflict", "evidence_insufficient", "evidence_retryable", "invalid_intent", "out_of_scope"] | None
+    intent_fingerprint: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
     policy_fingerprint: StrictStr
     requirements: EvidenceRequirements
     satisfied_requirements: tuple[SatisfiedRequirement, ...]
@@ -258,12 +259,16 @@ class EvidenceValidator:
         as_of_instant = _as_of_instant(as_of)
         as_of_is_date = type(as_of) is date
         try:
+            current_intent_fingerprint = intent_fingerprint(intent)
+        except (TypeError, ValueError):
+            current_intent_fingerprint = sha256(b"invalid-intent-contract").hexdigest()
+        try:
             requirements = EvidenceRequirements.for_intent(intent, policy=self.policy)
         except InvalidIntentContract as error:
             requirements = EvidenceRequirements.invalid(getattr(intent, "kind", "invalid"), self.policy)
-            return self._terminal(requirements, "invalid_intent", "invalid_intent", str(error))
+            return self._terminal(requirements, current_intent_fingerprint, "invalid_intent", "invalid_intent", str(error))
         if requirements.intent_kind == "out_of_scope":
-            return self._terminal(requirements, "out_of_scope", "out_of_scope", getattr(intent, "out_of_scope_reason", None) or "unsupported_request")
+            return self._terminal(requirements, current_intent_fingerprint, "out_of_scope", "out_of_scope", getattr(intent, "out_of_scope_reason", None) or "unsupported_request")
 
         ordered_evidence, contract_reasons = _validated_evidence(evidence)
         try:
@@ -331,15 +336,29 @@ class EvidenceValidator:
         else:
             decision, error_code = "refuse", "evidence_insufficient"
         all_ids = {item.evidence_id for item in ordered_evidence}
-        return ValidationOutcome(can_answer=decision == "answer", decision=decision, error_code=error_code,
+        return ValidationOutcome(can_answer=decision == "answer", decision=decision, error_code=error_code, intent_fingerprint=current_intent_fingerprint,
             policy_fingerprint=self.policy.policy_fingerprint, requirements=requirements,
             satisfied_requirements=tuple(sorted(satisfied, key=lambda item: item.requirement_id)), missing_requirements=tuple(sorted(missing, key=lambda item: item.requirement_id)), reasons=reasons,
             eligible_evidence_ids=tuple(sorted(eligible_ids)), excluded_evidence_ids=tuple(sorted(all_ids - eligible_ids)), conflict_ids=conflict_ids, degraded_components=degraded)
 
-    def _terminal(self, requirements: EvidenceRequirements, reason_code: Literal["invalid_intent", "out_of_scope"], error_code: Literal["invalid_intent", "out_of_scope"], detail: str) -> ValidationOutcome:
+    def _terminal(self, requirements: EvidenceRequirements, current_intent_fingerprint: str, reason_code: Literal["invalid_intent", "out_of_scope"], error_code: Literal["invalid_intent", "out_of_scope"], detail: str) -> ValidationOutcome:
         reason = ValidationReason(code=reason_code, requirement_id=None, branch=None, blocking=True, detail=detail)
-        return ValidationOutcome(can_answer=False, decision="refuse", error_code=error_code, policy_fingerprint=self.policy.policy_fingerprint,
+        return ValidationOutcome(can_answer=False, decision="refuse", error_code=error_code, intent_fingerprint=current_intent_fingerprint, policy_fingerprint=self.policy.policy_fingerprint,
             requirements=requirements, satisfied_requirements=(), missing_requirements=(), reasons=(reason,), eligible_evidence_ids=(), excluded_evidence_ids=(), conflict_ids=(), degraded_components=())
+
+
+def intent_fingerprint(intent: QueryIntent) -> str:
+    """Stable identity of the exact validated request, independent of policy."""
+    if type(intent) is not QueryIntent:
+        raise TypeError("intent must be an exact QueryIntent")
+    checked = QueryIntent.model_validate(intent.model_dump(mode="python", round_trip=True))
+    canonical = json.dumps(
+        checked.model_dump(mode="json", round_trip=True),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _context_reasons(requirements: EvidenceRequirements, context: ValidationContext | None, evidence: tuple[Evidence, ...], policy: SufficiencyPolicy) -> tuple[list[ValidationReason], set[str], tuple[str, ...]]:

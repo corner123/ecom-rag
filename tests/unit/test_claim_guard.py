@@ -8,8 +8,9 @@ from trade_agent.evidence.claim_guard import ClaimHallucinationGuard
 from trade_agent.agents.intent import QueryIntent
 from trade_agent.generation.base import DraftAnswer
 from trade_agent.generation.deterministic import DeterministicAnswerGenerator
-from tests.unit.test_evidence_validator import _rag, _validated
+from tests.unit.test_evidence_validator import _intent, _rag, _sql, _validated
 from tests.unit.test_generation import validated_context
+from trade_agent.retrieval.filters import RetrievalFilter
 
 
 @pytest.fixture
@@ -128,6 +129,40 @@ def test_guard_preserves_rag_datetime_instants_and_structured_scope(guard: Claim
     scope = draft.claim_scopes[0].model_copy(update={"country_code": "CN"})
     claim = draft.claims[0].model_copy(update={"period_start": datetime(2026, 8, 20, 11, tzinfo=timezone.utc)})
     forged = draft.model_copy(update={"claims": (claim,), "claim_scopes": (scope,)})
+
+    outcome = guard.guard(forged, (evidence,), intent, validation)
+
+    assert outcome.accepted is False
+    assert "claim_unsupported" in outcome.error_codes
+
+
+def test_guard_refuses_when_retained_claims_omit_a_satisfied_core_requirement(guard: ClaimHallucinationGuard) -> None:
+    intent = _intent("Acme 是否值得跟进", filters=RetrievalFilter(entity_ids=("company:acme",)))
+    evidence = (
+        _sql(start=date(2025, 9, 4), scope="lead"),
+        _rag(suffix="coverage-official"),
+        _rag(suffix="coverage-news", source_type="industry_news"),
+    )
+    validation = _validated(intent, evidence)
+    assert validation.can_answer
+    draft = DeterministicAnswerGenerator().generate(intent, evidence, validation)
+    claims = tuple(claim for claim in draft.claims if claim.fact_type == "trade_amount")
+    scopes = tuple(scope for scope in draft.claim_scopes if scope.claim_id == claims[0].claim_id)
+    missing_status = draft.model_copy(update={"claims": claims, "claim_scopes": scopes, "core_claim_ids": ()})
+
+    outcome = guard.guard(missing_status, evidence, intent, validation)
+
+    assert outcome.accepted is False
+    assert outcome.refusal_reason == "core_requirement_uncovered"
+
+
+def test_guard_rejects_rag_numeric_substrings_without_a_structured_value(guard: ClaimHallucinationGuard) -> None:
+    evidence = _rag(suffix="numeric-substring", content="Acme remains operational and reported 3120 units.")
+    intent = QueryIntent(question="website status", kind="external_intelligence", need_external_intel=True)
+    validation = _validated(intent, (evidence,))
+    assert validation.can_answer
+    draft = DeterministicAnswerGenerator().generate(intent, (evidence,), validation)
+    forged = draft.model_copy(update={"claims": (draft.claims[0].model_copy(update={"value": "12"}),)})
 
     outcome = guard.guard(forged, (evidence,), intent, validation)
 

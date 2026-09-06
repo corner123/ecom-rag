@@ -15,6 +15,7 @@ from trade_agent.evidence.validator import (
     EvidenceValidator,
     ValidationContext,
 )
+from trade_agent.evidence.requirements import DEFAULT_SUFFICIENCY_POLICY
 from trade_agent.generation.deterministic import DeterministicAnswerGenerator
 from trade_agent.generation.deepseek import DeepSeekAnswerGenerator
 
@@ -116,8 +117,36 @@ def test_generation_rejects_a_validation_outcome_from_a_different_intent(validat
     _, evidence, validation = validated_context
     different_intent = IntentParser(as_of=AS_OF).parse("最近半年中国出口 HS850440 金额最高的 10 家公司")
 
-    with pytest.raises(ValueError, match="requirements"):
+    with pytest.raises(ValueError, match="intent"):
         DeterministicAnswerGenerator().generate(different_intent, (evidence,), validation)
+
+
+def test_generation_rejects_an_outcome_reused_with_same_requirements_but_different_limit(validated_context) -> None:
+    intent, evidence, validation = validated_context
+    different_limit = intent.model_copy(update={"limit": 5})
+    assert validation.requirements == validation.requirements.for_intent(different_limit)
+
+    with pytest.raises(ValueError, match="intent"):
+        DeterministicAnswerGenerator().generate(different_limit, (evidence,), validation)
+
+
+def test_generation_accepts_an_outcome_from_a_custom_policy_for_its_same_intent(validated_context) -> None:
+    intent, evidence, _ = validated_context
+    custom_policy = DEFAULT_SUFFICIENCY_POLICY.model_copy(update={"lead_sql_maximum_age_days": 364})
+    validation = EvidenceValidator(custom_policy).validate(
+        intent,
+        (evidence,),
+        (),
+        AS_OF,
+        context=ValidationContext(branch_reports=(
+            BranchExecutionReport(branch="sql", attempted=True, completed=True, zero_hits=False),
+        )),
+    )
+    assert validation.can_answer
+
+    draft = DeterministicAnswerGenerator().generate(intent, (evidence,), validation)
+
+    assert draft.answer is not None
 
 
 def test_deepseek_accepts_strict_json_content_and_sends_an_output_budget(validated_context) -> None:

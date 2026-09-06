@@ -14,8 +14,7 @@ from pydantic import BaseModel, ConfigDict, StrictStr, model_validator
 
 from trade_agent.agents.intent import QueryIntent
 from trade_agent.evidence.models import Claim, Evidence
-from trade_agent.evidence.requirements import EvidenceRequirements, InvalidIntentContract
-from trade_agent.evidence.validator import ValidationOutcome
+from trade_agent.evidence.validator import ValidationOutcome, intent_fingerprint
 
 
 class _Contract(BaseModel):
@@ -108,12 +107,8 @@ def generation_evidence(
     if type(validation) is not ValidationOutcome:
         raise TypeError("validation must be an exact ValidationOutcome")
     checked_validation = ValidationOutcome.model_validate(validation.model_dump(mode="python"))
-    try:
-        expected_requirements = EvidenceRequirements.for_intent(intent)
-    except InvalidIntentContract as exc:
-        raise ValueError("intent cannot produce generation requirements") from exc
-    if checked_validation.requirements != expected_requirements:
-        raise ValueError("validation requirements do not match the current intent")
+    if checked_validation.intent_fingerprint != intent_fingerprint(intent):
+        raise ValueError("validation intent does not match the current request")
     if not checked_validation.can_answer:
         return ()
     checked: dict[str, Evidence] = {}

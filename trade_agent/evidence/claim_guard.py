@@ -59,6 +59,7 @@ class ClaimHallucinationGuard:
         validation: ValidationOutcome,
     ) -> GuardOutcome:
         checked_draft = _checked_draft(draft)
+        checked_validation = ValidationOutcome.model_validate(validation.model_dump(mode="python"))
         retained_evidence = generation_evidence(intent, evidence, validation)
         evidence_by_id = _checked_evidence(retained_evidence)
         if checked_draft.refusal_reason is not None:
@@ -78,7 +79,7 @@ class ClaimHallucinationGuard:
                 retained.append(claim)
             else:
                 unsupported = True
-                unsupported_core = unsupported_core or _is_required_core_claim(claim, validation)
+                unsupported_core = unsupported_core or _is_required_core_claim(claim, checked_validation)
         error_codes = ("claim_unsupported",) if unsupported else ()
         if unsupported_core:
             return GuardOutcome(
@@ -95,6 +96,14 @@ class ClaimHallucinationGuard:
                 claims=(),
                 refusal_reason="no_supported_claims",
                 error_codes=tuple(sorted(set((*error_codes, "no_supported_claims")))),
+            )
+        if not _core_requirements_covered(retained, checked_validation):
+            return GuardOutcome(
+                accepted=False,
+                answer=None,
+                claims=(),
+                refusal_reason="core_requirement_uncovered",
+                error_codes=tuple(sorted(set((*error_codes, "core_requirement_uncovered")))),
             )
         ordered = tuple(retained)
         return GuardOutcome(
@@ -152,7 +161,7 @@ def _claim_matches_evidence(claim: Claim, scope: ClaimScope, evidence: Evidence)
         return bool(sql_claim_rows(claim, evidence))
     if claim.text != evidence.content:
         return False
-    if claim.value is not None and claim.value not in evidence.content:
+    if claim.value is not None:
         return False
     if claim.unit is not None and (claim.unit not in evidence.units or claim.unit not in evidence.content):
         return False
@@ -167,3 +176,18 @@ def _is_required_core_claim(claim: Claim, validation: ValidationOutcome) -> bool
         requirement.core and claim.fact_type in requirement.fact_types
         for requirement in validation.requirements.items
     )
+
+
+def _core_requirements_covered(claims: Sequence[Claim], validation: ValidationOutcome) -> bool:
+    """Every validator-satisfied core requirement needs a retained atomic claim."""
+    satisfied_by_id = {item.requirement_id: set(item.evidence_ids) for item in validation.satisfied_requirements}
+    for requirement in validation.requirements.items:
+        if not requirement.core:
+            continue
+        support_ids = satisfied_by_id.get(requirement.requirement_id, set())
+        if not any(
+            claim.fact_type in requirement.fact_types and bool(set(claim.evidence_ids) & support_ids)
+            for claim in claims
+        ):
+            return False
+    return True
