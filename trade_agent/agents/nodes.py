@@ -5,10 +5,12 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from hashlib import sha256
+from inspect import Parameter, signature
 import json
 import os
 from pathlib import Path
 from queue import Empty, Queue
+import re
 from threading import BoundedSemaphore, Thread
 from typing import Any, Protocol, runtime_checkable
 
@@ -16,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt
 
 from trade_agent.agents.intent import QueryIntent
 from trade_agent.agents.intent import to_retrieval_query_intent
-from trade_agent.agents.state import EvidenceRef, RoutePlan, TradeIntelState
+from trade_agent.agents.state import DraftRef, EvidenceRef, RoutePlan, TradeIntelState
 from trade_agent.data.manifest import BuildManifest
 from trade_agent.db.registry import RegistrySnapshot
 from trade_agent.db.sql_executor import (
@@ -50,8 +52,10 @@ class GraphBudgets(BaseModel):
 
     max_steps: StrictInt = Field(default=16, ge=1, le=128)
     max_retries: StrictInt = Field(default=1, ge=0, le=4)
-    max_rewrites: StrictInt = Field(default=1, ge=0, le=2)
+    max_rewrites: StrictInt = Field(default=1, ge=0, le=1)
     max_llm_calls: StrictInt = Field(default=1, ge=0, le=8)
+    max_evidence_candidates: StrictInt = Field(default=100, ge=1, le=512)
+    max_generation_tokens: StrictInt = Field(default=1_024, ge=1, le=8_192)
     max_outstanding_calls: StrictInt = Field(default=16, ge=1, le=128)
     node_timeout_seconds: StrictFloat = Field(default=5.0, gt=0, le=120)
 
@@ -61,6 +65,10 @@ class EvidenceRepository(Protocol):
     def put_many(self, evidence: Sequence[Evidence]) -> tuple[EvidenceRef, ...]: ...
 
     def get_many(self, refs: Sequence[EvidenceRef]) -> tuple[Evidence, ...]: ...
+
+    def put_draft(self, draft: DraftAnswer) -> DraftRef: ...
+
+    def get_draft(self, ref: DraftRef) -> DraftAnswer: ...
 
 
 @runtime_checkable
@@ -83,8 +91,22 @@ class ContractSqlBranch:
 
     registry: RegistrySnapshot
     scope: SqlDataScope
-    connection_factory: Callable[[], Any]
-    supports_finite_timeout: bool = True
+    connection_factory: Callable[..., Any]
+
+    @property
+    def supports_finite_timeout(self) -> bool:
+        """Require an explicit keyword deadline at the connection boundary."""
+        try:
+            parameters = signature(self.connection_factory).parameters
+        except (TypeError, ValueError):
+            return False
+        timeout = parameters.get("timeout_seconds")
+        if timeout is not None and timeout.kind in {
+            Parameter.KEYWORD_ONLY,
+            Parameter.POSITIONAL_OR_KEYWORD,
+        }:
+            return True
+        return any(item.kind is Parameter.VAR_KEYWORD for item in parameters.values())
 
     def run(
         self,
@@ -98,7 +120,7 @@ class ContractSqlBranch:
         rendered = SqlRenderer(scope=self.scope).render(plan)
         validated = SqlValidator(scope=self.scope).validate(rendered, self.registry)
         timeout_ms = max(1, int(timeout_seconds * 1_000))
-        connection = self.connection_factory()
+        connection = self.connection_factory(timeout_seconds=timeout_seconds)
         try:
             result = ReadOnlySqlExecutor(
                 connection,
@@ -169,6 +191,23 @@ class FileEvidenceRepository:
         checked = Evidence.model_validate(item.model_dump(mode="python"))
         return checked.model_dump_json().encode("utf-8")
 
+    @staticmethod
+    def _draft_payload(draft: DraftAnswer) -> bytes:
+        checked = DraftAnswer.model_validate(draft.model_dump(mode="python"))
+        return checked.model_dump_json().encode("utf-8")
+
+    @staticmethod
+    def _atomic_replace(target: Path, payload: bytes) -> None:
+        temporary = target.parent / f".{target.name}.{os.getpid()}.tmp"
+        try:
+            with temporary.open("xb") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+
     def put_many(self, evidence: Sequence[Evidence]) -> tuple[EvidenceRef, ...]:
         if isinstance(evidence, (str, bytes)) or not isinstance(evidence, Sequence):
             raise EvidenceRepositoryError("Evidence payloads must be a sequence")
@@ -180,8 +219,35 @@ class FileEvidenceRepository:
             digest = sha256(payload).hexdigest()
             target = self.root / f"{item.evidence_id}.json"
             if target.exists():
-                if target.read_bytes() != payload:
-                    raise EvidenceRepositoryError("stored Evidence identity has a different payload")
+                existing_payload = target.read_bytes()
+                if existing_payload != payload:
+                    try:
+                        existing = Evidence.model_validate_json(existing_payload)
+                    except Exception as error:
+                        raise EvidenceRepositoryError(
+                            "stored Evidence payload failed contract validation"
+                        ) from error
+                    annotated = existing.model_copy(
+                        update={"conflict_group_id": item.conflict_group_id}
+                    )
+                    if (
+                        existing.conflict_group_id is not None
+                        or item.conflict_group_id is None
+                        or annotated != item
+                    ):
+                        raise EvidenceRepositoryError(
+                            "stored Evidence identity has a different payload"
+                        )
+                    # Preserve the original content-addressed payload so an
+                    # earlier checkpoint reference remains resumable.
+                    target = self.root / f"{item.evidence_id}.{digest}.json"
+                    if target.exists():
+                        if target.read_bytes() != payload:
+                            raise EvidenceRepositoryError(
+                                "stored Evidence version has a different payload"
+                            )
+                    else:
+                        self._atomic_replace(target, payload)
             else:
                 temporary = self.root / f".{item.evidence_id}.{os.getpid()}.tmp"
                 try:
@@ -204,7 +270,10 @@ class FileEvidenceRepository:
         values: list[Evidence] = []
         for ref in refs:
             checked = EvidenceRef.model_validate(ref.model_dump(mode="python"))
-            path = self.root / f"{checked.evidence_id}.json"
+            versioned = self.root / (
+                f"{checked.evidence_id}.{checked.payload_sha256}.json"
+            )
+            path = versioned if versioned.exists() else self.root / f"{checked.evidence_id}.json"
             try:
                 payload = path.read_bytes()
             except OSError as error:
@@ -219,6 +288,36 @@ class FileEvidenceRepository:
                 raise EvidenceRepositoryError("referenced Evidence identity differs from payload")
             values.append(item)
         return tuple(values)
+
+    def put_draft(self, draft: DraftAnswer) -> DraftRef:
+        if type(draft) is not DraftAnswer:
+            raise EvidenceRepositoryError("repository accepts exact DraftAnswer contracts")
+        payload = self._draft_payload(draft)
+        digest = sha256(payload).hexdigest()
+        ref = DraftRef(draft_id=f"draft_{digest}", payload_sha256=digest)
+        target = self.root / f"{ref.draft_id}.json"
+        if target.exists():
+            if target.read_bytes() != payload:
+                raise EvidenceRepositoryError("stored draft identity has a different payload")
+        else:
+            self._atomic_replace(target, payload)
+        return ref
+
+    def get_draft(self, ref: DraftRef) -> DraftAnswer:
+        checked = DraftRef.model_validate(ref.model_dump(mode="python"))
+        target = self.root / f"{checked.draft_id}.json"
+        try:
+            payload = target.read_bytes()
+        except OSError as error:
+            raise EvidenceRepositoryError("referenced draft payload is unavailable") from error
+        if sha256(payload).hexdigest() != checked.payload_sha256:
+            raise EvidenceRepositoryError("referenced draft payload failed hash verification")
+        try:
+            return DraftAnswer.model_validate_json(payload)
+        except Exception as error:
+            raise EvidenceRepositoryError(
+                "referenced draft payload failed contract validation"
+            ) from error
 
 
 @dataclass(frozen=True)
@@ -237,6 +336,7 @@ class NodeDependencies:
     policy: Callable[[str], bool]
     query_rewriter: Callable[[str, int], str] | None
     branch_call_runner: "BoundedCallRunner"
+    external_call_runner: "BoundedCallRunner"
 
 
 def _error(code: str, node: str, *, retryable: bool, detail: str) -> dict[str, object]:
@@ -262,27 +362,8 @@ def _next_step(state: TradeIntelState) -> int:
     return state.get("step_count", 0) + 1
 
 
-def _bounded_call(function: Callable[[], Any], timeout_seconds: float) -> Any:
-    output: Queue[tuple[bool, Any]] = Queue(maxsize=1)
-
-    def invoke() -> None:
-        try:
-            output.put((True, function()))
-        except BaseException as error:  # classified by the owning node
-            output.put((False, error))
-
-    Thread(target=invoke, daemon=True, name="trade-graph-bounded-call").start()
-    try:
-        ok, value = output.get(timeout=timeout_seconds)
-    except Empty as error:
-        raise TimeoutError("node deadline exceeded") from error
-    if ok:
-        return value
-    raise value
-
-
 class BoundedCallRunner:
-    """Cap timed-out branch work that remains alive below the transport seam."""
+    """Cap timed-out work that remains alive below a dependency seam."""
 
     def __init__(self, max_outstanding_calls: int) -> None:
         self._slots = BoundedSemaphore(max_outstanding_calls)
@@ -303,7 +384,7 @@ class BoundedCallRunner:
         worker = Thread(
             target=invoke,
             daemon=True,
-            name="trade-graph-bounded-branch-call",
+            name="trade-graph-bounded-call",
         )
         try:
             worker.start()
@@ -335,31 +416,53 @@ def _from_json_state(contract, value):
 
 def policy_gate_node(deps: NodeDependencies):
     def node(state: TradeIntelState) -> dict[str, object]:
-        limited = _begin(state, "policy_gate", deps)
-        if limited:
-            return limited
-        question = state.get("current_question") or state.get("question", "")
+        # Only question/explicit_filters pass the graph input schema. Reset all
+        # graph-owned public fields here too, so direct node use also fails closed.
+        question = state.get("question", "")
         try:
-            allowed = _bounded_call(
+            allowed = deps.external_call_runner.call(
                 lambda: deps.policy(question), deps.budgets.node_timeout_seconds
             )
-        except Exception:
-            allowed = False
-        if not isinstance(question, str) or not question.strip() or len(question) > 4_000 or allowed is not True:
+        except TimeoutError:
             return {
-                "step_count": _next_step(state),
+                "step_count": 1,
                 "terminal": True,
                 "answer": None,
+                "claims": [],
+                "refusal_reason": "policy_timeout",
+                "errors": [_error("policy_timeout", "policy_gate", retryable=False, detail="policy deadline exceeded")],
+                "node_status": {"policy_gate": "failed"},
+            }
+        except Exception as error:
+            return {
+                "step_count": 1,
+                "terminal": True,
+                "answer": None,
+                "claims": [],
+                "refusal_reason": "workflow_failed",
+                "errors": [_error("internal_error", "policy_gate", retryable=False, detail=type(error).__name__)],
+                "node_status": {"policy_gate": "failed"},
+            }
+        if not isinstance(question, str) or not question.strip() or len(question) > 4_000 or allowed is not True:
+            return {
+                "step_count": 1,
+                "terminal": True,
+                "answer": None,
+                "claims": [],
                 "refusal_reason": "policy_denied",
                 "errors": [_error("policy_denied", "policy_gate", retryable=False, detail="request did not pass local policy")],
                 "node_status": {"policy_gate": "failed"},
             }
         return {
-            "step_count": _next_step(state),
+            "step_count": 1,
             "current_question": question,
-            "rewrite_count": state.get("rewrite_count", 0),
-            "retry_count": state.get("retry_count", 0),
-            "llm_calls": state.get("llm_calls", 0),
+            "terminal": False,
+            "answer": None,
+            "claims": [],
+            "refusal_reason": None,
+            "rewrite_count": 0,
+            "retry_count": 0,
+            "llm_calls": 0,
             "node_status": {"policy_gate": "completed"},
         }
 
@@ -374,7 +477,7 @@ def router_node(deps: NodeDependencies):
         try:
             raw_filters = state.get("explicit_filters")
             filters = _from_json_state(RetrievalFilter, raw_filters) if raw_filters else None
-            intent = _bounded_call(
+            intent = deps.external_call_runner.call(
                 lambda: deps.intent_parser.parse(state["current_question"], filters),
                 deps.budgets.node_timeout_seconds,
             )
@@ -403,7 +506,7 @@ def router_node(deps: NodeDependencies):
                 "terminal": True,
                 "answer": None,
                 "refusal_reason": "intent_timeout",
-                "errors": [_error("rag_timeout", "router", retryable=False, detail="intent parsing deadline exceeded")],
+                "errors": [_error("intent_timeout", "router", retryable=False, detail="intent parsing deadline exceeded")],
                 "node_status": {"router": "failed"},
             }
         except (TypeError, ValueError) as error:
@@ -475,7 +578,7 @@ def _branch_node(deps: NodeDependencies, branch_name: str):
                 refs_key: [],
                 report_key: report.model_dump(mode="json"),
                 "errors": [_error(
-                    "retrieval_timeout_unsupported" if branch_name == "rag" else "sql_unavailable",
+                    "retrieval_timeout_unsupported" if branch_name == "rag" else "sql_connection_timeout_unsupported",
                     f"{branch_name}_node",
                     retryable=False,
                     detail="branch adapter cannot enforce a finite transport timeout",
@@ -497,6 +600,26 @@ def _branch_node(deps: NodeDependencies, branch_name: str):
                 raise TypeError("branch evidence must be a sequence")
             if any(type(item) is not Evidence for item in evidence):
                 raise TypeError("branch evidence must use the exact Evidence contract")
+            if len(evidence) > deps.budgets.max_evidence_candidates:
+                report = BranchExecutionReport(
+                    branch=branch_name,
+                    attempted=True,
+                    completed=False,
+                    zero_hits=False,
+                    error_codes=("invalid_contract",),
+                )
+                return {
+                    "step_count": _next_step(state),
+                    refs_key: [],
+                    report_key: report.model_dump(mode="json"),
+                    "errors": [_error(
+                        "candidate_limit_exceeded",
+                        f"{branch_name}_node",
+                        retryable=False,
+                        detail="branch Evidence candidate budget exceeded",
+                    )],
+                    "node_status": {f"{branch_name}_node": "failed"},
+                }
             checked = tuple(Evidence.model_validate(item.model_dump(mode="python")) for item in evidence)
             refs = deps.evidence_repository.put_many(checked)
             partial = tuple(sorted(set(degraded)))
@@ -619,12 +742,131 @@ def entity_dedup_conflict_node(deps: NodeDependencies):
         limited = _begin(state, "entity_dedup_conflict", deps)
         if limited:
             return limited
-        # Retrieval performs lineage-aware deduplication before normalization.
-        # This graph boundary preserves unique Evidence IDs and leaves exact
-        # structured conflict decisions to the shared validator contract.
-        return {"step_count": _next_step(state), "conflicts": [], "node_status": {"entity_dedup_conflict": "completed"}}
+        try:
+            evidence = deps.evidence_repository.get_many(
+                _refs(state.get("evidence_refs", []))
+            )
+            groups: dict[tuple[object, ...], list[Evidence]] = {}
+            for item in evidence:
+                if (
+                    item.locator.branch != "rag"
+                    or item.entity_id is None
+                    or len(item.currencies) > 1
+                    or len(item.units) > 1
+                ):
+                    continue
+                key = (
+                    item.entity_id,
+                    item.fact_type,
+                    item.valid_from,
+                    item.valid_to,
+                    item.currencies,
+                    item.units,
+                    item.aggregation_grain,
+                )
+                groups.setdefault(key, []).append(item)
+
+            conflicts: list[Conflict] = []
+            annotated = {item.evidence_id: item for item in evidence}
+            for key, candidates in sorted(groups.items(), key=lambda item: repr(item[0])):
+                independent = {item.source_id for item in candidates}
+                polarities = {_status_polarity(item.content) for item in candidates}
+                polarities.discard(None)
+                if len(independent) < 2 or polarities != {"active", "inactive"}:
+                    continue
+                members = tuple(sorted(candidates, key=lambda item: item.evidence_id))
+                identity = json.dumps(
+                    {
+                        "scope": [str(value) for value in key],
+                        "evidence_ids": [item.evidence_id for item in members],
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                conflict_id = "conflict_" + sha256(identity.encode("utf-8")).hexdigest()
+                for item in members:
+                    annotated[item.evidence_id] = item.model_copy(
+                        update={"conflict_group_id": conflict_id}
+                    )
+                conflicts.append(
+                    Conflict(
+                        conflict_id=conflict_id,
+                        entity_id=members[0].entity_id,
+                        fact_type=members[0].fact_type,
+                        evidence_ids=tuple(item.evidence_id for item in members),
+                        status="unresolved",
+                        valid_from=members[0].valid_from,
+                        valid_to=members[0].valid_to,
+                        unit=members[0].units[0] if members[0].units else None,
+                        currency=(
+                            members[0].currencies[0]
+                            if members[0].currencies
+                            else None
+                        ),
+                        aggregation_grain=members[0].aggregation_grain,
+                        explanation="independent sources report incompatible entity status",
+                    )
+                )
+            refs = deps.evidence_repository.put_many(
+                tuple(annotated[key] for key in sorted(annotated))
+            )
+            return {
+                "step_count": _next_step(state),
+                "evidence_refs": [item.model_dump(mode="json") for item in refs],
+                "conflicts": [
+                    item.model_dump(mode="json")
+                    for item in sorted(conflicts, key=lambda item: item.conflict_id)
+                ],
+                "node_status": {"entity_dedup_conflict": "completed"},
+            }
+        except EvidenceRepositoryError:
+            return {
+                "step_count": _next_step(state),
+                "terminal": True,
+                "answer": None,
+                "refusal_reason": "evidence_repository_error",
+                "errors": [_error("evidence_repository_error", "entity_dedup_conflict", retryable=False, detail="Evidence conflict persistence failed")],
+                "node_status": {"entity_dedup_conflict": "failed"},
+            }
+        except (TypeError, ValueError):
+            return {
+                "step_count": _next_step(state),
+                "terminal": True,
+                "answer": None,
+                "refusal_reason": "invalid_contract",
+                "errors": [_error("invalid_contract", "entity_dedup_conflict", retryable=False, detail="conflict discovery contract failed")],
+                "node_status": {"entity_dedup_conflict": "failed"},
+            }
 
     return node
+
+
+def _status_polarity(content: str) -> str | None:
+    normalized = content.casefold()
+    active = any(
+        re.search(pattern, normalized)
+        for pattern in (
+            r"\bactive\b",
+            r"\boperational\b",
+            r"\boperating\b",
+            r"\bopened\b",
+            r"\bexpanding\b",
+        )
+    )
+    inactive = any(
+        re.search(pattern, normalized)
+        for pattern in (
+            r"\binactive\b",
+            r"\bclosed\b",
+            r"\bceased\b",
+            r"\bshutdown\b",
+            r"\binsolvent\b",
+        )
+    )
+    if active == inactive:
+        return None
+    return "active" if active else "inactive"
 
 
 def evidence_validator_node(deps: NodeDependencies):
@@ -637,7 +879,7 @@ def evidence_validator_node(deps: NodeDependencies):
             reports = tuple(_from_json_state(BranchExecutionReport, item) for item in state.get("branch_reports", []))
             context = ValidationContext(branch_reports=reports)
             conflicts = tuple(_from_json_state(Conflict, item) for item in state.get("conflicts", []))
-            outcome = _bounded_call(
+            outcome = deps.external_call_runner.call(
                 lambda: deps.evidence_validator.validate(
                     _intent(state), evidence, conflicts, deps.as_of, context=context
                 ),
@@ -719,7 +961,7 @@ def query_rewrite_node(deps: NodeDependencies):
                 }
             llm_calls += 1
             try:
-                rewritten = _bounded_call(
+                rewritten = deps.external_call_runner.call(
                     lambda: deps.query_rewriter(state["current_question"], count + 1),
                     deps.budgets.node_timeout_seconds,
                 )
@@ -730,7 +972,7 @@ def query_rewrite_node(deps: NodeDependencies):
                     "answer": None,
                     "llm_calls": llm_calls,
                     "refusal_reason": "rewrite_timeout",
-                    "errors": [_error("rag_timeout", "query_rewrite", retryable=False, detail="query rewrite deadline exceeded")],
+                    "errors": [_error("rewrite_timeout", "query_rewrite", retryable=False, detail="query rewrite deadline exceeded")],
                     "node_status": {"query_rewrite": "failed"},
                 }
             except Exception as error:
@@ -757,6 +999,70 @@ def query_rewrite_node(deps: NodeDependencies):
                 "answer": None,
                 "refusal_reason": "invalid_rewrite",
                 "errors": [_error("invalid_contract", "query_rewrite", retryable=False, detail="query rewriter returned invalid text")],
+                "node_status": {"query_rewrite": "failed"},
+            }
+        try:
+            allowed = deps.external_call_runner.call(
+                lambda: deps.policy(rewritten), deps.budgets.node_timeout_seconds
+            )
+            if allowed is not True:
+                return {
+                    "step_count": _next_step(state),
+                    "terminal": True,
+                    "answer": None,
+                    "llm_calls": llm_calls,
+                    "refusal_reason": "policy_denied",
+                    "errors": [_error("policy_denied", "query_rewrite", retryable=False, detail="rewritten request did not pass local policy")],
+                    "node_status": {"query_rewrite": "failed"},
+                }
+            raw_filters = state.get("explicit_filters")
+            filters = _from_json_state(RetrievalFilter, raw_filters) if raw_filters else None
+            rewritten_intent = deps.external_call_runner.call(
+                lambda: deps.intent_parser.parse(rewritten, filters),
+                deps.budgets.node_timeout_seconds,
+            )
+            if type(rewritten_intent) is not QueryIntent:
+                raise TypeError("intent parser returned a foreign contract")
+        except TimeoutError:
+            return {
+                "step_count": _next_step(state),
+                "terminal": True,
+                "answer": None,
+                "llm_calls": llm_calls,
+                "refusal_reason": "rewrite_timeout",
+                "errors": [_error("rewrite_timeout", "query_rewrite", retryable=False, detail="rewrite validation deadline exceeded")],
+                "node_status": {"query_rewrite": "failed"},
+            }
+        except (TypeError, ValueError):
+            return {
+                "step_count": _next_step(state),
+                "terminal": True,
+                "answer": None,
+                "llm_calls": llm_calls,
+                "refusal_reason": "rewrite_scope_changed",
+                "errors": [_error("rewrite_scope_changed", "query_rewrite", retryable=False, detail="rewritten request changed or invalidated reviewed scope")],
+                "node_status": {"query_rewrite": "failed"},
+            }
+        except Exception as error:
+            return {
+                "step_count": _next_step(state),
+                "terminal": True,
+                "answer": None,
+                "llm_calls": llm_calls,
+                "refusal_reason": "workflow_failed",
+                "errors": [_error("internal_error", "query_rewrite", retryable=False, detail=type(error).__name__)],
+                "node_status": {"query_rewrite": "failed"},
+            }
+        original_scope = _intent(state).model_dump(mode="json", exclude={"question"})
+        rewritten_scope = rewritten_intent.model_dump(mode="json", exclude={"question"})
+        if rewritten_scope != original_scope:
+            return {
+                "step_count": _next_step(state),
+                "terminal": True,
+                "answer": None,
+                "llm_calls": llm_calls,
+                "refusal_reason": "rewrite_scope_changed",
+                "errors": [_error("rewrite_scope_changed", "query_rewrite", retryable=False, detail="rewrite changed or removed reviewed request scope")],
                 "node_status": {"query_rewrite": "failed"},
             }
         return {
@@ -800,20 +1106,45 @@ def answer_draft_node(deps: NodeDependencies):
                 "node_status": {"answer_draft": "failed"},
             }
         if provider_call:
+            configured_tokens = getattr(
+                deps.answer_generator,
+                "max_output_tokens",
+                getattr(deps.answer_generator, "_max_output_tokens", None),
+            )
+            if (
+                type(configured_tokens) is not int
+                or configured_tokens < 1
+                or configured_tokens > deps.budgets.max_generation_tokens
+            ):
+                return {
+                    "step_count": _next_step(state),
+                    "terminal": True,
+                    "answer": None,
+                    "refusal_reason": "generation_token_limit",
+                    "errors": [_error(
+                        "generation_token_limit_exceeded",
+                        "answer_draft",
+                        retryable=False,
+                        detail="provider output token limit is absent or exceeds graph budget",
+                    )],
+                    "node_status": {"answer_draft": "failed"},
+                }
+        if provider_call:
             llm_calls += 1
         try:
             evidence = deps.evidence_repository.get_many(_refs(state.get("evidence_refs", [])))
             validation = _from_json_state(ValidationOutcome, state["validation"])
-            draft = _bounded_call(
+            draft = deps.external_call_runner.call(
                 lambda: deps.answer_generator.generate(_intent(state), evidence, validation),
                 deps.budgets.node_timeout_seconds,
             )
             if type(draft) is not DraftAnswer:
                 raise TypeError("answer generator returned a foreign contract")
+            draft_ref = deps.evidence_repository.put_draft(draft)
             return {
                 "step_count": _next_step(state),
                 "llm_calls": llm_calls,
-                "draft": draft.model_dump(mode="json"),
+                "draft_ref": draft_ref.model_dump(mode="json"),
                 "node_status": {"answer_draft": "completed"},
             }
         except TimeoutError:
@@ -859,9 +1190,12 @@ def claim_guard_node(deps: NodeDependencies):
             return limited
         try:
             evidence = deps.evidence_repository.get_many(_refs(state.get("evidence_refs", [])))
-            outcome = _bounded_call(
+            draft = deps.evidence_repository.get_draft(
+                _from_json_state(DraftRef, state["draft_ref"])
+            )
+            outcome = deps.external_call_runner.call(
                 lambda: deps.claim_guard.guard(
-                    _from_json_state(DraftAnswer, state["draft"]),
+                    draft,
                     evidence,
                     _intent(state),
                     _from_json_state(ValidationOutcome, state["validation"]),
@@ -974,4 +1308,5 @@ def default_node_dependencies(
         policy=policy or (lambda _question: True),
         query_rewriter=query_rewriter,
         branch_call_runner=BoundedCallRunner(budgets.max_outstanding_calls),
+        external_call_runner=BoundedCallRunner(budgets.max_outstanding_calls),
     )

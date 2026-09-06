@@ -9,8 +9,13 @@ from pydantic import BaseModel, ConfigDict, StrictBool, StrictStr
 GraphErrorCode = Literal[
     "invalid_request",
     "policy_denied",
+    "policy_timeout",
+    "intent_timeout",
+    "rewrite_timeout",
+    "rewrite_scope_changed",
     "missing_entity_binding",
     "missing_sql_hmac_key",
+    "sql_connection_timeout_unsupported",
     "retrieval_timeout_unsupported",
     "sql_timeout",
     "sql_transport",
@@ -19,12 +24,14 @@ GraphErrorCode = Literal[
     "rag_transport",
     "rag_unavailable",
     "generation_timeout",
+    "generation_token_limit_exceeded",
     "guard_timeout",
     "evidence_repository_error",
     "invalid_contract",
     "step_limit_exceeded",
     "retry_limit_exceeded",
     "llm_limit_exceeded",
+    "candidate_limit_exceeded",
     "internal_error",
 ]
 

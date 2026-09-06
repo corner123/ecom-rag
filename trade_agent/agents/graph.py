@@ -27,7 +27,7 @@ from trade_agent.agents.nodes import (
     router_node,
     sql_node,
 )
-from trade_agent.agents.state import RoutePlan, TradeIntelState
+from trade_agent.agents.state import RoutePlan, TradeIntelInput, TradeIntelState
 from trade_agent.evidence.claim_guard import ClaimHallucinationGuard
 from trade_agent.evidence.validator import EvidenceValidator, ValidationOutcome
 from trade_agent.generation.base import AnswerGenerator
@@ -72,7 +72,7 @@ def build_trade_graph(
         policy=deps.policy,
         query_rewriter=deps.query_rewriter,
     )
-    graph = StateGraph(TradeIntelState)
+    graph = StateGraph(TradeIntelState, input_schema=TradeIntelInput)
     graph.add_node("policy_gate", policy_gate_node(node_deps))
     graph.add_node("router", router_node(node_deps))
     graph.add_node("sql_node", sql_node(node_deps))

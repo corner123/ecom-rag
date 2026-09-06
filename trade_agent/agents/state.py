@@ -17,6 +17,22 @@ class EvidenceRef(BaseModel):
     status: Literal["stored", "validated", "excluded"] = "stored"
 
 
+class DraftRef(BaseModel):
+    """Content-addressed pointer to an untrusted draft outside checkpoint state."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    draft_id: StrictStr = Field(pattern=r"^draft_[0-9a-f]{64}$")
+    payload_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    status: Literal["stored"] = "stored"
+
+    @model_validator(mode="after")
+    def content_address_matches(self) -> "DraftRef":
+        if self.draft_id != f"draft_{self.payload_sha256}":
+            raise ValueError("draft identity must match its payload hash")
+        return self
+
+
 class RoutePlan(BaseModel):
     """Deterministic execution channels selected from a validated intent."""
 
@@ -55,6 +71,13 @@ def merge_step(left: int, right: int) -> int:
     return max(left, right)
 
 
+class TradeIntelInput(TypedDict, total=False):
+    """Only caller-controlled fields admitted at the graph boundary."""
+
+    question: str
+    explicit_filters: dict[str, object]
+
+
 class TradeIntelState(TypedDict, total=False):
     """Minimal durable graph state; Evidence bodies are intentionally absent."""
 
@@ -71,7 +94,7 @@ class TradeIntelState(TypedDict, total=False):
     branch_reports: list[dict[str, object]]
     conflicts: list[dict[str, object]]
     validation: dict[str, object]
-    draft: dict[str, object]
+    draft_ref: dict[str, object]
     guard: dict[str, object]
     claims: list[dict[str, object]]
     answer: str | None
