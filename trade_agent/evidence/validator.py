@@ -634,8 +634,20 @@ def _sql_scope_bindings(sql: str) -> tuple[dict[str, tuple[str, ...]], tuple[str
     if len(statements) != 1 or type(statements[0]) is not exp.Select:
         raise _SqlScopeRejected("SQL provenance must contain exactly one SELECT")
     tree = statements[0]
-    if tree.args.get("hint") is not None or any(node.comments for node in tree.walk()):
-        raise _SqlScopeRejected("SQL provenance comments and hints are forbidden")
+    if any(
+        node.comments
+        or node.args.get("hint") is not None
+        or bool(node.args.get("hints"))
+        or bool(node.args.get("operation_modifiers"))
+        or (
+            isinstance(node, exp.Join)
+            and str(node.args.get("kind", "")).casefold() == "straight_join"
+        )
+        for node in tree.walk()
+    ):
+        raise _SqlScopeRejected(
+            "SQL provenance comments, hints, and operation modifiers are forbidden"
+        )
     where = tree.args.get("where")
     if type(where) is not exp.Where:
         raise _SqlScopeRejected("SQL provenance requires a WHERE predicate")

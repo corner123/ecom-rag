@@ -50,6 +50,9 @@ def _sql(
     result_rows: tuple[dict[str, object], ...] | None = None,
     where_override: str | None = None,
     filter_names_override: tuple[str, ...] | None = None,
+    select_operation_modifier: str = "",
+    trade_records_hint: str = "",
+    company_join_keyword: str = "JOIN",
 ) -> Evidence:
     dimensions: dict[str, object] = {}
     if currency is not None:
@@ -84,9 +87,9 @@ def _sql(
     result = SqlExecutionResult(
         query_id="sqlq_" + "a" * 64,
         normalized_sql=(
-            f"SELECT importer.company_name AS importer_company, {metric}, "
-            "import_country.country_code, hs.hs_code FROM trade_records AS tr "
-            "JOIN companies AS importer ON tr.importer_id = importer.id "
+            f"SELECT {select_operation_modifier}importer.company_name AS importer_company, {metric}, "
+            f"import_country.country_code, hs.hs_code FROM trade_records AS tr{trade_records_hint} "
+            f"{company_join_keyword} companies AS importer ON tr.importer_id = importer.id "
             "JOIN countries AS import_country ON tr.import_country_id = import_country.id "
             "JOIN hs_codes AS hs ON tr.hs_code_id = hs.id "
             "JOIN data_sources AS data_scope ON tr.source_id = data_scope.id "
@@ -1219,6 +1222,26 @@ def test_round3_sql_scope_rejects_in_literal_even_with_exact_placeholder_count()
 
     assert not duplicate_outcome.can_answer
     assert "invalid_contract" in _codes(duplicate_outcome)
+
+
+@pytest.mark.parametrize("sql_options", (
+    {"trade_records_hint": " USE INDEX (idx_trade_date)"},
+    {"trade_records_hint": " FORCE INDEX (idx_trade_date)"},
+    {"select_operation_modifier": "STRAIGHT_JOIN "},
+    {"company_join_keyword": "STRAIGHT_JOIN"},
+))
+def test_round4_sql_scope_rejects_table_hints_and_operation_modifiers(
+    sql_options: dict[str, str],
+) -> None:
+    evidence = _sql(**sql_options)
+
+    outcome = _validated(
+        _intent("最近半年美国采购 HS850440 金额最高的 10 家公司"),
+        (evidence,),
+    )
+
+    assert not outcome.can_answer
+    assert "invalid_contract" in _codes(outcome)
 
 
 def test_round3_policy_cannot_reclassify_deterministic_errors_as_retryable() -> None:
