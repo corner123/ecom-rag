@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from collections.abc import Sequence
 from datetime import datetime
@@ -698,17 +699,24 @@ class TradeMilvusStore:
         *,
         top_k: int,
         filter_: RetrievalFilter | None,
+        timeout_seconds: float | None = None,
     ) -> tuple[DenseHit, ...]:
         contract = self._require_contract()
         if type(top_k) is not int or not 1 <= top_k <= 512:
             raise ValueError("top_k must be an integer from 1 through 512")
+        if timeout_seconds is not None and (
+            type(timeout_seconds) is not float
+            or not math.isfinite(timeout_seconds)
+            or timeout_seconds <= 0
+        ):
+            raise ValueError("timeout_seconds must be a positive finite float")
         validated_vector = validate_query_vector(vector, dimension=contract.embedding_dimension)
         compiled = (
             compile_filter_binding(filter_)
             if filter_ is not None
             else None
         )
-        raw = self.client.search(
+        search_kwargs = dict(
             collection_name=contract.collection_name,
             data=[validated_vector.tolist()],
             limit=top_k,
@@ -726,6 +734,9 @@ class TradeMilvusStore:
             },
             consistency_level="Strong",
         )
+        if timeout_seconds is not None:
+            search_kwargs["timeout"] = timeout_seconds
+        raw = self.client.search(**search_kwargs)
         raw_hits = raw[0]
         hits: list[DenseHit] = []
         seen_chunk_ids: set[str] = set()

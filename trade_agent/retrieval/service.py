@@ -5,6 +5,8 @@ from collections import Counter, defaultdict
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+import inspect
+import math
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -119,26 +121,59 @@ class RetrievalService:
             self._metadata_universe[chunk_id] = values
         self._resolver = EntityResolver(entity_registry)
 
-    def search(self, intent: QueryIntent, *, top_k: int, rerank: bool = True) -> RetrievalOutcome:
+    @property
+    def supports_finite_transport_timeout(self) -> bool:
+        """Whether the dense RPC adapter accepts an explicit finite deadline."""
+        try:
+            return "timeout_seconds" in inspect.signature(self._milvus.search).parameters
+        except (TypeError, ValueError):
+            return False
+
+    def search(
+        self,
+        intent: QueryIntent,
+        *,
+        top_k: int,
+        rerank: bool = True,
+        transport_timeout_seconds: float | None = None,
+    ) -> RetrievalOutcome:
         plan = self._planner.plan(intent)
-        return self.retrieve(plan.query, plan, top_k=top_k, rerank=rerank)
+        return self.retrieve(
+            plan.query,
+            plan,
+            top_k=top_k,
+            rerank=rerank,
+            transport_timeout_seconds=transport_timeout_seconds,
+        )
 
     def retrieve(self, query: str, plan: RetrievalPlan, *, top_k: int = 10,
-                 rerank: bool = True) -> RetrievalOutcome:
+                 rerank: bool = True, transport_timeout_seconds: float | None = None) -> RetrievalOutcome:
         if type(plan) is not RetrievalPlan:
             raise TypeError("plan must be an exact RetrievalPlan")
         if not isinstance(query, str) or not query.strip() or query != plan.query:
             raise ValueError("query must be nonblank and match the retrieval plan")
         if type(top_k) is not int or not 1 <= top_k <= 512:
             raise ValueError("top_k must be an integer from 1 through 512")
+        if transport_timeout_seconds is not None and (
+            type(transport_timeout_seconds) is not float
+            or not math.isfinite(transport_timeout_seconds)
+            or transport_timeout_seconds <= 0
+        ):
+            raise ValueError("transport_timeout_seconds must be a positive finite float")
+        if transport_timeout_seconds is not None and not self.supports_finite_transport_timeout:
+            raise ValueError("Milvus adapter does not support a finite transport timeout")
         compiled = compile_filter_binding(plan.filter)
         allowed = candidate_chunk_ids(self._metadata_universe, plan.filter)
         dense, sparse = (), ()
         if allowed:
             def dense_recall():
                 vector = self._embedding_manager.embed_query(query)
-                return tuple(self._milvus.search(vector,
-                    top_k=self.profile.candidate_limits["dense"], filter_=plan.filter))
+                kwargs = dict(
+                    top_k=self.profile.candidate_limits["dense"], filter_=plan.filter
+                )
+                if transport_timeout_seconds is not None:
+                    kwargs["timeout_seconds"] = transport_timeout_seconds
+                return tuple(self._milvus.search(vector, **kwargs))
             with ThreadPoolExecutor(max_workers=2, thread_name_prefix="trade-recall") as pool:
                 dense_future = pool.submit(dense_recall)
                 sparse_future = pool.submit(self._bm25.search, query,

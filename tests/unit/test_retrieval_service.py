@@ -120,9 +120,18 @@ class FakeStore:
     def __init__(self, build: BuildManifest) -> None:
         self.contract = _contract(build)
         self.last_filter = "unset"
+        self.last_timeout = None
 
-    def search(self, vector: np.ndarray, *, top_k: int, filter_) -> tuple[DenseHit, ...]:
+    def search(
+        self,
+        vector: np.ndarray,
+        *,
+        top_k: int,
+        filter_,
+        timeout_seconds: float | None = None,
+    ) -> tuple[DenseHit, ...]:
         self.last_filter = filter_
+        self.last_timeout = timeout_seconds
         del vector, top_k
         return ()
 
@@ -159,6 +168,41 @@ def test_service_validates_one_exact_build_and_emits_fused_trace(tmp_path) -> No
     assert result.profile.profile_id == "balanced-v1"
     assert result.reranked_hits is None
     assert result.rerank_degraded is False
+
+
+def test_service_passes_a_finite_timeout_to_dense_transport(tmp_path) -> None:
+    service, _, store = _service(tmp_path)
+
+    service.search(
+        QueryIntent(query="Verified synthetic trade evidence", is_synthetic=True),
+        top_k=3,
+        transport_timeout_seconds=0.25,
+    )
+
+    assert store.last_timeout == 0.25
+
+
+def test_milvus_store_passes_timeout_to_sdk_search(tmp_path) -> None:
+    from trade_agent.index.milvus_store import TradeMilvusStore
+
+    build = _build(tmp_path)
+    captured = {}
+
+    class Client:
+        def search(self, **kwargs):
+            captured.update(kwargs)
+            return [[]]
+
+    store = object.__new__(TradeMilvusStore)
+    store.client = Client()
+    store._contract = _contract(build)
+    vector = np.zeros(1024, dtype=np.float32)
+    vector[0] = 1.0
+
+    assert store.search(
+        vector, top_k=3, filter_=None, timeout_seconds=0.25
+    ) == ()
+    assert captured["timeout"] == 0.25
 
 
 def test_service_rejects_mismatched_bm25_build(tmp_path) -> None:
