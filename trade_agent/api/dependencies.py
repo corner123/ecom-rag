@@ -11,7 +11,7 @@ from uuid import uuid4
 
 import anyio
 
-from trade_agent.agents.state import EvidenceRef, GuardProjection, RequestRef
+from trade_agent.agents.state import EvidenceRef, GuardProjection, GuardRef, RequestRef
 from trade_agent.api.models import (
     PublicError,
     QueryRequest,
@@ -91,7 +91,9 @@ class AgentRuntime:
     readiness_probe: Callable[[], Awaitable[ReadinessResponse]]
     retrieval_service: Any | None = None
     intent_parser: Any | None = None
-    resume_state_loader: Callable[[str], Awaitable[Mapping[str, object]]] | None = None
+    resume_state_loader: Callable[
+        [str], Awaitable[Mapping[str, object] | None]
+    ] | None = None
     close_callback: Callable[[], Awaitable[None]] | None = None
     max_outstanding_requests: int = 8
 
@@ -125,6 +127,7 @@ class AgentRuntime:
             graph_input: dict[str, object] = {
                 "question": request.question,
                 "idempotency_key": idempotency_key,
+                "request_top_k": request.top_k,
             }
             if request.explicit_filters != type(request.explicit_filters)():
                 graph_input["explicit_filters"] = request.explicit_filters.model_dump(mode="json")
@@ -162,6 +165,18 @@ class AgentRuntime:
 
         conflicts = _model_sequence(Conflict, state.get("conflicts", ()))
         raw_guard = state.get("guard")
+        if raw_guard is None and state.get("guard_ref") is not None:
+            try:
+                guard_ref = GuardRef.model_validate_json(
+                    json.dumps(state["guard_ref"], ensure_ascii=False)
+                )
+                raw_guard = self.evidence_repository.get_guard(guard_ref).model_dump(
+                    mode="json"
+                )
+            except EvidenceRepositoryError:
+                raise RuntimeUnavailableError("evidence_repository_error") from None
+            except Exception:
+                raise RuntimeUnavailableError("invalid_runtime_contract") from None
         if raw_guard is not None:
             try:
                 guard = GuardProjection.model_validate_json(
@@ -281,19 +296,24 @@ class AgentRuntime:
         async with self._limiter:
             try:
                 saved = await self.resume_state_loader(run_id)
+                if saved is None:
+                    return None
                 if not isinstance(saved, Mapping):
                     raise ValueError("saved run is not a mapping")
                 idempotency_key = saved.get("idempotency_key")
                 raw_ref = saved.get("original_request_ref") or saved.get("request_ref")
+                request_top_k = saved.get("request_top_k")
                 if not isinstance(idempotency_key, str) or not idempotency_key.strip():
                     raise ValueError("saved run lacks an idempotency identity")
                 if not isinstance(raw_ref, Mapping):
                     raise ValueError("saved run lacks its request reference")
+                if type(request_top_k) is not int or not 1 <= request_top_k <= 100:
+                    raise ValueError("saved run lacks its bounded retrieval scope")
                 request_ref = RequestRef.model_validate_json(
                     json.dumps(raw_ref, ensure_ascii=False)
                 )
                 question = self.evidence_repository.get_request(request_ref)
-                graph = self.graph_factory(10)
+                graph = self.graph_factory(request_top_k)
                 state = await graph.ainvoke(
                     None,
                     {

@@ -24,6 +24,7 @@ from trade_agent.agents.state import (
     DraftRef,
     EvidenceRef,
     GuardProjection,
+    GuardRef,
     RequestRef,
     RoutePlan,
     TradeIntelState,
@@ -82,6 +83,10 @@ class EvidenceRepository(Protocol):
     def put_request(self, question: str) -> RequestRef: ...
 
     def get_request(self, ref: RequestRef) -> str: ...
+
+    def put_guard(self, guard: GuardProjection) -> GuardRef: ...
+
+    def get_guard(self, ref: GuardRef) -> GuardProjection: ...
 
 
 @runtime_checkable
@@ -206,7 +211,7 @@ class ContractRetrievalBranch:
 
 
 class FileEvidenceRepository:
-    """Atomic file-backed Evidence repository suitable for durable resume."""
+    """Atomic file-backed payload repository suitable for durable resume."""
 
     def __init__(self, root: Path) -> None:
         if not isinstance(root, Path) or not root.is_absolute():
@@ -222,6 +227,11 @@ class FileEvidenceRepository:
     @staticmethod
     def _draft_payload(draft: DraftAnswer) -> bytes:
         checked = DraftAnswer.model_validate(draft.model_dump(mode="python"))
+        return checked.model_dump_json().encode("utf-8")
+
+    @staticmethod
+    def _guard_payload(guard: GuardProjection) -> bytes:
+        checked = GuardProjection.model_validate(guard.model_dump(mode="python"))
         return checked.model_dump_json().encode("utf-8")
 
     @staticmethod
@@ -378,6 +388,36 @@ class FileEvidenceRepository:
         if not question.strip():
             raise EvidenceRepositoryError("referenced request payload is blank")
         return question
+
+    def put_guard(self, guard: GuardProjection) -> GuardRef:
+        if type(guard) is not GuardProjection:
+            raise EvidenceRepositoryError("repository accepts exact GuardProjection contracts")
+        payload = self._guard_payload(guard)
+        digest = sha256(payload).hexdigest()
+        ref = GuardRef(guard_id=f"guard_{digest}", payload_sha256=digest)
+        target = self.root / f"{ref.guard_id}.json"
+        if target.exists():
+            if target.read_bytes() != payload:
+                raise EvidenceRepositoryError("stored guard identity has a different payload")
+        else:
+            self._atomic_replace(target, payload)
+        return ref
+
+    def get_guard(self, ref: GuardRef) -> GuardProjection:
+        checked = GuardRef.model_validate(ref.model_dump(mode="python"))
+        target = self.root / f"{checked.guard_id}.json"
+        try:
+            payload = target.read_bytes()
+        except OSError as error:
+            raise EvidenceRepositoryError("referenced guard payload is unavailable") from error
+        if sha256(payload).hexdigest() != checked.payload_sha256:
+            raise EvidenceRepositoryError("referenced guard payload failed hash verification")
+        try:
+            return GuardProjection.model_validate_json(payload)
+        except Exception as error:
+            raise EvidenceRepositoryError(
+                "referenced guard payload failed contract validation"
+            ) from error
 
 
 @dataclass(frozen=True)
@@ -1506,7 +1546,13 @@ def claim_guard_node(deps: NodeDependencies):
                 refusal_reason=outcome.refusal_reason,
                 error_codes=outcome.error_codes,
             )
-            return {"step_count": _next_step(state), "guard": projection.model_dump(mode="json"), "node_status": {"claim_guard": "completed"}}
+            guard_ref = deps.evidence_repository.put_guard(projection)
+            return {
+                "step_count": _next_step(state),
+                "guard": projection.model_dump(mode="json"),
+                "guard_ref": guard_ref.model_dump(mode="json"),
+                "node_status": {"claim_guard": "completed"},
+            }
         except TimeoutError:
             return {
                 "step_count": _next_step(state), "terminal": True, "answer": None,
@@ -1547,7 +1593,8 @@ def finalizer_node(deps: NodeDependencies):
         if limited:
             return limited
         raw = state.get("guard")
-        if raw is None:
+        raw_ref = state.get("guard_ref")
+        if raw is None and raw_ref is None:
             return {
                 "step_count": _next_step(state),
                 "terminal": True,
@@ -1556,7 +1603,44 @@ def finalizer_node(deps: NodeDependencies):
                 "claims": [],
                 "node_status": {"finalizer": "completed"},
             }
-        outcome = _from_json_state(GuardProjection, raw)
+        try:
+            outcome = (
+                _from_json_state(GuardProjection, raw)
+                if raw is not None
+                else deps.evidence_repository.get_guard(
+                    _from_json_state(GuardRef, raw_ref)
+                )
+            )
+        except EvidenceRepositoryError:
+            return {
+                "step_count": _next_step(state),
+                "terminal": True,
+                "answer": None,
+                "refusal_reason": "evidence_repository_error",
+                "claims": [],
+                "errors": [_error(
+                    "evidence_repository_error",
+                    "finalizer",
+                    retryable=False,
+                    detail="guard projection reload failed",
+                )],
+                "node_status": {"finalizer": "failed"},
+            }
+        except (TypeError, ValueError):
+            return {
+                "step_count": _next_step(state),
+                "terminal": True,
+                "answer": None,
+                "refusal_reason": "invalid_contract",
+                "claims": [],
+                "errors": [_error(
+                    "invalid_contract",
+                    "finalizer",
+                    retryable=False,
+                    detail="guard projection contract failed",
+                )],
+                "node_status": {"finalizer": "failed"},
+            }
         refusal = outcome.refusal_reason
         validation = _from_json_state(ValidationOutcome, state["validation"])
         if validation.decision == "rewrite_once" and state.get("rewrite_count", 0) >= deps.budgets.max_rewrites:

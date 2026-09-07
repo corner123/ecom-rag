@@ -6,18 +6,18 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from trade_agent.agents.nodes import FileEvidenceRepository
+from trade_agent.agents.state import GuardProjection
 from trade_agent.api.app import create_app
-from trade_agent.api.dependencies import RuntimeUnavailableError
-from trade_agent.api.dependencies import AgentRuntime
+from trade_agent.api.dependencies import AgentRuntime, RuntimeUnavailableError
 from trade_agent.api.models import (
     QueryResponse,
     ReadinessCheck,
     ReadinessResponse,
 )
-from trade_agent.evidence.models import Claim
 from trade_agent.cli import main as cli_main
 from trade_agent.config.settings import RedisSettings
-from trade_agent.agents.nodes import FileEvidenceRepository
+from trade_agent.evidence.models import Claim
 from tests.unit.test_evidence_validator import _rag
 
 
@@ -312,6 +312,13 @@ async def test_api_checkpoint_client_has_finite_connect_and_rpc_timeouts(monkeyp
 async def test_resume_uses_only_the_stored_request_scope(tmp_path) -> None:
     repository = FileEvidenceRepository((tmp_path / "evidence").resolve())
     request_ref = repository.put_request("Acme 是否值得跟进")
+    guard_ref = repository.put_guard(
+        GuardProjection(
+            accepted=False,
+            claims=(),
+            refusal_reason="evidence_retryable",
+        )
+    )
     captured = {}
 
     class ResumeGraph:
@@ -319,12 +326,7 @@ async def test_resume_uses_only_the_stored_request_scope(tmp_path) -> None:
             captured["graph_input"] = graph_input
             captured["config"] = config
             return {
-                "guard": {
-                    "accepted": False,
-                    "claims": [],
-                    "refusal_reason": "evidence_retryable",
-                    "error_codes": [],
-                },
+                "guard_ref": guard_ref.model_dump(mode="json"),
                 "evidence_refs": [],
                 "conflicts": [],
                 "errors": [],
@@ -336,6 +338,7 @@ async def test_resume_uses_only_the_stored_request_scope(tmp_path) -> None:
         return {
             "idempotency_key": "durable-key",
             "original_request_ref": request_ref.model_dump(mode="json"),
+            "request_top_k": 37,
         }
 
     async def ready():
@@ -346,8 +349,12 @@ async def test_resume_uses_only_the_stored_request_scope(tmp_path) -> None:
             checks={"runtime": ReadinessCheck(ok=True)},
         )
 
+    def graph_factory(top_k):
+        captured["top_k"] = top_k
+        return ResumeGraph()
+
     runtime = AgentRuntime(
-        graph_factory=lambda _top_k: ResumeGraph(),
+        graph_factory=graph_factory,
         evidence_repository=repository,
         build_id=BUILD_ID,
         readiness_probe=ready,
@@ -358,5 +365,64 @@ async def test_resume_uses_only_the_stored_request_scope(tmp_path) -> None:
 
     assert response is not None and response.refusal_reason == "evidence_retryable"
     assert captured["graph_input"] is None
+    assert captured["top_k"] == 37
     assert captured["config"]["configurable"]["resume_question"] == "Acme 是否值得跟进"
     assert captured["config"]["configurable"]["idempotency_key"] == "durable-key"
+
+
+def test_resume_maps_a_clean_missing_checkpoint_to_not_found(tmp_path) -> None:
+    repository = FileEvidenceRepository((tmp_path / "evidence").resolve())
+
+    async def load_missing(_run_id: str):
+        return None
+
+    async def ready():
+        return ReadinessResponse(
+            ready=True,
+            build_id=BUILD_ID,
+            schema_fingerprint="e" * 64,
+            checks={"runtime": ReadinessCheck(ok=True)},
+        )
+
+    runtime = AgentRuntime(
+        graph_factory=lambda _top_k: None,
+        evidence_repository=repository,
+        build_id=BUILD_ID,
+        readiness_probe=ready,
+        resume_state_loader=load_missing,
+    )
+
+    with _client(runtime) as client:
+        response = client.post("/v1/runs/missing-run/resume", json={})
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": {"code": "run_not_found"}}
+
+
+def test_resume_keeps_checkpoint_transport_failure_unavailable(tmp_path) -> None:
+    repository = FileEvidenceRepository((tmp_path / "evidence").resolve())
+
+    async def load_unavailable(_run_id: str):
+        raise RuntimeUnavailableError("checkpoint_unavailable")
+
+    async def ready():
+        return ReadinessResponse(
+            ready=True,
+            build_id=BUILD_ID,
+            schema_fingerprint="e" * 64,
+            checks={"runtime": ReadinessCheck(ok=True)},
+        )
+
+    runtime = AgentRuntime(
+        graph_factory=lambda _top_k: None,
+        evidence_repository=repository,
+        build_id=BUILD_ID,
+        readiness_probe=ready,
+        resume_state_loader=load_unavailable,
+    )
+
+    with _client(runtime) as client:
+        response = client.post("/v1/runs/unavailable-run/resume", json={})
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": {"code": "checkpoint_unavailable"}}

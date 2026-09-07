@@ -72,8 +72,23 @@ class RequestRef(BaseModel):
         return self
 
 
+class GuardRef(BaseModel):
+    """Content-addressed pointer to a guarded projection outside Redis."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    guard_id: StrictStr = Field(pattern=r"^guard_[0-9a-f]{64}$")
+    payload_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def content_address_matches(self) -> "GuardRef":
+        if self.guard_id != f"guard_{self.payload_sha256}":
+            raise ValueError("guard identity must match its payload hash")
+        return self
+
+
 class GuardProjection(BaseModel):
-    """Checkpoint-safe result of guarding; untrusted answer text is omitted."""
+    """Guarded result stored outside Redis; untrusted answer text is omitted."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
@@ -148,6 +163,7 @@ class TradeIntelInput(TypedDict, total=False):
     question: str
     explicit_filters: dict[str, object]
     idempotency_key: str
+    request_top_k: int
 
 
 class TradeIntelState(TypedDict, total=False):
@@ -160,6 +176,7 @@ class TradeIntelState(TypedDict, total=False):
     intent: dict[str, object]
     request_ref: dict[str, object]
     original_request_ref: dict[str, object]
+    request_top_k: int
     rewrite_filters: dict[str, object]
     route_plan: dict[str, object]
     sql_evidence_refs: list[dict[str, object]]
@@ -172,6 +189,7 @@ class TradeIntelState(TypedDict, total=False):
     validation: dict[str, object]
     draft_ref: dict[str, object]
     guard: dict[str, object]
+    guard_ref: dict[str, object]
     claims: list[dict[str, object]]
     answer: str | None
     refusal_reason: str | None

@@ -10,9 +10,10 @@ from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
 from trade_agent.agents.intent import QueryIntent
-from trade_agent.agents.state import TradeIntelState
+from trade_agent.agents.state import GuardRef, TradeIntelState
 from trade_agent.config.settings import RedisSettings
 from trade_agent.errors import GraphWorkflowError
+from trade_agent.evidence.models import Conflict
 from trade_agent.retrieval.filters import RetrievalFilter
 
 
@@ -27,6 +28,7 @@ _SAFE_STATE_FIELDS = frozenset({
     "idempotency_key", "request_ref", "original_request_ref", "rewrite_filters", "intent", "route_plan", "sql_evidence_refs",
     "rag_evidence_refs", "evidence_refs", "sql_report", "rag_report",
     "branch_reports", "validation", "draft_ref", "refusal_reason",
+    "conflicts", "guard_ref", "request_top_k",
     "rewrite_count", "retry_count", "llm_calls", "step_count", "errors",
     "node_status", "terminal",
 })
@@ -61,6 +63,46 @@ def _safe_rewrite_filters(value: object) -> dict[str, object]:
     return checked.model_dump(mode="json")
 
 
+def _safe_conflicts(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        raise CheckpointUnavailableError()
+    try:
+        checked = [
+            Conflict.model_validate_json(
+                json.dumps(item, ensure_ascii=False)
+            )
+            for item in value
+        ]
+    except (TypeError, ValueError):
+        raise CheckpointUnavailableError() from None
+    by_id = {item.conflict_id: item for item in checked}
+    if len(by_id) != len(checked):
+        raise CheckpointUnavailableError()
+    return [
+        by_id[conflict_id]
+        .model_copy(update={"explanation": "checkpointed Evidence conflict"})
+        .model_dump(mode="json")
+        for conflict_id in sorted(by_id)
+    ]
+
+
+def _safe_guard_ref(value: object) -> dict[str, object]:
+    if not isinstance(value, Mapping):
+        raise CheckpointUnavailableError()
+    try:
+        return GuardRef.model_validate_json(
+            json.dumps(value, ensure_ascii=False)
+        ).model_dump(mode="json")
+    except (TypeError, ValueError):
+        raise CheckpointUnavailableError() from None
+
+
+def _safe_request_top_k(value: object) -> int:
+    if type(value) is not int or not 1 <= value <= 100:
+        raise CheckpointUnavailableError()
+    return value
+
+
 def _checkpoint_safe(values: Mapping[str, object]) -> dict[str, object]:
     """Project only reviewed durable fields; never redact a blacklist in place."""
     safe = {key: values[key] for key in _SAFE_STATE_FIELDS & values.keys()}
@@ -73,6 +115,12 @@ def _checkpoint_safe(values: Mapping[str, object]) -> dict[str, object]:
         safe["errors"] = _safe_errors(safe["errors"])
     if "rewrite_filters" in safe:
         safe["rewrite_filters"] = _safe_rewrite_filters(safe["rewrite_filters"])
+    if "conflicts" in safe:
+        safe["conflicts"] = _safe_conflicts(safe["conflicts"])
+    if "guard_ref" in safe:
+        safe["guard_ref"] = _safe_guard_ref(safe["guard_ref"])
+    if "request_top_k" in safe:
+        safe["request_top_k"] = _safe_request_top_k(safe["request_top_k"])
     return safe
 
 
@@ -241,24 +289,47 @@ class RedisCheckpointFactory:
         return json.dumps(documents, ensure_ascii=False, sort_keys=True)
 
 
-async def _resume_from_saver(checkpointer: AsyncRedisSaver, thread_id: str, run_id: str) -> TradeIntelState:
+async def _resume_from_saver(
+    checkpointer: AsyncRedisSaver, thread_id: str, run_id: str
+) -> TradeIntelState | None:
     config = checkpoint_config(thread_id, run_id, "resume-lookup")
     try:
         checkpoints = [item async for item in checkpointer.alist(config, limit=1)]
     except CheckpointUnavailableError:
         raise
+    except AttributeError as error:
+        # Redis Search can briefly retain an empty Document after the JSON
+        # checkpoint TTL expires. Confirm the exact run has no source document
+        # before treating that stale-index result as a clean miss.
+        if "Document" in str(error) and "thread_id" in str(error):
+            client = getattr(checkpointer, "_redis", None)
+            prefix = getattr(checkpointer, "_checkpoint_prefix", None)
+            if client is not None and isinstance(prefix, str) and prefix:
+                try:
+                    pattern = (
+                        f"{prefix}:{thread_id}:{_run_namespace(run_id)}:*"
+                    )
+                    exists = False
+                    async for _key in client.scan_iter(match=pattern):
+                        exists = True
+                        break
+                    if not exists:
+                        return None
+                except Exception:
+                    pass
+        raise CheckpointUnavailableError() from None
     except Exception:
         raise CheckpointUnavailableError() from None
     if not checkpoints:
-        raise CheckpointUnavailableError()
+        return None
     state = checkpoints[0].checkpoint.get("channel_values", {})
     if not isinstance(state, dict):
         raise CheckpointUnavailableError()
     return cast(TradeIntelState, state.copy())
 
 
-async def resume_run(thread_id: str, run_id: str) -> TradeIntelState:
-    """Return one exact run's safe state, or fail closed when unavailable."""
+async def resume_run(thread_id: str, run_id: str) -> TradeIntelState | None:
+    """Return one exact run's safe state, None if missing, or fail when unavailable."""
     if RedisCheckpointFactory._default_saver is None:
         raise CheckpointUnavailableError()
     return await _resume_from_saver(RedisCheckpointFactory._default_saver, thread_id, run_id)

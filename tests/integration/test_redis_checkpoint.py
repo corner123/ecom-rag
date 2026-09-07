@@ -130,6 +130,7 @@ async def test_graph_resumes_without_repeating_completed_retrieval_or_sql(
         paused = await first_graph.ainvoke({
             "question": question,
             "idempotency_key": idempotency_key,
+            "request_top_k": 37,
         }, config)
         assert paused["node_status"]["sql_node"] == "completed"
         assert paused["node_status"]["rag_node"] == "completed"
@@ -137,6 +138,7 @@ async def test_graph_resumes_without_repeating_completed_retrieval_or_sql(
         recovered = await resume_run(thread_id, run_id)
         assert recovered["node_status"]["sql_node"] == "completed"
         assert recovered["idempotency_key"] == idempotency_key
+        assert recovered["request_top_k"] == 37
         await RedisCheckpointFactory.close(saver)
         del config
 
@@ -164,6 +166,159 @@ async def test_graph_resumes_without_repeating_completed_retrieval_or_sql(
         assert "payload_sha256" in payload
         assert idempotency_key in payload
         assert thread_id in payload and run_id in payload
+    finally:
+        cleanup_saver = resumed_saver or saver
+        await cleanup_saver.adelete_thread(thread_id)
+        await RedisCheckpointFactory.close(cleanup_saver)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_resume_after_conflict_detection_preserves_the_blocking_decision(
+    tmp_path: Path, redis_client: Redis
+) -> None:
+    namespace = f"trade-checkpoint-{uuid4().hex}"
+    saver = await RedisCheckpointFactory.create(
+        RedisSettings(host=_redis_host(), port=_redis_port()),
+        ttl_seconds=60,
+        namespace=namespace,
+    )
+    active_text = "Acme status: active and operational. conflict-active-sentinel"
+    inactive_text = "Acme status: inactive; operations permanently closed. conflict-inactive-sentinel"
+    rag = RecordingBranch(
+        (
+            _rag(suffix="resume-conflict-active", content=active_text),
+            _rag(
+                suffix="resume-conflict-inactive",
+                source_type="industry_news",
+                content=inactive_text,
+            ),
+        )
+    )
+    sql = RecordingBranch(())
+    thread_id, run_id, key = uuid4().hex, uuid4().hex, uuid4().hex
+    config = checkpoint_config(thread_id, run_id, key)
+    config["recursion_limit"] = 64
+    resumed_saver = None
+    try:
+        first = build_trade_graph(
+            _deps(tmp_path, sql, rag),
+            checkpointer=saver,
+            interrupt_before=["evidence_validator"],
+        )
+        paused = await first.ainvoke(
+            {"question": "Acme 官网最近是否扩产", "idempotency_key": key},
+            config,
+        )
+        assert len(paused["conflicts"]) == 1
+        await RedisCheckpointFactory.close(saver)
+
+        resumed_saver = await RedisCheckpointFactory.create(
+            RedisSettings(host=_redis_host(), port=_redis_port()),
+            ttl_seconds=60,
+            namespace=namespace,
+        )
+        resumed = build_trade_graph(
+            _deps(tmp_path, sql, rag),
+            checkpointer=resumed_saver,
+        )
+        result = await resumed.ainvoke(None, checkpoint_config(thread_id, run_id, key))
+
+        assert result["validation"]["error_code"] == "evidence_conflict"
+        assert result["refusal_reason"] == "evidence_conflict"
+        assert len(result["conflicts"]) == 1
+        payload = await RedisCheckpointFactory.dump_thread(
+            redis_client, thread_id, namespace=namespace
+        )
+        assert active_text not in payload
+        assert inactive_text not in payload
+        assert "conflict_" in payload
+        assert "checkpointed Evidence conflict" in payload
+        assert "independent sources report incompatible entity status" not in payload
+    finally:
+        cleanup_saver = resumed_saver or saver
+        await cleanup_saver.adelete_thread(thread_id)
+        await RedisCheckpointFactory.close(cleanup_saver)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_resume_after_claim_guard_preserves_only_the_guarded_decision(
+    tmp_path: Path, redis_client: Redis
+) -> None:
+    namespace = f"trade-checkpoint-{uuid4().hex}"
+    saver = await RedisCheckpointFactory.create(
+        RedisSettings(host=_redis_host(), port=_redis_port()),
+        ttl_seconds=60,
+        namespace=namespace,
+    )
+    official_text = "Acme opened audited production line guard-official-evidence-sentinel."
+    news_text = "Acme opened audited production line guard-news-evidence-sentinel."
+    rag = RecordingBranch(
+        (
+            _rag(suffix="resume-guard-official", content=official_text),
+            _rag(
+                suffix="resume-guard-news",
+                source_type="industry_news",
+                content=news_text,
+            ),
+        )
+    )
+    sql = RecordingBranch(())
+    provider_draft_text = "provider-draft-only-sentinel"
+
+    class ProviderSentinelGenerator:
+        max_output_tokens = 64
+
+        def generate(self, intent, evidence, validation):
+            draft = DeterministicAnswerGenerator().generate(
+                intent, evidence, validation
+            )
+            return draft.model_copy(
+                update={"answer": f"{draft.answer}\n{provider_draft_text}"}
+            )
+
+    generator = ProviderSentinelGenerator()
+    thread_id, run_id, key = uuid4().hex, uuid4().hex, uuid4().hex
+    config = checkpoint_config(thread_id, run_id, key)
+    config["recursion_limit"] = 64
+    resumed_saver = None
+    try:
+        first = build_trade_graph(
+            _deps(tmp_path, sql, rag, generator),
+            checkpointer=saver,
+            interrupt_before=["finalizer"],
+        )
+        paused = await first.ainvoke(
+            {"question": "Acme 官网最近是否扩产", "idempotency_key": key},
+            config,
+        )
+        assert paused["guard"]["accepted"] is True
+        expected_answer = "\n".join(item["text"] for item in paused["guard"]["claims"])
+        await RedisCheckpointFactory.close(saver)
+
+        resumed_saver = await RedisCheckpointFactory.create(
+            RedisSettings(host=_redis_host(), port=_redis_port()),
+            ttl_seconds=60,
+            namespace=namespace,
+        )
+        resumed = build_trade_graph(
+            _deps(tmp_path, sql, rag, generator),
+            checkpointer=resumed_saver,
+        )
+        result = await resumed.ainvoke(None, checkpoint_config(thread_id, run_id, key))
+
+        assert result["answer"] == expected_answer
+        assert result["refusal_reason"] is None
+        assert result["claims"]
+        payload = await RedisCheckpointFactory.dump_thread(
+            redis_client, thread_id, namespace=namespace
+        )
+        assert official_text not in payload
+        assert news_text not in payload
+        assert expected_answer not in payload
+        assert provider_draft_text not in payload
+        assert "guard_" in payload
     finally:
         cleanup_saver = resumed_saver or saver
         await cleanup_saver.adelete_thread(thread_id)
@@ -313,13 +468,12 @@ async def test_checkpoint_payload_excludes_raw_sql_rows_and_draft_text(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_resume_missing_checkpoint_fails_closed(redis_client: Redis) -> None:
+async def test_resume_missing_checkpoint_returns_clean_absence(redis_client: Redis) -> None:
     saver = await RedisCheckpointFactory.create(
         RedisSettings(host=_redis_host(), port=_redis_port()), ttl_seconds=1, namespace=f"trade-checkpoint-{uuid4().hex}"
     )
     try:
-        with pytest.raises(CheckpointUnavailableError, match="checkpoint_unavailable"):
-            await resume_run(uuid4().hex, uuid4().hex)
+        assert await resume_run(uuid4().hex, uuid4().hex) is None
     finally:
         await RedisCheckpointFactory.close(saver)
 
@@ -352,8 +506,7 @@ async def test_checkpoint_ttl_expires_thread_state(
         await graph.ainvoke({"question": "Acme 是否值得跟进", "idempotency_key": config["configurable"]["idempotency_key"]}, config)
         assert await RedisCheckpointFactory.dump_thread(redis_client, thread_id, namespace=namespace)
         await asyncio.sleep(1.1)
-        with pytest.raises(CheckpointUnavailableError, match="checkpoint_unavailable"):
-            await resume_run(thread_id, run_id)
+        assert await resume_run(thread_id, run_id) is None
     finally:
         await RedisCheckpointFactory.close(saver)
 
