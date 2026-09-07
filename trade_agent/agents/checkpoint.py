@@ -203,6 +203,11 @@ class RedisCheckpointFactory:
             raise ValueError("checkpoint TTL must be a positive integer")
         saver = _MinimalAsyncRedisSaver(
             f"redis://{settings.host}:{settings.port}/{settings.database}",
+            connection_args={
+                "socket_connect_timeout": 5.0,
+                "socket_timeout": 5.0,
+                "max_connections": 16,
+            },
             ttl={"default_ttl": ttl / 60, "refresh_on_read": True},
             checkpoint_prefix=f"{namespace}:checkpoint",
             checkpoint_write_prefix=f"{namespace}:checkpoint_write",

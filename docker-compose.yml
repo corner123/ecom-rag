@@ -79,8 +79,13 @@ services:
       MILVUS__HOST: milvus
       REDIS__HOST: redis
       MODELS__EMBEDDING_CACHE_DIR: /model-cache
+      TRADE_AGENT_INDEX_BUNDLE: ${TRADE_AGENT_INDEX_BUNDLE:-}
+      TRADE_AGENT_EVIDENCE_ROOT: /service-data/evidence
     ports: ["127.0.0.1:8000:8000"]
-    volumes: ["model_cache:/model-cache"]
+    volumes:
+      - model_cache:/model-cache
+      - index_data:/app/data/indexes
+      - service_data:/service-data
     healthcheck:
       test: ["CMD", "python", "/app/healthcheck.py"]
       interval: 5s
@@ -98,3 +103,5 @@ volumes:
   milvus_data:
   redis_data:
   model_cache:
+  index_data:
+  service_data:

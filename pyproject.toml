@@ -32,6 +32,7 @@ runtime = [
     "torch==2.6.0",
     "transformers==4.48.3",
     "langgraph-checkpoint-redis>=0.5.2",
+    "uvicorn>=0.30,<1",
 ]
 dev = [
     "httpx>=0.27,<1",
@@ -50,7 +51,7 @@ include = ["trade_agent*", "scripts*"]
 
 [tool.setuptools.package-data]
 "trade_agent.index" = ["bge_m3_artifact_manifest.json"]
-"trade_agent.config" = ["schema_registry.yaml"]
+"trade_agent.config" = ["schema_registry.yaml", "retrieval_profiles.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
