@@ -16,3 +16,10 @@ Run identity is now enforced by the saver itself: every read/write derives `chec
 Checkpoint state now uses a whitelist projection. Raw question/filter/input channels, answer/claim text, source payloads, secret-like values, and host-path sentinels are excluded; structured intent omits its question and resume input remains caller-supplied config.
 Fix-round verification: Redis Stack integration 7 passed; graph/Compose checks 52 passed (8 deselected); compileall, lock check, diff check, and sensitive scan passed.
 The saver injects the config idempotency key into every checkpoint and rejects any conflicting state/write key before persistence.
+
+## Fix round 2
+
+Checkpoint reads now compare the caller configuration idempotency key with the persisted safe key before LangGraph receives state; mismatch fails as `checkpoint_unavailable` before any SQL, RAG, or generator call.
+The file evidence repository now stores the original request as a content-addressed `RequestRef` outside Redis. The checkpoint holds only this reference and a question-free structured intent; a fresh graph/repository resolves it after resume.
+The whitelist retains only `branch:to:*` scheduling markers required by LangGraph pending work, alongside reviewed safe state, so answer/guard/finalizer can complete without replaying completed retrieval nodes.
+Fix-round verification: Redis Stack integration 8 passed; graph/Compose checks 52 passed (1 deselected); compileall, lock check, diff check, and sensitive scan passed.

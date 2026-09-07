@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import date
+import json
 import os
 from pathlib import Path
 from uuid import uuid4
@@ -21,6 +22,7 @@ from trade_agent.agents.checkpoint import (
 from trade_agent.agents.graph import GraphDependencies, build_trade_graph
 from trade_agent.agents.intent import IntentParser, QueryIntent
 from trade_agent.agents.nodes import FileEvidenceRepository, GraphBudgets
+from trade_agent.generation.deterministic import DeterministicAnswerGenerator
 from trade_agent.config.settings import RedisSettings
 from tests.unit.test_evidence_validator import _rag, _sql
 
@@ -68,7 +70,7 @@ async def redis_client() -> Redis:
     await client.aclose()
 
 
-def _deps(tmp_path: Path, sql: RecordingBranch, rag: RecordingBranch) -> GraphDependencies:
+def _deps(tmp_path: Path, sql: RecordingBranch, rag: RecordingBranch, answer_generator=None) -> GraphDependencies:
     return GraphDependencies(
         intent_parser=IntentParser(as_of=AS_OF),
         sql_branch=sql,
@@ -77,7 +79,19 @@ def _deps(tmp_path: Path, sql: RecordingBranch, rag: RecordingBranch) -> GraphDe
         sql_identity_hmac_key=b"checkpoint-test-key",
         budgets=GraphBudgets(node_timeout_seconds=0.2),
         as_of=AS_OF,
+        answer_generator=answer_generator,
     )
+
+
+class CountingGenerator:
+    max_output_tokens = 64
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate(self, intent, evidence, validation):
+        self.calls += 1
+        return DeterministicAnswerGenerator().generate(intent, evidence, validation)
 
 
 @pytest.mark.integration
@@ -90,16 +104,25 @@ async def test_graph_resumes_without_repeating_completed_retrieval_or_sql(
         RedisSettings(host=_redis_host(), port=_redis_port()), ttl_seconds=60, namespace=namespace
     )
     sql = RecordingBranch((_sql(start=date(2025, 9, 4), scope="lead"),))
-    rag = RecordingBranch((_rag(suffix="checkpoint"), _rag(suffix="checkpoint-2", source_type="industry_news")))
+    raw_evidence = "checkpoint-fresh-resume-evidence-sentinel"
+    rag = RecordingBranch((
+        _rag(suffix="checkpoint", content=f"Acme opened audited production line {raw_evidence} and remains operational."),
+        _rag(suffix="checkpoint-2", source_type="industry_news"),
+    ))
     thread_id, run_id = uuid4().hex, uuid4().hex
     idempotency_key = uuid4().hex
+    secret = "checkpoint-fresh-resume-secret-sentinel"
+    host_path = "/private/checkpoint-fresh-resume-host-path-sentinel"
+    question = f"Acme 是否值得跟进 {secret} {host_path}"
     config = checkpoint_config(thread_id, run_id, idempotency_key)
-    config["configurable"]["resume_question"] = "Acme 是否值得跟进"
     config["recursion_limit"] = 64
     resumed_saver = None
     try:
         first_graph = build_trade_graph(_deps(tmp_path, sql, rag), checkpointer=saver, interrupt_before=["answer_draft"])
-        paused = await first_graph.ainvoke({"question": "Acme 是否值得跟进", "idempotency_key": idempotency_key}, config)
+        paused = await first_graph.ainvoke({
+            "question": question,
+            "idempotency_key": idempotency_key,
+        }, config)
         assert paused["node_status"]["sql_node"] == "completed"
         assert paused["node_status"]["rag_node"] == "completed"
         assert sql.calls == rag.calls == 1
@@ -107,17 +130,65 @@ async def test_graph_resumes_without_repeating_completed_retrieval_or_sql(
         assert recovered["node_status"]["sql_node"] == "completed"
         assert recovered["idempotency_key"] == idempotency_key
         await RedisCheckpointFactory.close(saver)
+        del config
 
         resumed_saver = await RedisCheckpointFactory.create(
             RedisSettings(host=_redis_host(), port=_redis_port()), ttl_seconds=60, namespace=namespace
         )
+        fresh_config = checkpoint_config(thread_id, run_id, idempotency_key)
         resumed_graph = build_trade_graph(_deps(tmp_path, sql, rag), checkpointer=resumed_saver)
-        result = await resumed_graph.ainvoke(None, config)
+        result = await resumed_graph.ainvoke(None, fresh_config)
+        assert result["terminal"] is True
         assert sql.calls == rag.calls == 1
+        payload = await RedisCheckpointFactory.dump_thread(redis_client, thread_id, namespace=namespace)
+        for raw_value in (question, secret, host_path, raw_evidence):
+            assert raw_value not in payload
+        channel_values = [
+            document["checkpoint"]["channel_values"]
+            for document in json.loads(payload)
+            if isinstance(document, dict)
+            and isinstance(document.get("checkpoint"), dict)
+            and isinstance(document["checkpoint"].get("channel_values"), dict)
+        ]
+        assert channel_values
+        assert all("question" not in values and "current_question" not in values for values in channel_values)
+        assert all("question" not in values.get("intent", {}) for values in channel_values)
+        assert "payload_sha256" in payload
+        assert idempotency_key in payload
+        assert thread_id in payload and run_id in payload
     finally:
         cleanup_saver = resumed_saver or saver
         await cleanup_saver.adelete_thread(thread_id)
         await RedisCheckpointFactory.close(cleanup_saver)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_mismatched_idempotency_key_fails_before_external_resume_calls(
+    tmp_path: Path, redis_client: Redis
+) -> None:
+    namespace = f"trade-checkpoint-{uuid4().hex}"
+    saver = await RedisCheckpointFactory.create(RedisSettings(host=_redis_host(), port=_redis_port()), namespace=namespace)
+    sql = RecordingBranch((_sql(start=date(2025, 9, 4), scope="lead"),))
+    rag = RecordingBranch((_rag(suffix="mismatch"), _rag(suffix="mismatch-2", source_type="industry_news")))
+    generator = CountingGenerator()
+    thread_id, run_id, key = uuid4().hex, uuid4().hex, uuid4().hex
+    config = checkpoint_config(thread_id, run_id, key)
+    config["recursion_limit"] = 64
+    try:
+        first = build_trade_graph(_deps(tmp_path, sql, rag, generator), checkpointer=saver, interrupt_before=["answer_draft"])
+        await first.ainvoke({"question": "Acme 是否值得跟进", "idempotency_key": key}, config)
+        assert sql.calls == rag.calls == 1 and generator.calls == 0
+        bad = checkpoint_config(thread_id, run_id, uuid4().hex)
+        bad["recursion_limit"] = 64
+        resumed = build_trade_graph(_deps(tmp_path, sql, rag, generator), checkpointer=saver)
+        with pytest.raises(CheckpointUnavailableError, match="checkpoint_unavailable"):
+            await resumed.ainvoke(None, bad)
+        assert sql.calls == rag.calls == 1
+        assert generator.calls == 0
+    finally:
+        await saver.adelete_thread(thread_id)
+        await RedisCheckpointFactory.close(saver)
 
 
 @pytest.mark.integration

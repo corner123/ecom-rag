@@ -24,6 +24,7 @@ from trade_agent.agents.state import (
     DraftRef,
     EvidenceRef,
     GuardProjection,
+    RequestRef,
     RoutePlan,
     TradeIntelState,
 )
@@ -77,6 +78,10 @@ class EvidenceRepository(Protocol):
     def put_draft(self, draft: DraftAnswer) -> DraftRef: ...
 
     def get_draft(self, ref: DraftRef) -> DraftAnswer: ...
+
+    def put_request(self, question: str) -> RequestRef: ...
+
+    def get_request(self, ref: RequestRef) -> str: ...
 
 
 @runtime_checkable
@@ -344,6 +349,36 @@ class FileEvidenceRepository:
                 "referenced draft payload failed contract validation"
             ) from error
 
+    def put_request(self, question: str) -> RequestRef:
+        if not isinstance(question, str) or not question.strip():
+            raise EvidenceRepositoryError("request must be nonblank")
+        payload = question.encode("utf-8")
+        digest = sha256(payload).hexdigest()
+        ref = RequestRef(request_id=f"request_{digest}", payload_sha256=digest)
+        target = self.root / f"{ref.request_id}.txt"
+        if target.exists():
+            if target.read_bytes() != payload:
+                raise EvidenceRepositoryError("stored request identity has a different payload")
+        else:
+            self._atomic_replace(target, payload)
+        return ref
+
+    def get_request(self, ref: RequestRef) -> str:
+        checked = RequestRef.model_validate(ref.model_dump(mode="python"))
+        try:
+            payload = (self.root / f"{checked.request_id}.txt").read_bytes()
+        except OSError as error:
+            raise EvidenceRepositoryError("referenced request payload is unavailable") from error
+        if sha256(payload).hexdigest() != checked.payload_sha256:
+            raise EvidenceRepositoryError("referenced request payload failed hash verification")
+        try:
+            question = payload.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise EvidenceRepositoryError("referenced request payload is invalid") from error
+        if not question.strip():
+            raise EvidenceRepositoryError("referenced request payload is blank")
+        return question
+
 
 @dataclass(frozen=True)
 class NodeDependencies:
@@ -446,10 +481,14 @@ def _remaining_seconds(deadline: float) -> float:
     return remaining
 
 
-def _intent(state: TradeIntelState, resume_question: str | None = None) -> QueryIntent:
+def _intent(state: TradeIntelState, repository: EvidenceRepository, resume_question: str | None = None) -> QueryIntent:
     payload = dict(state["intent"])
     if "question" not in payload:
         question = resume_question if resume_question is not None else state.get("question")
+        if question is None and state.get("request_ref") is not None:
+            question = repository.get_request(
+                _from_json_state(RequestRef, state["request_ref"])
+            )
         if not isinstance(question, str) or not question.strip():
             raise ValueError("resume requires the original question")
         payload["question"] = question
@@ -505,6 +544,15 @@ def policy_gate_node(deps: NodeDependencies):
                 "errors": [_error("policy_denied", "policy_gate", retryable=False, detail="request did not pass local policy")],
                 "node_status": {"policy_gate": "failed"},
             }
+        try:
+            request_ref = deps.evidence_repository.put_request(question)
+        except EvidenceRepositoryError:
+            return {
+                "step_count": 1, "terminal": True, "answer": None, "claims": [],
+                "refusal_reason": "evidence_repository_error",
+                "errors": [_error("evidence_repository_error", "policy_gate", retryable=False, detail="request persistence failed")],
+                "node_status": {"policy_gate": "failed"},
+            }
         return {
             "step_count": 1,
             "current_question": question,
@@ -515,6 +563,7 @@ def policy_gate_node(deps: NodeDependencies):
             "rewrite_count": 0,
             "retry_count": 0,
             "llm_calls": 0,
+            "request_ref": request_ref.model_dump(mode="json"),
             "node_status": {"policy_gate": "completed"},
         }
 
@@ -592,7 +641,7 @@ def _branch_node(deps: NodeDependencies, branch_name: str):
         limited = _begin(state, f"{branch_name}_node", deps)
         if limited:
             return limited
-        intent = _intent(state)
+        intent = _intent(state, deps.evidence_repository)
         if branch_name == "sql":
             entity_ids = tuple(sorted(set((*intent.filters.entity_ids, *intent.retrieval_filter.entity_ids))))
             bindings = deps.entity_bindings
@@ -1086,7 +1135,7 @@ def evidence_validator_node(deps: NodeDependencies):
             conflicts = tuple(_from_json_state(Conflict, item) for item in state.get("conflicts", []))
             outcome = deps.external_call_runner.call(
                 lambda: deps.evidence_validator.validate(
-                    _intent(state), evidence, conflicts, deps.as_of, context=context
+                    _intent(state, deps.evidence_repository), evidence, conflicts, deps.as_of, context=context
                 ),
                 deps.budgets.node_timeout_seconds,
             )
@@ -1272,7 +1321,7 @@ def query_rewrite_node(deps: NodeDependencies):
                 "errors": [_error("internal_error", "query_rewrite", retryable=False, detail=type(error).__name__)],
                 "node_status": {"query_rewrite": "failed"},
             }
-        original_scope = _intent(state).model_dump(mode="json", exclude={"question"})
+        original_scope = _intent(state, deps.evidence_repository).model_dump(mode="json", exclude={"question"})
         rewritten_scope = rewritten_intent.model_dump(mode="json", exclude={"question"})
         if rewritten_scope != original_scope:
             return {
@@ -1354,7 +1403,7 @@ def answer_draft_node(deps: NodeDependencies):
             evidence = deps.evidence_repository.get_many(_refs(state.get("evidence_refs", [])))
             validation = _from_json_state(ValidationOutcome, state["validation"])
             draft = deps.external_call_runner.call(
-                lambda: deps.answer_generator.generate(_intent(state, config.get("configurable", {}).get("resume_question")), evidence, validation),
+                lambda: deps.answer_generator.generate(_intent(state, deps.evidence_repository, config.get("configurable", {}).get("resume_question")), evidence, validation),
                 deps.budgets.node_timeout_seconds,
             )
             if type(draft) is not DraftAnswer:
@@ -1416,7 +1465,7 @@ def claim_guard_node(deps: NodeDependencies):
                 lambda: deps.claim_guard.guard(
                     draft,
                     evidence,
-                    _intent(state, config.get("configurable", {}).get("resume_question")),
+                    _intent(state, deps.evidence_repository, config.get("configurable", {}).get("resume_question")),
                     _from_json_state(ValidationOutcome, state["validation"]),
                 ),
                 deps.budgets.node_timeout_seconds,

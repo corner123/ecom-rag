@@ -23,7 +23,7 @@ class CheckpointUnavailableError(GraphWorkflowError):
 
 
 _SAFE_STATE_FIELDS = frozenset({
-    "idempotency_key", "intent", "route_plan", "sql_evidence_refs",
+    "idempotency_key", "request_ref", "intent", "route_plan", "sql_evidence_refs",
     "rag_evidence_refs", "evidence_refs", "sql_report", "rag_report",
     "branch_reports", "validation", "draft_ref", "refusal_reason",
     "rewrite_count", "retry_count", "llm_calls", "step_count", "errors",
@@ -53,6 +53,9 @@ def _safe_errors(value: object) -> list[dict[str, object]]:
 def _checkpoint_safe(values: Mapping[str, object]) -> dict[str, object]:
     """Project only reviewed durable fields; never redact a blacklist in place."""
     safe = {key: values[key] for key in _SAFE_STATE_FIELDS & values.keys()}
+    safe.update(
+        {key: value for key, value in values.items() if key.startswith("branch:")}
+    )
     if "intent" in safe:
         safe["intent"] = _safe_intent(safe["intent"])
     if "errors" in safe:
@@ -150,7 +153,15 @@ class _MinimalAsyncRedisSaver(AsyncRedisSaver):
 
     async def aget_tuple(self, config):
         try:
-            return await super().aget_tuple(_scoped_config(config, config.get("configurable", {}).get("run_id")))
+            checkpoint = await super().aget_tuple(
+                _scoped_config(config, config.get("configurable", {}).get("run_id"))
+            )
+            if checkpoint is not None:
+                expected = config.get("configurable", {}).get("idempotency_key")
+                actual = checkpoint.checkpoint.get("channel_values", {}).get("idempotency_key")
+                if not isinstance(expected, str) or actual != expected:
+                    raise CheckpointUnavailableError()
+            return checkpoint
         except (OSError, RedisError, TimeoutError):
             raise CheckpointUnavailableError() from None
 

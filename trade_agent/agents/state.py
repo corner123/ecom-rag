@@ -57,6 +57,15 @@ class DraftRef(BaseModel):
         return self
 
 
+class RequestRef(BaseModel):
+    """Content-addressed request pointer stored outside Redis checkpoints."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    request_id: StrictStr = Field(pattern=r"^request_[0-9a-f]{64}$")
+    payload_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class GuardProjection(BaseModel):
     """Checkpoint-safe result of guarding; untrusted answer text is omitted."""
 
@@ -143,6 +152,7 @@ class TradeIntelState(TypedDict, total=False):
     current_question: str
     explicit_filters: dict[str, object]
     intent: dict[str, object]
+    request_ref: dict[str, object]
     route_plan: dict[str, object]
     sql_evidence_refs: list[dict[str, object]]
     rag_evidence_refs: list[dict[str, object]]
