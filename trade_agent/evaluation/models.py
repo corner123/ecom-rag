@@ -17,8 +17,8 @@ _CLAIM_ID_PATTERN = r"^claim_[0-9a-f]{64}$"
 
 Identifier = Annotated[StrictStr, Field(min_length=1, max_length=128, pattern=_ID_PATTERN)]
 Hash = Annotated[StrictStr, Field(min_length=64, max_length=64, pattern=_SHA256_PATTERN)]
-Question = Annotated[StrictStr, Field(min_length=1, max_length=2_000)]
-LabelText = Annotated[StrictStr, Field(min_length=1, max_length=4_000)]
+Question = Annotated[StrictStr, Field(min_length=1, max_length=2_000, pattern=r"\S")]
+LabelText = Annotated[StrictStr, Field(min_length=1, max_length=4_000, pattern=r"\S")]
 EvidenceId = Annotated[StrictStr, Field(min_length=68, max_length=68, pattern=_EVIDENCE_ID_PATTERN)]
 ClaimId = Annotated[StrictStr, Field(min_length=70, max_length=70, pattern=_CLAIM_ID_PATTERN)]
 
@@ -68,24 +68,6 @@ def _unique(values: tuple[str, ...], field: str) -> tuple[str, ...]:
     return values
 
 
-def _sorted_unique(values: tuple[str, ...], field: str) -> tuple[str, ...]:
-    _unique(values, field)
-    if values != tuple(sorted(values)):
-        raise ValueError(f"{field} must be sorted")
-    return values
-
-
-def _validate_degradation(
-    backend_statuses: Mapping[str, BackendStatus], degraded_components: tuple[str, ...]
-) -> None:
-    _sorted_unique(degraded_components, "degraded_components")
-    unknown = set(degraded_components).difference(backend_statuses)
-    if unknown:
-        raise ValueError("degraded components must have a backend status")
-    if any(backend_statuses[name] not in {"degraded", "unavailable", "failed"} for name in degraded_components):
-        raise ValueError("degraded components must have a degraded backend status")
-
-
 class EvaluationCase(_Contract):
     """A product-facing query that only points to private label records by ID."""
 
@@ -99,7 +81,11 @@ class EvaluationCase(_Contract):
                 {
                     "if": {"properties": {"dataset_role": {"const": "holdout"}}},
                     "then": {"properties": {"visibility": {"const": "private"}}},
-                }
+                },
+                {
+                    "if": {"properties": {"answerable": {"const": True}}},
+                    "then": {"properties": {"key_claim_ids": {"minItems": 1}}},
+                },
             ]
         },
     )
@@ -112,7 +98,7 @@ class EvaluationCase(_Contract):
     visibility: Literal["public", "private"]
     as_of_date: date
     reference_evidence_set_id: Identifier
-    key_claim_ids: tuple[ClaimId, ...]
+    key_claim_ids: tuple[ClaimId, ...] = Field(json_schema_extra={"uniqueItems": True})
     business_decision_id: Identifier | None = None
     label_version: Literal["trade-intel-eval/v1"] = "trade-intel-eval/v1"
 
@@ -168,7 +154,7 @@ class ReferenceClaim(_Contract):
 
     claim_id: ClaimId
     reference_evidence_set_id: Identifier
-    evidence_ids: tuple[EvidenceId, ...]
+    evidence_ids: tuple[EvidenceId, ...] = Field(json_schema_extra={"uniqueItems": True})
     claim_text: LabelText
 
     @field_validator("reference_evidence_set_id", "claim_text")
@@ -186,7 +172,7 @@ class BusinessDecision(_Contract):
     """A separate decision label used by business evaluation metrics."""
 
     business_decision_id: Identifier
-    key_claim_ids: tuple[ClaimId, ...]
+    key_claim_ids: tuple[ClaimId, ...] = Field(json_schema_extra={"uniqueItems": True})
     decision_text: LabelText
     decision_type: Literal["recommend", "escalate", "refuse"] = "recommend"
 
@@ -222,38 +208,21 @@ class EvaluationSnapshot(_Contract):
 
 
 class RunManifest(_Contract):
-    """The full reproducibility and degradation record for one evaluation run."""
+    """The reproducibility record for one evaluation run.
+
+    ``snapshot`` is the single source of every frozen input hash. Backend
+    statuses encode both available and degraded components without a second,
+    contradictory component list.
+    """
 
     run_id: Identifier
     snapshot: EvaluationSnapshot
-    dataset_hash: Hash
-    reference_hash: Hash
-    corpus_hash: Hash
-    index_hash: Hash
-    profile_hash: Hash
-    model_hash: Hash
-    prompt_hash: Hash
-    evaluator_hash: Hash
-    code_hash: Hash
     backend_statuses: dict[Identifier, BackendStatus]
-    degraded_components: tuple[Identifier, ...]
 
     @field_validator("run_id")
     @classmethod
     def nonblank_value(cls, value: str) -> str:
         return _nonblank(value)
-
-    @model_validator(mode="after")
-    def matches_snapshot_and_degradation(self) -> Self:
-        for name in (
-            "dataset_hash", "reference_hash", "corpus_hash", "index_hash",
-            "profile_hash", "model_hash", "prompt_hash", "evaluator_hash", "code_hash",
-        ):
-            if getattr(self, name) != getattr(self.snapshot, name):
-                raise ValueError(f"{name} must match the frozen snapshot")
-        _validate_degradation(self.backend_statuses, self.degraded_components)
-        return self
-
 
 class PerQueryResult(_Contract):
     """A label-free trace retaining IDs and statuses needed to recompute metrics."""
@@ -261,10 +230,9 @@ class PerQueryResult(_Contract):
     run_id: Identifier
     case_id: Identifier
     status: Literal["completed", "refused", "failed"]
-    retrieved_evidence_ids: tuple[EvidenceId, ...]
-    produced_claim_ids: tuple[ClaimId, ...]
+    retrieved_evidence_ids: tuple[EvidenceId, ...] = Field(json_schema_extra={"uniqueItems": True})
+    produced_claim_ids: tuple[ClaimId, ...] = Field(json_schema_extra={"uniqueItems": True})
     backend_statuses: dict[Identifier, BackendStatus]
-    degraded_components: tuple[Identifier, ...]
     latency_ms: StrictFloat = Field(ge=0)
 
     @field_validator("run_id", "case_id")
@@ -276,7 +244,6 @@ class PerQueryResult(_Contract):
     def trace_ids_and_degradation_are_consistent(self) -> Self:
         _unique(self.retrieved_evidence_ids, "retrieved_evidence_ids")
         _unique(self.produced_claim_ids, "produced_claim_ids")
-        _validate_degradation(self.backend_statuses, self.degraded_components)
         return self
 
 

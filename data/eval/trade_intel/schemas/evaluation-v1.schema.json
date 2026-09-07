@@ -19,11 +19,13 @@
             "type": "string"
           },
           "title": "Key Claim Ids",
-          "type": "array"
+          "type": "array",
+          "uniqueItems": true
         },
         "decision_text": {
           "maxLength": 4000,
           "minLength": 1,
+          "pattern": "\\S",
           "title": "Decision Text",
           "type": "string"
         },
@@ -64,6 +66,22 @@
               }
             }
           }
+        },
+        {
+          "if": {
+            "properties": {
+              "answerable": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "key_claim_ids": {
+                "minItems": 1
+              }
+            }
+          }
         }
       ],
       "description": "A product-facing query that only points to private label records by ID.",
@@ -78,6 +96,7 @@
         "question": {
           "maxLength": 2000,
           "minLength": 1,
+          "pattern": "\\S",
           "title": "Question",
           "type": "string"
         },
@@ -124,7 +143,8 @@
             "type": "string"
           },
           "title": "Key Claim Ids",
-          "type": "array"
+          "type": "array",
+          "uniqueItems": true
         },
         "business_decision_id": {
           "anyOf": [
@@ -287,7 +307,8 @@
             "type": "string"
           },
           "title": "Retrieved Evidence Ids",
-          "type": "array"
+          "type": "array",
+          "uniqueItems": true
         },
         "produced_claim_ids": {
           "items": {
@@ -297,7 +318,8 @@
             "type": "string"
           },
           "title": "Produced Claim Ids",
-          "type": "array"
+          "type": "array",
+          "uniqueItems": true
         },
         "backend_statuses": {
           "patternProperties": {
@@ -319,16 +341,6 @@
           "title": "Backend Statuses",
           "type": "object"
         },
-        "degraded_components": {
-          "items": {
-            "maxLength": 128,
-            "minLength": 1,
-            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
-            "type": "string"
-          },
-          "title": "Degraded Components",
-          "type": "array"
-        },
         "latency_ms": {
           "minimum": 0,
           "title": "Latency Ms",
@@ -342,7 +354,6 @@
         "retrieved_evidence_ids",
         "produced_claim_ids",
         "backend_statuses",
-        "degraded_components",
         "latency_ms"
       ],
       "title": "PerQueryResult",
@@ -374,11 +385,13 @@
             "type": "string"
           },
           "title": "Evidence Ids",
-          "type": "array"
+          "type": "array",
+          "uniqueItems": true
         },
         "claim_text": {
           "maxLength": 4000,
           "minLength": 1,
+          "pattern": "\\S",
           "title": "Claim Text",
           "type": "string"
         }
@@ -433,7 +446,7 @@
     },
     "RunManifest": {
       "additionalProperties": false,
-      "description": "The full reproducibility and degradation record for one evaluation run.",
+      "description": "The reproducibility record for one evaluation run.\n\n``snapshot`` is the single source of every frozen input hash. Backend\nstatuses encode both available and degraded components without a second,\ncontradictory component list.",
       "properties": {
         "run_id": {
           "maxLength": 128,
@@ -444,69 +457,6 @@
         },
         "snapshot": {
           "$ref": "#/$defs/EvaluationSnapshot"
-        },
-        "dataset_hash": {
-          "maxLength": 64,
-          "minLength": 64,
-          "pattern": "^[0-9a-f]{64}$",
-          "title": "Dataset Hash",
-          "type": "string"
-        },
-        "reference_hash": {
-          "maxLength": 64,
-          "minLength": 64,
-          "pattern": "^[0-9a-f]{64}$",
-          "title": "Reference Hash",
-          "type": "string"
-        },
-        "corpus_hash": {
-          "maxLength": 64,
-          "minLength": 64,
-          "pattern": "^[0-9a-f]{64}$",
-          "title": "Corpus Hash",
-          "type": "string"
-        },
-        "index_hash": {
-          "maxLength": 64,
-          "minLength": 64,
-          "pattern": "^[0-9a-f]{64}$",
-          "title": "Index Hash",
-          "type": "string"
-        },
-        "profile_hash": {
-          "maxLength": 64,
-          "minLength": 64,
-          "pattern": "^[0-9a-f]{64}$",
-          "title": "Profile Hash",
-          "type": "string"
-        },
-        "model_hash": {
-          "maxLength": 64,
-          "minLength": 64,
-          "pattern": "^[0-9a-f]{64}$",
-          "title": "Model Hash",
-          "type": "string"
-        },
-        "prompt_hash": {
-          "maxLength": 64,
-          "minLength": 64,
-          "pattern": "^[0-9a-f]{64}$",
-          "title": "Prompt Hash",
-          "type": "string"
-        },
-        "evaluator_hash": {
-          "maxLength": 64,
-          "minLength": 64,
-          "pattern": "^[0-9a-f]{64}$",
-          "title": "Evaluator Hash",
-          "type": "string"
-        },
-        "code_hash": {
-          "maxLength": 64,
-          "minLength": 64,
-          "pattern": "^[0-9a-f]{64}$",
-          "title": "Code Hash",
-          "type": "string"
         },
         "backend_statuses": {
           "patternProperties": {
@@ -527,32 +477,12 @@
           },
           "title": "Backend Statuses",
           "type": "object"
-        },
-        "degraded_components": {
-          "items": {
-            "maxLength": 128,
-            "minLength": 1,
-            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
-            "type": "string"
-          },
-          "title": "Degraded Components",
-          "type": "array"
         }
       },
       "required": [
         "run_id",
         "snapshot",
-        "dataset_hash",
-        "reference_hash",
-        "corpus_hash",
-        "index_hash",
-        "profile_hash",
-        "model_hash",
-        "prompt_hash",
-        "evaluator_hash",
-        "code_hash",
-        "backend_statuses",
-        "degraded_components"
+        "backend_statuses"
       ],
       "title": "RunManifest",
       "type": "object"
