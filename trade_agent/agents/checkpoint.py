@@ -13,6 +13,7 @@ from trade_agent.agents.intent import QueryIntent
 from trade_agent.agents.state import TradeIntelState
 from trade_agent.config.settings import RedisSettings
 from trade_agent.errors import GraphWorkflowError
+from trade_agent.retrieval.filters import RetrievalFilter
 
 
 class CheckpointUnavailableError(GraphWorkflowError):
@@ -23,7 +24,7 @@ class CheckpointUnavailableError(GraphWorkflowError):
 
 
 _SAFE_STATE_FIELDS = frozenset({
-    "idempotency_key", "request_ref", "intent", "route_plan", "sql_evidence_refs",
+    "idempotency_key", "request_ref", "original_request_ref", "rewrite_filters", "intent", "route_plan", "sql_evidence_refs",
     "rag_evidence_refs", "evidence_refs", "sql_report", "rag_report",
     "branch_reports", "validation", "draft_ref", "refusal_reason",
     "rewrite_count", "retry_count", "llm_calls", "step_count", "errors",
@@ -50,6 +51,16 @@ def _safe_errors(value: object) -> list[dict[str, object]]:
     ]
 
 
+def _safe_rewrite_filters(value: object) -> dict[str, object]:
+    if not isinstance(value, Mapping):
+        return {}
+    try:
+        checked = RetrievalFilter.model_validate(value)
+    except (TypeError, ValueError):
+        return {}
+    return checked.model_dump(mode="json")
+
+
 def _checkpoint_safe(values: Mapping[str, object]) -> dict[str, object]:
     """Project only reviewed durable fields; never redact a blacklist in place."""
     safe = {key: values[key] for key in _SAFE_STATE_FIELDS & values.keys()}
@@ -60,6 +71,8 @@ def _checkpoint_safe(values: Mapping[str, object]) -> dict[str, object]:
         safe["intent"] = _safe_intent(safe["intent"])
     if "errors" in safe:
         safe["errors"] = _safe_errors(safe["errors"])
+    if "rewrite_filters" in safe:
+        safe["rewrite_filters"] = _safe_rewrite_filters(safe["rewrite_filters"])
     return safe
 
 

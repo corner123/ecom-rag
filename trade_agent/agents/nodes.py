@@ -495,6 +495,22 @@ def _intent(state: TradeIntelState, repository: EvidenceRepository, resume_quest
     return _from_json_state(QueryIntent, payload)
 
 
+def _current_question(state: TradeIntelState, repository: EvidenceRepository) -> str:
+    for key in ("current_question", "question"):
+        value = state.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return repository.get_request(_from_json_state(RequestRef, state["request_ref"]))
+
+
+def _original_intent(state: TradeIntelState, repository: EvidenceRepository) -> QueryIntent:
+    payload = dict(state["intent"])
+    payload["question"] = repository.get_request(
+        _from_json_state(RequestRef, state.get("original_request_ref", state["request_ref"]))
+    )
+    return _from_json_state(QueryIntent, payload)
+
+
 def _refs(values: Sequence[dict[str, object]]) -> tuple[EvidenceRef, ...]:
     return tuple(_from_json_state(EvidenceRef, item) for item in values)
 
@@ -564,6 +580,7 @@ def policy_gate_node(deps: NodeDependencies):
             "retry_count": 0,
             "llm_calls": 0,
             "request_ref": request_ref.model_dump(mode="json"),
+            "original_request_ref": request_ref.model_dump(mode="json"),
             "node_status": {"policy_gate": "completed"},
         }
 
@@ -576,10 +593,10 @@ def router_node(deps: NodeDependencies):
         if limited:
             return limited
         try:
-            raw_filters = state.get("explicit_filters")
+            raw_filters = state.get("rewrite_filters", state.get("explicit_filters"))
             filters = _from_json_state(RetrievalFilter, raw_filters) if raw_filters else None
             intent = deps.external_call_runner.call(
-                lambda: deps.intent_parser.parse(state["current_question"], filters),
+                lambda: deps.intent_parser.parse(_current_question(state, deps.evidence_repository), filters),
                 deps.budgets.node_timeout_seconds,
             )
             if type(intent) is not QueryIntent:
@@ -598,6 +615,7 @@ def router_node(deps: NodeDependencies):
             return {
                 "step_count": _next_step(state),
                 "intent": intent.model_dump(mode="json"),
+                "rewrite_filters": intent.retrieval_filter.model_dump(mode="json"),
                 "route_plan": plan.model_dump(mode="json"),
                 "node_status": {"router": "completed"},
             }
@@ -1201,7 +1219,7 @@ def query_rewrite_node(deps: NodeDependencies):
             }
         deadline = monotonic() + deps.budgets.node_timeout_seconds
         if deps.query_rewriter is None:
-            rewritten = f"{state['question']} [rewrite-{count + 1}]"
+            rewritten = f"{_current_question(state, deps.evidence_repository)} [rewrite-{count + 1}]"
             llm_calls = state.get("llm_calls", 0)
         else:
             llm_calls = state.get("llm_calls", 0)
@@ -1227,7 +1245,7 @@ def query_rewrite_node(deps: NodeDependencies):
             try:
                 rewritten = deps.external_call_runner.call(
                     lambda: deps.query_rewriter(
-                        state["current_question"],
+                        _current_question(state, deps.evidence_repository),
                         count + 1,
                         max_output_tokens=deps.budgets.max_generation_tokens,
                     ),
@@ -1283,7 +1301,7 @@ def query_rewrite_node(deps: NodeDependencies):
                     "errors": [_error("policy_denied", "query_rewrite", retryable=False, detail="rewritten request did not pass local policy")],
                     "node_status": {"query_rewrite": "failed"},
                 }
-            raw_filters = state.get("explicit_filters")
+            raw_filters = state.get("rewrite_filters", state.get("explicit_filters"))
             filters = _from_json_state(RetrievalFilter, raw_filters) if raw_filters else None
             rewritten_intent = deps.external_call_runner.call(
                 lambda: deps.intent_parser.parse(rewritten, filters),
@@ -1321,7 +1339,7 @@ def query_rewrite_node(deps: NodeDependencies):
                 "errors": [_error("internal_error", "query_rewrite", retryable=False, detail=type(error).__name__)],
                 "node_status": {"query_rewrite": "failed"},
             }
-        original_scope = _intent(state, deps.evidence_repository).model_dump(mode="json", exclude={"question"})
+        original_scope = _original_intent(state, deps.evidence_repository).model_dump(mode="json", exclude={"question"})
         rewritten_scope = rewritten_intent.model_dump(mode="json", exclude={"question"})
         if rewritten_scope != original_scope:
             return {
@@ -1333,9 +1351,19 @@ def query_rewrite_node(deps: NodeDependencies):
                 "errors": [_error("rewrite_scope_changed", "query_rewrite", retryable=False, detail="rewrite changed or removed reviewed request scope")],
                 "node_status": {"query_rewrite": "failed"},
             }
+        try:
+            request_ref = deps.evidence_repository.put_request(rewritten)
+        except EvidenceRepositoryError:
+            return {
+                "step_count": _next_step(state), "terminal": True, "answer": None,
+                "refusal_reason": "evidence_repository_error",
+                "errors": [_error("evidence_repository_error", "query_rewrite", retryable=False, detail="request persistence failed")],
+                "node_status": {"query_rewrite": "failed"},
+            }
         return {
             "step_count": _next_step(state),
             "current_question": rewritten,
+            "request_ref": request_ref.model_dump(mode="json"),
             "rewrite_count": count + 1,
             "retry_count": state.get("retry_count", 0) + 1,
             "llm_calls": llm_calls,

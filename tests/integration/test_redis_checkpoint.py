@@ -24,6 +24,7 @@ from trade_agent.agents.intent import IntentParser, QueryIntent
 from trade_agent.agents.nodes import FileEvidenceRepository, GraphBudgets
 from trade_agent.generation.deterministic import DeterministicAnswerGenerator
 from trade_agent.config.settings import RedisSettings
+from trade_agent.retrieval.filters import RetrievalFilter
 from tests.unit.test_evidence_validator import _rag, _sql
 
 
@@ -70,7 +71,13 @@ async def redis_client() -> Redis:
     await client.aclose()
 
 
-def _deps(tmp_path: Path, sql: RecordingBranch, rag: RecordingBranch, answer_generator=None) -> GraphDependencies:
+def _deps(
+    tmp_path: Path,
+    sql: RecordingBranch,
+    rag: RecordingBranch,
+    answer_generator=None,
+    query_rewriter=None,
+) -> GraphDependencies:
     return GraphDependencies(
         intent_parser=IntentParser(as_of=AS_OF),
         sql_branch=sql,
@@ -80,6 +87,7 @@ def _deps(tmp_path: Path, sql: RecordingBranch, rag: RecordingBranch, answer_gen
         budgets=GraphBudgets(node_timeout_seconds=0.2),
         as_of=AS_OF,
         answer_generator=answer_generator,
+        query_rewriter=query_rewriter,
     )
 
 
@@ -189,6 +197,89 @@ async def test_mismatched_idempotency_key_fails_before_external_resume_calls(
     finally:
         await saver.adelete_thread(thread_id)
         await RedisCheckpointFactory.close(saver)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_graph_fresh_resume_at_query_rewrite_uses_durable_request_and_filters(
+    tmp_path: Path, redis_client: Redis
+) -> None:
+    namespace = f"trade-checkpoint-{uuid4().hex}"
+    saver = await RedisCheckpointFactory.create(
+        RedisSettings(host=_redis_host(), port=_redis_port()), ttl_seconds=60, namespace=namespace
+    )
+    raw_evidence = "checkpoint-rewrite-evidence-sentinel"
+    secret = "checkpoint-rewrite-secret-sentinel"
+    host_path = "/private/checkpoint-rewrite-host-path-sentinel"
+    question = f"Acme 官网最近状态 {secret} {host_path}"
+    sql = RecordingBranch((_sql(start=date(2025, 9, 4), scope="lead"),))
+    rag = RecordingBranch((
+        _rag(
+            suffix="rewrite",
+            content=f"Acme status: active and operational. {raw_evidence}",
+            degradation=("retrieval_timeout",),
+        ),
+    ))
+    thread_id, run_id, idempotency_key = uuid4().hex, uuid4().hex, uuid4().hex
+    config = checkpoint_config(thread_id, run_id, idempotency_key)
+    config["recursion_limit"] = 64
+    resumed_saver = None
+    try:
+        first_graph = build_trade_graph(
+            _deps(tmp_path, sql, rag), checkpointer=saver, interrupt_before=["query_rewrite"]
+        )
+        paused = await first_graph.ainvoke(
+            {
+                "question": question,
+                "explicit_filters": RetrievalFilter(entity_ids=("company:acme",)).model_dump(mode="json"),
+                "idempotency_key": idempotency_key,
+            },
+            config,
+        )
+        assert paused["node_status"]["evidence_validator"] == "completed"
+        assert paused["validation"]["decision"] == "rewrite_once"
+        assert "query_rewrite" not in paused["node_status"]
+        assert sql.calls == 0
+        assert rag.calls == 1
+        await RedisCheckpointFactory.close(saver)
+        del config
+
+        resumed_saver = await RedisCheckpointFactory.create(
+            RedisSettings(host=_redis_host(), port=_redis_port()), ttl_seconds=60, namespace=namespace
+        )
+        fresh_config = checkpoint_config(thread_id, run_id, idempotency_key)
+        resumed_graph = build_trade_graph(
+            _deps(
+                tmp_path,
+                sql,
+                rag,
+                query_rewriter=lambda _question, _count, *, max_output_tokens: "最近半年中国 HS999999 贸易金额",
+            ),
+            checkpointer=resumed_saver,
+        )
+        result = await resumed_graph.ainvoke(None, fresh_config)
+        assert result["terminal"] is True
+        assert result["errors"][-1]["code"] == "rewrite_scope_changed"
+        assert sql.calls == 0
+        assert rag.calls == 1
+        payload = await RedisCheckpointFactory.dump_thread(redis_client, thread_id, namespace=namespace)
+        for raw_value in (question, secret, host_path, raw_evidence):
+            assert raw_value not in payload
+        channel_values = [
+            document["checkpoint"]["channel_values"]
+            for document in json.loads(payload)
+            if isinstance(document, dict)
+            and isinstance(document.get("checkpoint"), dict)
+            and isinstance(document["checkpoint"].get("channel_values"), dict)
+        ]
+        assert channel_values
+        assert all("question" not in values and "current_question" not in values for values in channel_values)
+        assert all("question" not in values.get("intent", {}) for values in channel_values)
+        assert any(values.get("rewrite_filters", {}).get("entity_ids") == ["company:acme"] for values in channel_values)
+    finally:
+        cleanup_saver = resumed_saver or saver
+        await cleanup_saver.adelete_thread(thread_id)
+        await RedisCheckpointFactory.close(cleanup_saver)
 
 
 @pytest.mark.integration
