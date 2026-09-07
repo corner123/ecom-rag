@@ -12,7 +12,7 @@ _DEPENDENCIES = {"mysql": 3306, "milvus": 19530, "redis": 6379}
 def readiness_payload(probe: Callable[[str, int], bool]) -> dict[str, object]:
     """Legacy pure helper retained for callers; product readiness uses contracts."""
     dependencies = {
-        name: probe(os.getenv(f"{name.upper()}__HOST", name), port)
+        name: probe(name, port)
         for name, port in _DEPENDENCIES.items()
     }
     return {"api": True, "dependencies": dependencies, "ready": all(dependencies.values())}
