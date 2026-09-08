@@ -23,6 +23,9 @@ data/eval/reports/
 # Private response-evaluation holdouts stay local until the immutable first
 # run has been completed and explicitly approved for publication.
 data/eval/private/
+# Local generator seeds and private execution output must never be published.
+data/eval/trade_intel/*.seed
+data/eval/trade_intel/runs/
 *.db
 *.sqlite
 *.sqlite3
