@@ -118,7 +118,7 @@ def _match_values(bundle: EvaluationBundle, key: str) -> set[str]:
 
 
 def _contents(bundle: EvaluationBundle) -> set[str]:
-    return _bundle_values(bundle, "near_contents") or _match_values(bundle, "near_content")
+    return _match_values(bundle, "near_content") or _bundle_values(bundle, "near_contents")
 
 
 def _approved_contents(bundle: EvaluationBundle) -> set[str]:

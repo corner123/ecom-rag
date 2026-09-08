@@ -107,6 +107,31 @@ def test_generated_partitions_use_distinct_actual_template_forms(tmp_path) -> No
     assert dev_forms.isdisjoint(holdout_forms)
 
 
+def test_fresh_and_round_tripped_generated_bundles_have_identical_leakage_reports(tmp_path) -> None:
+    import json
+    from pathlib import Path
+    from trade_agent.evaluation.generator import (
+        generate_development,
+        generate_private_holdout,
+        read_bundle,
+        write_bundle,
+    )
+    from trade_agent.evaluation.leakage import LeakageAuditor
+
+    manifest = json.loads((Path(__file__).resolve().parents[2] / "demo/trade_intel_seed/manifests/corpus_manifest.json").read_text())
+    development = generate_development(manifest)
+    holdout = generate_private_holdout(manifest, 91, tmp_path / "holdout")
+    write_bundle(development, tmp_path / "development", case_filename="dev_public.jsonl", reference_filename="references_dev.jsonl")
+    reloaded_development = read_bundle(tmp_path / "development/dev_public.jsonl", tmp_path / "development/references_dev.jsonl")
+    reloaded_holdout = read_bundle(tmp_path / "holdout/holdout_private.jsonl", tmp_path / "holdout/references_private.jsonl")
+
+    fresh = LeakageAuditor().audit(development, holdout, corpus=())
+    round_tripped = LeakageAuditor().audit(reloaded_development, reloaded_holdout, corpus=())
+
+    assert fresh == round_tripped
+    assert fresh.passed is True
+
+
 def test_validator_passes_indexable_source_content_to_contamination_gate(monkeypatch, tmp_path) -> None:
     from trade_agent.evaluation.generator import EvaluationBundle
     from trade_agent.evaluation.models import ReferenceClaim

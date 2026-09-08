@@ -201,7 +201,7 @@ def _build_bundle(manifest: Mapping[str, Any], role: str, seed: int) -> Evaluati
             "entity_event_template": tuple(sorted((fact.entity, fact.event) for fact in used)),
             "chunk_hashes": tuple(fact.chunk_hash for fact in used),
             "near_chunk_hashes": tuple(content_sha256(f"near-chunk/v1:{fact.chunk_hash}") for fact in used),
-            "near_contents": tuple(fact.claim_text for fact in used),
+            "near_contents": tuple(str(fact.payload.get("body", fact.claim_text)) for fact in used),
             "template_families": (f"{task_type.value}:{'restricted-review-form' if role == 'holdout' else 'direct-query-form'}",),
             "canonical_urls": tuple(fact.canonical_url for fact in used),
             "source_revisions": tuple(fact.source_revision for fact in used),
