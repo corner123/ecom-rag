@@ -29,3 +29,10 @@ Base commit: `31427effc7a7e10e6a2bb49a85263dc11f7374a0`
 - RED: after adding the real `jsonschema` Draft 2020-12 validator and paired fixtures, `.venv/bin/python -m pytest tests/unit/test_evaluation_models.py -q` showed Pydantic rejected duplicate case claim IDs while the JSON Schema accepted them. The desired simplified manifest/result fixtures also failed until redundant fields were removed.
 - GREEN: emitted schemas now use `uniqueItems` for every Pydantic-unique ID array, `if`/`then` conditions for holdout privacy and answerable nonempty claims, and a shared non-whitespace pattern for question/label text. The paired fixture test validates both Pydantic and Draft 2020-12 against valid and invalid cases.
 - Verification: controller reran `.venv/bin/python -m pytest tests/unit/test_evaluation_models.py -q` (`8 passed`), `.venv/bin/python -m compileall -q trade_agent/evaluation`, `uv lock --check`, and `git diff --check 87233d0..HEAD`; all passed.
+
+## Fix round 2 — backend status key parity
+
+- Root cause: Pydantic constrains `backend_statuses` map keys to `Identifier`, but its generated `patternProperties` schema alone left nonmatching keys unconstrained. A Draft 2020-12 validator therefore accepted `" invalid"` as a backend name.
+- RED: added paired invalid-key fixtures for `RunManifest` and `PerQueryResult`. `.venv/bin/python -m pytest tests/unit/test_evaluation_models.py -q` produced the intended failure: Pydantic rejected the key while `Draft202012Validator` accepted it.
+- GREEN: introduced the shared `BackendStatuses` annotation, which emits both `propertyNames` with the identifier pattern and `additionalProperties: false`. Regenerated `evaluation-v1.schema.json`; the paired real-validator test now rejects invalid backend keys for both contracts.
+- Verification: `.venv/bin/python -m pytest tests/unit/test_evaluation_models.py -q` (`8 passed`), `.venv/bin/python -m compileall -q trade_agent/evaluation`, `uv lock --check`, `python -m json.tool data/eval/trade_intel/schemas/evaluation-v1.schema.json`, and `git diff --check` all passed.

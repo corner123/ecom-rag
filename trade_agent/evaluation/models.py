@@ -40,6 +40,15 @@ class TaskType(str, Enum):
 
 
 BackendStatus = Literal["available", "degraded", "unavailable", "not_run", "failed"]
+BackendStatuses = Annotated[
+    dict[Identifier, BackendStatus],
+    Field(
+        json_schema_extra={
+            "additionalProperties": False,
+            "propertyNames": {"pattern": _ID_PATTERN},
+        }
+    ),
+]
 
 
 class _Contract(BaseModel):
@@ -217,7 +226,7 @@ class RunManifest(_Contract):
 
     run_id: Identifier
     snapshot: EvaluationSnapshot
-    backend_statuses: dict[Identifier, BackendStatus]
+    backend_statuses: BackendStatuses
 
     @field_validator("run_id")
     @classmethod
@@ -232,7 +241,7 @@ class PerQueryResult(_Contract):
     status: Literal["completed", "refused", "failed"]
     retrieved_evidence_ids: tuple[EvidenceId, ...] = Field(json_schema_extra={"uniqueItems": True})
     produced_claim_ids: tuple[ClaimId, ...] = Field(json_schema_extra={"uniqueItems": True})
-    backend_statuses: dict[Identifier, BackendStatus]
+    backend_statuses: BackendStatuses
     latency_ms: StrictFloat = Field(ge=0)
 
     @field_validator("run_id", "case_id")

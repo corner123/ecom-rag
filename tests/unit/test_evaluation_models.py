@@ -219,7 +219,10 @@ def test_exported_schema_and_pydantic_accept_and_reject_the_same_contract_fixtur
     _assert_schema_and_model_agree(
         RunManifest,
         manifest,
-        [{**manifest, "dataset_hash": _hash()}],
+        [
+            {**manifest, "dataset_hash": _hash()},
+            {**manifest, "backend_statuses": {" invalid": "available"}},
+        ],
     )
 
     result = PerQueryResult(
@@ -238,5 +241,6 @@ def test_exported_schema_and_pydantic_accept_and_reject_the_same_contract_fixtur
             {**result, "retrieved_evidence_ids": [result["retrieved_evidence_ids"][0]] * 2},
             {**result, "produced_claim_ids": [result["produced_claim_ids"][0]] * 2},
             {**result, "backend_statuses": {"retrieval": "invalid"}},
+            {**result, "backend_statuses": {" invalid": "available"}},
         ],
     )

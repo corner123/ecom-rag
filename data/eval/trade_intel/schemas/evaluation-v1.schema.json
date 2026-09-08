@@ -322,6 +322,7 @@
           "uniqueItems": true
         },
         "backend_statuses": {
+          "additionalProperties": false,
           "patternProperties": {
             "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$": {
               "enum": [
@@ -335,8 +336,7 @@
             }
           },
           "propertyNames": {
-            "maxLength": 128,
-            "minLength": 1
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
           },
           "title": "Backend Statuses",
           "type": "object"
@@ -459,6 +459,7 @@
           "$ref": "#/$defs/EvaluationSnapshot"
         },
         "backend_statuses": {
+          "additionalProperties": false,
           "patternProperties": {
             "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$": {
               "enum": [
@@ -472,8 +473,7 @@
             }
           },
           "propertyNames": {
-            "maxLength": 128,
-            "minLength": 1
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
           },
           "title": "Backend Statuses",
           "type": "object"
