@@ -19,6 +19,7 @@ from trade_agent.evaluation.models import (
     PerQueryResult,
     ReferenceClaim,
     ReferenceEvidence,
+    ReferenceMatch,
     RunManifest,
     evaluation_json_schema,
 )
@@ -96,6 +97,26 @@ def test_reference_and_decision_contracts_bind_only_ids_and_bounded_label_text()
     assert decision.key_claim_ids == (claim.claim_id,)
     with pytest.raises(ValidationError):
         ReferenceClaim.model_validate({**claim.model_dump(mode="json"), "claim_text": "x" * 4_001})
+
+
+def test_reference_match_contract_and_exported_schema_reject_malformed_dimensions() -> None:
+    """Reference matches are reviewed dimensions, never fabricated runtime evidence IDs."""
+    match = ReferenceMatch.validated_fixture()
+    exported = json.loads(Path("data/eval/trade_intel/schemas/evaluation-v1.schema.json").read_text(encoding="utf-8"))
+    validator = Draft202012Validator(exported, format_checker=FormatChecker())
+
+    validator.validate(match.model_dump(mode="json"))
+    committed = next(
+        json.loads(line) for line in Path("data/eval/trade_intel/references_dev.jsonl").read_text(encoding="utf-8").splitlines()
+        if json.loads(line)["artifact_type"] == "reference_match"
+    )
+    committed.pop("artifact_type")
+    ReferenceMatch.model_validate_json(json.dumps(committed))
+    validator.validate(committed)
+    with pytest.raises(ValidationError):
+        ReferenceMatch.model_validate({**match.model_dump(mode="json"), "runtime_evidence_id": "rag_" + "1" * 64})
+    with pytest.raises(JsonSchemaValidationError):
+        validator.validate({**match.model_dump(mode="json"), "runtime_evidence_id": "rag_" + "1" * 64})
 
 
 def test_snapshot_and_manifest_capture_every_frozen_input_and_backend_status() -> None:

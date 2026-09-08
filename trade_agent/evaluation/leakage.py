@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from difflib import SequenceMatcher
 import re
 from typing import Any, Iterable, Mapping
 from urllib.parse import urlsplit, urlunsplit
@@ -15,6 +14,14 @@ from trade_agent.schemas.source import content_sha256
 _WORD = re.compile(r"[a-z0-9]+")
 _ENTITY = re.compile(r"\b[A-Z][A-Za-z]*(?: [A-Z][A-Za-z]*){1,3} \d{2}\b", re.IGNORECASE)
 _EVENT = re.compile(r"\b(?:\d{6}|\d{4}-\d{2}|\d{4})\b")
+_SYNTHETIC_BOILERPLATE = (
+    "synthetic demonstration only fictional data not for production use",
+    "this fictional report describes a demo only market signal",
+)
+_NEAR_TEMPLATE_WORDS = frozenset({
+    "reported", "report", "total", "trade", "amount", "usd", "for", "hs", "in", "the", "a", "an",
+    "lists", "list", "under", "product", "synthetic", "from", "of", "and", "marketplace",
+})
 
 
 @dataclass(frozen=True)
@@ -55,7 +62,23 @@ def _near(left: str, right: str) -> bool:
 
 def _near_content(left: str, right: str) -> bool:
     """Detect substantive source-text rewrites even when content hashes differ."""
-    return SequenceMatcher(a=_normalise(left), b=_normalise(right), autojunk=False).ratio() >= 0.82
+    left_signal = _signal_tokens(_substantive_content(left))
+    right_signal = _signal_tokens(_substantive_content(right))
+    return bool(left_signal and right_signal) and len(left_signal & right_signal) / len(left_signal | right_signal) >= 0.55
+
+
+def _substantive_content(value: str) -> str:
+    normalized = _normalise(value)
+    for boilerplate in _SYNTHETIC_BOILERPLATE:
+        normalized = normalized.replace(boilerplate, " ")
+    return " ".join(normalized.split())
+
+
+def _signal_tokens(value: str) -> set[str]:
+    return {
+        token for token in _tokens(value)
+        if token not in _NEAR_TEMPLATE_WORDS and not token.isdigit()
+    }
 
 
 def _entities(question: str) -> set[str]:
@@ -121,15 +144,23 @@ class LeakageAuditor:
         dev_content, holdout_content = _contents(dev), _contents(holdout)
         approved_dev, approved_holdout = _approved_contents(dev), _approved_contents(holdout)
         near_pairs = [
-            (left, right) for left in dev_content for right in holdout_content if _near_content(left, right)
+            (left, right) for left in dev_content for right in holdout_content
+            if _near_content(left, right) or (
+                not _substantive_content(left) and not _substantive_content(right) and _near(left, right)
+            )
+        ]
+        approved_pairs = [
+            (left, right) for left, right in near_pairs
+            if left in approved_dev and right in approved_holdout
+            and not _substantive_content(left) and not _substantive_content(right)
         ]
         near_hashes = sorted(
             f"{content_sha256(left)[:16]}:{content_sha256(right)[:16]}"
-            for left, right in near_pairs if not (left in approved_dev and right in approved_holdout)
+            for left, right in near_pairs if (left, right) not in approved_pairs
         )
         approved_near = sorted(
             f"{content_sha256(left)[:16]}:{content_sha256(right)[:16]}"
-            for left, right in near_pairs if left in approved_dev and right in approved_holdout
+            for left, right in approved_pairs
         )
         urls = sorted({_url(value) for value in values(dev, "canonical_urls", "canonical_url")} &
                       {_url(value) for value in values(holdout, "canonical_urls", "canonical_url")})

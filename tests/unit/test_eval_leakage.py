@@ -67,6 +67,46 @@ def test_similar_content_with_distinct_hashes_and_shared_template_are_detected()
     assert report.entity_event_templates
 
 
+def test_approved_synthetic_boilerplate_cannot_approve_copied_substantive_content() -> None:
+    from trade_agent.evaluation.generator import EvaluationBundle, ReferenceMatch
+    from trade_agent.evaluation.leakage import LeakageAuditor
+
+    copied = "SYNTHETIC DEMONSTRATION ONLY — FICTIONAL DATA; NOT FOR PRODUCTION USE. Capacity expanded by 40 percent."
+    development = EvaluationBundle(
+        cases=(_case("development-1", "What is Harbor CN Imports 01 status?", "development"),),
+        matches=(ReferenceMatch.validated_fixture(
+            reference_match_id="reference-match-development-1", reference_evidence_set_id="reference-set-development-1",
+            entity="Harbor CN Imports 01", event="news-1", near_content=copied, approved_synthetic_template=True,
+        ),),
+    )
+    holdout = EvaluationBundle(
+        cases=(_case("holdout-1", "What is River DE Exports 03 status?", "holdout"),),
+        matches=(ReferenceMatch.validated_fixture(
+            reference_match_id="reference-match-holdout-1", reference_evidence_set_id="reference-set-holdout-1",
+            entity="River DE Exports 03", event="news-2", near_content=copied, approved_synthetic_template=True,
+        ),),
+    )
+
+    report = LeakageAuditor().audit(development, holdout, corpus=())
+
+    assert report.passed is False
+    assert report.near_chunk_hashes
+
+
+def test_generated_partitions_use_distinct_actual_template_forms(tmp_path) -> None:
+    import json
+    from pathlib import Path
+    from trade_agent.evaluation.generator import generate_development, generate_private_holdout
+
+    manifest = json.loads((Path(__file__).resolve().parents[2] / "demo/trade_intel_seed/manifests/corpus_manifest.json").read_text())
+    development = generate_development(manifest)
+    holdout = generate_private_holdout(manifest, 91, tmp_path / "holdout")
+    dev_forms = {form for item in development.provenance for form in item["template_families"]}
+    holdout_forms = {form for item in holdout.provenance for form in item["template_families"]}
+
+    assert dev_forms.isdisjoint(holdout_forms)
+
+
 def test_validator_passes_indexable_source_content_to_contamination_gate(monkeypatch, tmp_path) -> None:
     from trade_agent.evaluation.generator import EvaluationBundle
     from trade_agent.evaluation.models import ReferenceClaim

@@ -158,6 +158,58 @@ class ReferenceEvidence(_Contract):
         return _nonblank(value)
 
 
+class ReferenceMatch(_Contract):
+    """Reviewed runtime matching dimensions, deliberately distinct from Evidence IDs."""
+
+    reference_match_id: Identifier
+    reference_evidence_set_id: Identifier
+    branch: Literal["rag", "sql"]
+    entity: LabelText
+    event: LabelText
+    source_type: Identifier
+    path: LabelText
+    chunk_hash: Hash
+    canonical_url: LabelText
+    source_revision: Hash
+    near_content: LabelText
+    approved_synthetic_template: StrictBool = False
+    runtime_evidence_id: None = None
+    sql_dimensions: dict[Identifier, Any] = Field(default_factory=dict)
+
+    @field_validator("reference_match_id", "reference_evidence_set_id", "entity", "event", "source_type", "path", "canonical_url", "near_content")
+    @classmethod
+    def nonblank_values(cls, value: str) -> str:
+        return _nonblank(value)
+
+    @model_validator(mode="after")
+    def reviewed_dimensions_are_coherent(self) -> Self:
+        if self.path.startswith("/") or ".." in self.path.split("/"):
+            raise ValueError("reference match path must be safe and relative")
+        if self.branch == "rag" and self.sql_dimensions:
+            raise ValueError("RAG reference matches cannot carry SQL dimensions")
+        if self.branch == "sql" and not self.sql_dimensions:
+            raise ValueError("SQL reference matches require SQL dimensions")
+        return self
+
+    @classmethod
+    def validated_fixture(cls, **updates: object) -> Self:
+        values: dict[str, object] = {
+            "reference_match_id": "reference-match-development-001",
+            "reference_evidence_set_id": "reference-set-development-001",
+            "branch": "rag",
+            "entity": "Example Exporter",
+            "event": "news-001",
+            "source_type": "industry_news",
+            "path": "news/stories.json#story-NEWS-001",
+            "chunk_hash": "a" * 64,
+            "canonical_url": "https://newsroom.example/story/001",
+            "source_revision": "b" * 64,
+            "near_content": "Example trade signal.",
+        }
+        values.update(updates)
+        return cls.model_validate(values)
+
+
 class ReferenceClaim(_Contract):
     """A labeled claim stored separately from the product-facing evaluation case."""
 
@@ -259,6 +311,7 @@ class PerQueryResult(_Contract):
 EvaluationArtifact = (
     EvaluationCase
     | ReferenceEvidence
+    | ReferenceMatch
     | ReferenceClaim
     | BusinessDecision
     | EvaluationSnapshot

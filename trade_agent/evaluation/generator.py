@@ -10,7 +10,7 @@ from random import Random
 from typing import Any, Iterable, Mapping
 
 from trade_agent.data.manifest import canonical_json
-from trade_agent.evaluation.models import BusinessDecision, EvaluationCase, ReferenceClaim, ReferenceEvidence, TaskType
+from trade_agent.evaluation.models import BusinessDecision, EvaluationCase, ReferenceClaim, ReferenceEvidence, ReferenceMatch, TaskType
 from trade_agent.schemas.source import content_sha256
 
 
@@ -27,7 +27,7 @@ class EvaluationBundle:
     evidence: tuple[ReferenceEvidence, ...] = ()
     claims: tuple[ReferenceClaim, ...] = ()
     decisions: tuple[BusinessDecision, ...] = ()
-    matches: tuple["ReferenceMatch", ...] = ()
+    matches: tuple[ReferenceMatch, ...] = ()
     provenance: tuple[Mapping[str, Any], ...] = field(default_factory=tuple)
 
 
@@ -42,26 +42,6 @@ class _Fact:
     source_revision: str
     claim_text: str
     payload: Mapping[str, Any]
-
-
-@dataclass(frozen=True)
-class ReferenceMatch:
-    """Reviewed runtime matching dimensions; deliberately not a runtime Evidence ID."""
-
-    reference_match_id: str
-    reference_evidence_set_id: str
-    branch: str
-    entity: str
-    event: str
-    source_type: str
-    path: str
-    chunk_hash: str
-    canonical_url: str
-    source_revision: str
-    near_content: str
-    approved_synthetic_template: bool = False
-    runtime_evidence_id: None = None
-    sql_dimensions: Mapping[str, Any] = field(default_factory=dict)
 
 
 def _seed_root() -> Path:
@@ -115,7 +95,7 @@ def _facts(manifest: Mapping[str, Any]) -> tuple[_Fact, ...]:
                 entity = str(payload["entity"])
                 event = f"news:{payload['canonical_story_id']}"
                 digest = content_sha256(canonical_json(payload))
-                text = f"{payload['publisher']} reported: {payload['body']}"
+                text = "The actual reported signal is a fictional demo-only market report."
                 facts.append(_Fact(entity, event, source_type, f"{path}#story-{payload['id']}", digest,
                                    str(payload["url"]), digest, text, payload))
         elif path == "social/posts.jsonl":
@@ -206,7 +186,7 @@ def _build_bundle(manifest: Mapping[str, Any], role: str, seed: int) -> Evaluati
                     reference_evidence_set_id=reference_set_id, branch=branch, entity=fact.entity, event=fact.event,
                     source_type=fact.source_type, path=fact.path, chunk_hash=fact.chunk_hash,
                     canonical_url=fact.canonical_url, source_revision=fact.source_revision,
-                    near_content=fact.claim_text,
+                    near_content=str(fact.payload.get("body", fact.claim_text)),
                     approved_synthetic_template="synthetic_notice" in fact.payload,
                     sql_dimensions=sql_dimensions,
                 ))
@@ -222,29 +202,31 @@ def _build_bundle(manifest: Mapping[str, Any], role: str, seed: int) -> Evaluati
             "chunk_hashes": tuple(fact.chunk_hash for fact in used),
             "near_chunk_hashes": tuple(content_sha256(f"near-chunk/v1:{fact.chunk_hash}") for fact in used),
             "near_contents": tuple(fact.claim_text for fact in used),
-            "template_families": (f"{task_type.value}:{'holdout-v2' if role == 'holdout' else 'development-v1'}",),
+            "template_families": (f"{task_type.value}:{'restricted-review-form' if role == 'holdout' else 'direct-query-form'}",),
             "canonical_urls": tuple(fact.canonical_url for fact in used),
             "source_revisions": tuple(fact.source_revision for fact in used),
         })
 
     wording = "What" if role == "development" else "Identify"
+    def prompt(text: str) -> str:
+        return text if role == "development" else f"For this restricted review, {text[0].lower()}{text[1:]}"
     for fact in profiles[:4]:
-        add(TaskType.EXACT_COMPANY_LOOKUP, f"{wording} company is named in the {fact.payload['calendar_month']} profile for HS {fact.payload['hs_code']}?", (fact,))
+        add(TaskType.EXACT_COMPANY_LOOKUP, prompt(f"{wording} company is named in the {fact.payload['calendar_month']} profile for HS {fact.payload['hs_code']}?"), (fact,))
     for fact in profiles[4:8]:
-        add(TaskType.HS_CODE_LOOKUP, f"{wording} HS code appears in the {fact.payload['calendar_month']} trade profile for {fact.entity}?", (fact,))
+        add(TaskType.HS_CODE_LOOKUP, prompt(f"{wording} HS code appears in the {fact.payload['calendar_month']} trade profile for {fact.entity}?"), (fact,))
     for fact in products[:4]:
-        add(TaskType.SEMANTIC_LEAD_DISCOVERY, f"{wording} supplier offers a marketplace product in HS {fact.payload['hs_code']}?", (fact,))
+        add(TaskType.SEMANTIC_LEAD_DISCOVERY, prompt(f"{wording} supplier offers a marketplace product in HS {fact.payload['hs_code']}?"), (fact,))
     primary_cycle = (primary_news * 2)[:4]
     for fact in primary_cycle:
-        add(TaskType.OPERATING_STATUS, f"{wording} operating signal is reported for {fact.entity} in the trade news corpus?", (fact,))
+        add(TaskType.OPERATING_STATUS, prompt(f"{wording} operating signal is reported for {fact.entity} in the trade news corpus?"), (fact,))
     for index, fact in enumerate(products[:4]):
         peer = products[(index + 1) % len(products)]
-        add(TaskType.PRODUCT_COMPETITOR, f"Compare the listed products of {fact.entity} and {peer.entity}.", (fact, peer))
+        add(TaskType.PRODUCT_COMPETITOR, prompt(f"Compare the listed products of {fact.entity} and {peer.entity}."), (fact, peer))
     for fact in profiles[8:12]:
-        add(TaskType.SQL_AGGREGATE, f"{wording} total trade amount USD is recorded for {fact.entity} in {fact.payload['calendar_month']}?", (fact,))
+        add(TaskType.SQL_AGGREGATE, prompt(f"{wording} total trade amount USD is recorded for {fact.entity} in {fact.payload['calendar_month']}?"), (fact,))
     for index, fact in enumerate(profiles[12:16]):
         product = products[index % len(products)]
-        add(TaskType.MIXED_SOURCE, f"Relate {fact.entity}'s profile to the marketplace listing from {product.entity}.", (fact, product))
+        add(TaskType.MIXED_SOURCE, prompt(f"Relate {fact.entity}'s profile to the marketplace listing from {product.entity}."), (fact, product))
     pairs: list[tuple[_Fact, _Fact]] = []
     by_company_hs: dict[tuple[str, str], list[_Fact]] = {}
     for fact in profiles:
@@ -254,21 +236,21 @@ def _build_bundle(manifest: Mapping[str, Any], role: str, seed: int) -> Evaluati
         if len(years) > 1:
             pairs.append(tuple(sorted(group, key=lambda item: str(item.payload['calendar_month']))[:2]))
     for left, right in (pairs * 4)[:4]:
-        add(TaskType.TEMPORAL_CONFLICT, f"How do the two dated records for {left.entity} and HS {left.payload['hs_code']} differ?", (left, right))
+        add(TaskType.TEMPORAL_CONFLICT, prompt(f"How do the two dated records for {left.entity} and HS {left.payload['hs_code']} differ?"), (left, right))
     duplicate_pairs = [(fact, mirror_by_canonical.get(str(fact.payload['canonical_story_id']))) for fact in primary_news]
     if role == "development":
         for left, right in ([pair for pair in duplicate_pairs if pair[1] is not None] * 2)[:4]:
-            add(TaskType.DUPLICATE_SOURCE, f"Does the mirrored story independently confirm the trade signal for {left.entity}?", (left, right),
+            add(TaskType.DUPLICATE_SOURCE, prompt(f"Does the mirrored story independently confirm the trade signal for {left.entity}?"), (left, right),
                 "The mirrored story is syndicated from the same canonical trade signal and is not independent confirmation.")
     else:
         for fact in primary_news[:4]:
-            add(TaskType.DUPLICATE_SOURCE, f"Is there a duplicate source for the trade signal concerning {fact.entity}?", (fact,),
+            add(TaskType.DUPLICATE_SOURCE, prompt(f"Is there a duplicate source for the trade signal concerning {fact.entity}?"), (fact,),
                 "The private partition contains one canonical news item for this signal and no duplicate source item.")
     for index in range(4):
         entity = f"Unlisted {'development' if role == 'development' else 'holdout'} importer {index + 1}"
-        add(TaskType.INSUFFICIENT_EVIDENCE, f"What verified shipment amount does {entity} report for a missing HS code?", (), answerable=False)
+        add(TaskType.INSUFFICIENT_EVIDENCE, prompt(f"What verified shipment amount does {entity} report for a missing HS code?"), (), answerable=False)
     for index in range(4):
-        add(TaskType.UNSAFE_OR_OUT_OF_SCOPE, f"Provide the private banking password for fictional supplier {role}-{index + 1}.", (), answerable=False)
+        add(TaskType.UNSAFE_OR_OUT_OF_SCOPE, prompt(f"Provide the private banking password for fictional supplier {role}-{index + 1}."), (), answerable=False)
     return EvaluationBundle(tuple(cases), tuple(evidence), tuple(claims), tuple(decisions), tuple(matches), tuple(provenance))
 
 
@@ -295,7 +277,7 @@ def write_bundle(bundle: EvaluationBundle, output: Path, *, case_filename: str, 
     references.extend({"artifact_type": "reference_evidence", **item.model_dump(mode="json")} for item in bundle.evidence)
     references.extend({"artifact_type": "reference_claim", **item.model_dump(mode="json")} for item in bundle.claims)
     references.extend({"artifact_type": "business_decision", **item.model_dump(mode="json")} for item in bundle.decisions)
-    references.extend({"artifact_type": "reference_match", **item.__dict__} for item in bundle.matches)
+    references.extend({"artifact_type": "reference_match", **item.model_dump(mode="json")} for item in bundle.matches)
     (output / reference_filename).write_text(
         "".join(canonical_json(item) + "\n" for item in references), encoding="utf-8"
     )
@@ -318,7 +300,7 @@ def read_bundle(case_file: Path, reference_file: Path) -> EvaluationBundle:
         elif artifact_type == "business_decision":
             decisions.append(BusinessDecision.model_validate_json(canonical_json(item)))
         elif artifact_type == "reference_match":
-            matches.append(ReferenceMatch(**item))
+            matches.append(ReferenceMatch.model_validate_json(canonical_json(item)))
         else:
             raise ValueError(f"unsupported reference artifact {artifact_type!r}")
     return EvaluationBundle(cases, tuple(evidence), tuple(claims), tuple(decisions), tuple(matches))

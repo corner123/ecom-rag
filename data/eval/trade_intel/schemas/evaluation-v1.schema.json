@@ -11,17 +11,6 @@
           "title": "Business Decision Id",
           "type": "string"
         },
-        "key_claim_ids": {
-          "items": {
-            "maxLength": 70,
-            "minLength": 70,
-            "pattern": "^claim_[0-9a-f]{64}$",
-            "type": "string"
-          },
-          "title": "Key Claim Ids",
-          "type": "array",
-          "uniqueItems": true
-        },
         "decision_text": {
           "maxLength": 4000,
           "minLength": 1,
@@ -38,6 +27,17 @@
           ],
           "title": "Decision Type",
           "type": "string"
+        },
+        "key_claim_ids": {
+          "items": {
+            "maxLength": 70,
+            "minLength": 70,
+            "pattern": "^claim_[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "title": "Key Claim Ids",
+          "type": "array",
+          "uniqueItems": true
         }
       },
       "required": [
@@ -86,65 +86,14 @@
       ],
       "description": "A product-facing query that only points to private label records by ID.",
       "properties": {
-        "case_id": {
-          "maxLength": 128,
-          "minLength": 1,
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
-          "title": "Case Id",
-          "type": "string"
-        },
-        "question": {
-          "maxLength": 2000,
-          "minLength": 1,
-          "pattern": "\\S",
-          "title": "Question",
-          "type": "string"
-        },
-        "task_type": {
-          "$ref": "#/$defs/TaskType"
-        },
         "answerable": {
           "title": "Answerable",
           "type": "boolean"
-        },
-        "dataset_role": {
-          "enum": [
-            "development",
-            "holdout"
-          ],
-          "title": "Dataset Role",
-          "type": "string"
-        },
-        "visibility": {
-          "enum": [
-            "public",
-            "private"
-          ],
-          "title": "Visibility",
-          "type": "string"
         },
         "as_of_date": {
           "format": "date",
           "title": "As Of Date",
           "type": "string"
-        },
-        "reference_evidence_set_id": {
-          "maxLength": 128,
-          "minLength": 1,
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
-          "title": "Reference Evidence Set Id",
-          "type": "string"
-        },
-        "key_claim_ids": {
-          "items": {
-            "maxLength": 70,
-            "minLength": 70,
-            "pattern": "^claim_[0-9a-f]{64}$",
-            "type": "string"
-          },
-          "title": "Key Claim Ids",
-          "type": "array",
-          "uniqueItems": true
         },
         "business_decision_id": {
           "anyOf": [
@@ -161,10 +110,61 @@
           "default": null,
           "title": "Business Decision Id"
         },
+        "case_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "title": "Case Id",
+          "type": "string"
+        },
+        "dataset_role": {
+          "enum": [
+            "development",
+            "holdout"
+          ],
+          "title": "Dataset Role",
+          "type": "string"
+        },
+        "key_claim_ids": {
+          "items": {
+            "maxLength": 70,
+            "minLength": 70,
+            "pattern": "^claim_[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "title": "Key Claim Ids",
+          "type": "array",
+          "uniqueItems": true
+        },
         "label_version": {
           "const": "trade-intel-eval/v1",
           "default": "trade-intel-eval/v1",
           "title": "Label Version",
+          "type": "string"
+        },
+        "question": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Question",
+          "type": "string"
+        },
+        "reference_evidence_set_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "title": "Reference Evidence Set Id",
+          "type": "string"
+        },
+        "task_type": {
+          "$ref": "#/$defs/TaskType"
+        },
+        "visibility": {
+          "enum": [
+            "public",
+            "private"
+          ],
+          "title": "Visibility",
           "type": "string"
         }
       },
@@ -186,25 +186,11 @@
       "additionalProperties": false,
       "description": "The hashes that freeze a reproducible dataset and execution candidate.",
       "properties": {
-        "snapshot_id": {
-          "maxLength": 128,
-          "minLength": 1,
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
-          "title": "Snapshot Id",
-          "type": "string"
-        },
-        "dataset_hash": {
+        "code_hash": {
           "maxLength": 64,
           "minLength": 64,
           "pattern": "^[0-9a-f]{64}$",
-          "title": "Dataset Hash",
-          "type": "string"
-        },
-        "reference_hash": {
-          "maxLength": 64,
-          "minLength": 64,
-          "pattern": "^[0-9a-f]{64}$",
-          "title": "Reference Hash",
+          "title": "Code Hash",
           "type": "string"
         },
         "corpus_hash": {
@@ -214,32 +200,11 @@
           "title": "Corpus Hash",
           "type": "string"
         },
-        "index_hash": {
+        "dataset_hash": {
           "maxLength": 64,
           "minLength": 64,
           "pattern": "^[0-9a-f]{64}$",
-          "title": "Index Hash",
-          "type": "string"
-        },
-        "profile_hash": {
-          "maxLength": 64,
-          "minLength": 64,
-          "pattern": "^[0-9a-f]{64}$",
-          "title": "Profile Hash",
-          "type": "string"
-        },
-        "model_hash": {
-          "maxLength": 64,
-          "minLength": 64,
-          "pattern": "^[0-9a-f]{64}$",
-          "title": "Model Hash",
-          "type": "string"
-        },
-        "prompt_hash": {
-          "maxLength": 64,
-          "minLength": 64,
-          "pattern": "^[0-9a-f]{64}$",
-          "title": "Prompt Hash",
+          "title": "Dataset Hash",
           "type": "string"
         },
         "evaluator_hash": {
@@ -249,11 +214,46 @@
           "title": "Evaluator Hash",
           "type": "string"
         },
-        "code_hash": {
+        "index_hash": {
           "maxLength": 64,
           "minLength": 64,
           "pattern": "^[0-9a-f]{64}$",
-          "title": "Code Hash",
+          "title": "Index Hash",
+          "type": "string"
+        },
+        "model_hash": {
+          "maxLength": 64,
+          "minLength": 64,
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Model Hash",
+          "type": "string"
+        },
+        "profile_hash": {
+          "maxLength": 64,
+          "minLength": 64,
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Profile Hash",
+          "type": "string"
+        },
+        "prompt_hash": {
+          "maxLength": 64,
+          "minLength": 64,
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Prompt Hash",
+          "type": "string"
+        },
+        "reference_hash": {
+          "maxLength": 64,
+          "minLength": 64,
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Reference Hash",
+          "type": "string"
+        },
+        "snapshot_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "title": "Snapshot Id",
           "type": "string"
         }
       },
@@ -276,51 +276,6 @@
       "additionalProperties": false,
       "description": "A label-free trace retaining IDs and statuses needed to recompute metrics.",
       "properties": {
-        "run_id": {
-          "maxLength": 128,
-          "minLength": 1,
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
-          "title": "Run Id",
-          "type": "string"
-        },
-        "case_id": {
-          "maxLength": 128,
-          "minLength": 1,
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
-          "title": "Case Id",
-          "type": "string"
-        },
-        "status": {
-          "enum": [
-            "completed",
-            "refused",
-            "failed"
-          ],
-          "title": "Status",
-          "type": "string"
-        },
-        "retrieved_evidence_ids": {
-          "items": {
-            "maxLength": 68,
-            "minLength": 68,
-            "pattern": "^(?:rag|sql)_[0-9a-f]{64}$",
-            "type": "string"
-          },
-          "title": "Retrieved Evidence Ids",
-          "type": "array",
-          "uniqueItems": true
-        },
-        "produced_claim_ids": {
-          "items": {
-            "maxLength": 70,
-            "minLength": 70,
-            "pattern": "^claim_[0-9a-f]{64}$",
-            "type": "string"
-          },
-          "title": "Produced Claim Ids",
-          "type": "array",
-          "uniqueItems": true
-        },
         "backend_statuses": {
           "additionalProperties": false,
           "patternProperties": {
@@ -341,10 +296,55 @@
           "title": "Backend Statuses",
           "type": "object"
         },
+        "case_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "title": "Case Id",
+          "type": "string"
+        },
         "latency_ms": {
           "minimum": 0,
           "title": "Latency Ms",
           "type": "number"
+        },
+        "produced_claim_ids": {
+          "items": {
+            "maxLength": 70,
+            "minLength": 70,
+            "pattern": "^claim_[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "title": "Produced Claim Ids",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "retrieved_evidence_ids": {
+          "items": {
+            "maxLength": 68,
+            "minLength": 68,
+            "pattern": "^(?:rag|sql)_[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "title": "Retrieved Evidence Ids",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "run_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "title": "Run Id",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "completed",
+            "refused",
+            "failed"
+          ],
+          "title": "Status",
+          "type": "string"
         }
       },
       "required": [
@@ -370,11 +370,11 @@
           "title": "Claim Id",
           "type": "string"
         },
-        "reference_evidence_set_id": {
-          "maxLength": 128,
+        "claim_text": {
+          "maxLength": 4000,
           "minLength": 1,
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
-          "title": "Reference Evidence Set Id",
+          "pattern": "\\S",
+          "title": "Claim Text",
           "type": "string"
         },
         "evidence_ids": {
@@ -388,11 +388,11 @@
           "type": "array",
           "uniqueItems": true
         },
-        "claim_text": {
-          "maxLength": 4000,
+        "reference_evidence_set_id": {
+          "maxLength": 128,
           "minLength": 1,
-          "pattern": "\\S",
-          "title": "Claim Text",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "title": "Reference Evidence Set Id",
           "type": "string"
         }
       },
@@ -409,6 +409,13 @@
       "additionalProperties": false,
       "description": "A private reference mapping from an evaluation evidence set to evidence identity.",
       "properties": {
+        "evidence_id": {
+          "maxLength": 68,
+          "minLength": 68,
+          "pattern": "^(?:rag|sql)_[0-9a-f]{64}$",
+          "title": "Evidence Id",
+          "type": "string"
+        },
         "reference_evidence_id": {
           "maxLength": 128,
           "minLength": 1,
@@ -421,13 +428,6 @@
           "minLength": 1,
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
           "title": "Reference Evidence Set Id",
-          "type": "string"
-        },
-        "evidence_id": {
-          "maxLength": 68,
-          "minLength": 68,
-          "pattern": "^(?:rag|sql)_[0-9a-f]{64}$",
-          "title": "Evidence Id",
           "type": "string"
         },
         "required": {
@@ -444,20 +444,130 @@
       "title": "ReferenceEvidence",
       "type": "object"
     },
+    "ReferenceMatch": {
+      "additionalProperties": false,
+      "description": "Reviewed runtime matching dimensions, deliberately distinct from Evidence IDs.",
+      "properties": {
+        "approved_synthetic_template": {
+          "default": false,
+          "title": "Approved Synthetic Template",
+          "type": "boolean"
+        },
+        "branch": {
+          "enum": [
+            "rag",
+            "sql"
+          ],
+          "title": "Branch",
+          "type": "string"
+        },
+        "canonical_url": {
+          "maxLength": 4000,
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Canonical Url",
+          "type": "string"
+        },
+        "chunk_hash": {
+          "maxLength": 64,
+          "minLength": 64,
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Chunk Hash",
+          "type": "string"
+        },
+        "entity": {
+          "maxLength": 4000,
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Entity",
+          "type": "string"
+        },
+        "event": {
+          "maxLength": 4000,
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Event",
+          "type": "string"
+        },
+        "near_content": {
+          "maxLength": 4000,
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Near Content",
+          "type": "string"
+        },
+        "path": {
+          "maxLength": 4000,
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Path",
+          "type": "string"
+        },
+        "reference_evidence_set_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "title": "Reference Evidence Set Id",
+          "type": "string"
+        },
+        "reference_match_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "title": "Reference Match Id",
+          "type": "string"
+        },
+        "runtime_evidence_id": {
+          "default": null,
+          "title": "Runtime Evidence Id",
+          "type": "null"
+        },
+        "source_revision": {
+          "maxLength": 64,
+          "minLength": 64,
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Source Revision",
+          "type": "string"
+        },
+        "source_type": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "title": "Source Type",
+          "type": "string"
+        },
+        "sql_dimensions": {
+          "patternProperties": {
+            "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$": {}
+          },
+          "propertyNames": {
+            "maxLength": 128,
+            "minLength": 1
+          },
+          "title": "Sql Dimensions",
+          "type": "object"
+        }
+      },
+      "required": [
+        "reference_match_id",
+        "reference_evidence_set_id",
+        "branch",
+        "entity",
+        "event",
+        "source_type",
+        "path",
+        "chunk_hash",
+        "canonical_url",
+        "source_revision",
+        "near_content"
+      ],
+      "title": "ReferenceMatch",
+      "type": "object"
+    },
     "RunManifest": {
       "additionalProperties": false,
       "description": "The reproducibility record for one evaluation run.\n\n``snapshot`` is the single source of every frozen input hash. Backend\nstatuses encode both available and degraded components without a second,\ncontradictory component list.",
       "properties": {
-        "run_id": {
-          "maxLength": 128,
-          "minLength": 1,
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
-          "title": "Run Id",
-          "type": "string"
-        },
-        "snapshot": {
-          "$ref": "#/$defs/EvaluationSnapshot"
-        },
         "backend_statuses": {
           "additionalProperties": false,
           "patternProperties": {
@@ -477,6 +587,16 @@
           },
           "title": "Backend Statuses",
           "type": "object"
+        },
+        "run_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "title": "Run Id",
+          "type": "string"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/EvaluationSnapshot"
         }
       },
       "required": [
@@ -506,12 +626,17 @@
       "type": "string"
     }
   },
+  "$id": "https://trade-agent.local/schemas/evaluation-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "anyOf": [
     {
       "$ref": "#/$defs/EvaluationCase"
     },
     {
       "$ref": "#/$defs/ReferenceEvidence"
+    },
+    {
+      "$ref": "#/$defs/ReferenceMatch"
     },
     {
       "$ref": "#/$defs/ReferenceClaim"
@@ -528,7 +653,5 @@
     {
       "$ref": "#/$defs/PerQueryResult"
     }
-  ],
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://trade-agent.local/schemas/evaluation-v1.schema.json"
+  ]
 }

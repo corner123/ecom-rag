@@ -35,7 +35,7 @@ def test_development_covers_all_trade_task_families_and_keeps_labels_in_referenc
 
     operating_claim_ids = {claim_id for case in bundle.cases if case.task_type is TaskType.OPERATING_STATUS for claim_id in case.key_claim_ids}
     operating_claims = [claim.claim_text for claim in bundle.claims if claim.claim_id in operating_claim_ids]
-    assert any("fictional report describes a demo-only market signal" in claim for claim in operating_claims)
+    assert any("actual reported signal" in claim for claim in operating_claims)
 
 
 def test_private_holdout_is_disjoint_and_written_only_to_requested_path(tmp_path: Path) -> None:
