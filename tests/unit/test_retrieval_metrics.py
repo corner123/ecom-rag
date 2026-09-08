@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from trade_agent.data.pipeline import IngestionPipeline, SourceCatalog
 from trade_agent.evaluation.models import (
     EvaluationCase,
     ReferenceClaimRecord,
@@ -147,28 +149,29 @@ def test_answerable_case_without_reference_evidence_is_rejected() -> None:
         evaluate_retrieval(_case(claim_ids=(c1,)), (), _outcome([]))
 
 
-def test_real_bundle_reference_match_scores_nested_runtime_metadata_without_inventing_id() -> None:
+def test_real_ingested_chunk_matches_public_reference_dimensions_without_inventing_id(tmp_path) -> None:
     bundle = _development_bundle()
-    case = next(case for case in bundle.cases if case.answerable)
+    case = next(case for case in bundle.cases if case.case_id == "case-development-001")
     match = next(
         match
         for match in bundle.matches
         if match.reference_evidence_set_id == case.reference_evidence_set_id
     )
-    runtime_id = "chunk_runtime_rag_001"
-    hit = SimpleNamespace(
-        chunk_id=runtime_id,
-        record=SimpleNamespace(
-            metadata={
-                "branch": match.branch,
-                "path": match.path,
-                "content_hash": match.chunk_hash,
-                "canonical_url": match.canonical_url,
-                "parent_document_hash": match.source_revision,
-                "source_type": match.source_type,
-            }
-        ),
+    catalog = SourceCatalog.from_yaml(Path("data/sources/trade_intel_demo.yaml"))
+    catalog = replace(
+        catalog,
+        sources=tuple(rule for rule in catalog.sources if rule.source_type.value == "customs_profile"),
     )
+    build = IngestionPipeline().run(catalog, tmp_path / "build.json")
+    chunk = next(
+        snapshot.restore()
+        for snapshot in build.chunks
+        if snapshot.restore().metadata.company_name == match.entity
+        and snapshot.restore().metadata.hs_code == "090111"
+        and snapshot.restore().metadata.source_locator.raw["calendar_month"] == "2026-06"
+    )
+    runtime_id = chunk.metadata.chunk_id
+    hit = SimpleNamespace(chunk_id=runtime_id, record=chunk)
 
     metrics = evaluate_retrieval(
         case,

@@ -226,50 +226,91 @@ def _dimensions_match(hit: Any, reference_match: Any) -> bool:
     if reference_match.branch == "sql" and reference_match.sql_dimensions:
         dimensions = _runtime_dimensions(layers)
         return all(
-            name in dimensions and _scalar(dimensions[name]) == _scalar(expected)
+            _scalar(
+                dimensions.get(name, _lookup(layers, _sql_dimension_aliases(name)))
+            )
+            == _scalar(expected)
             for name, expected in reference_match.sql_dimensions.items()
         )
 
+    matched_dimensions = 0
+    for expected, runtime_names in (
+        (reference_match.source_type, ("source_type",)),
+        (reference_match.entity, ("entity", "company", "company_name")),
+        (reference_match.event, ("event",)),
+        *_event_dimensions(reference_match.event),
+    ):
+        runtime_value = _lookup(layers, runtime_names)
+        if runtime_value is None:
+            continue
+        if _scalar(runtime_value) != _scalar(expected):
+            return False
+        matched_dimensions += 1
+
+    matched_identity = False
     identities = (
         ("path", ("path", "source_path", "relative_path")),
         ("chunk_hash", ("chunk_hash", "content_hash")),
         ("canonical_url", ("canonical_url",)),
         ("source_revision", ("source_revision", "parent_document_hash")),
     )
-    compared = 0
     for reference_name, runtime_names in identities:
         runtime_value = _lookup(layers, runtime_names)
         if runtime_value is None:
             continue
-        compared += 1
-        if _scalar(runtime_value) != _scalar(getattr(reference_match, reference_name)):
-            return False
-    if compared == 0:
-        return False
-    for reference_name, runtime_names in (
-        ("source_type", ("source_type",)),
-        ("entity", ("entity", "company", "company_name")),
-        ("event", ("event",)),
-    ):
-        runtime_value = _lookup(layers, runtime_names)
-        if runtime_value is not None and _scalar(runtime_value) != _scalar(
-            getattr(reference_match, reference_name)
-        ):
-            return False
-    return True
+        if _scalar(runtime_value) == _scalar(getattr(reference_match, reference_name)):
+            matched_identity = True
+    return matched_identity or matched_dimensions >= 2
+
+
+def _event_dimensions(event: str) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    parts = event.split(":")
+    if len(parts) == 2 and len(parts[0]) == 7 and parts[0][4:5] == "-":
+        return (
+            (parts[0], ("calendar_month",)),
+            (parts[1], ("hs_code",)),
+        )
+    if len(parts) == 4 and parts[0] == "product" and parts[2] == "hs":
+        return (
+            (parts[1], ("product_id",)),
+            (parts[3], ("hs_code",)),
+        )
+    if len(parts) == 2 and parts[0] == "news":
+        return ((parts[1], ("canonical_story_id",)),)
+    if len(parts) == 2 and parts[0] == "post":
+        return ((parts[1], ("post_id",)),)
+    return ()
+
+
+def _sql_dimension_aliases(name: str) -> tuple[str, ...]:
+    if name == "company":
+        return ("company", "company_name")
+    return (name,)
 
 
 def _hit_layers(hit: Any) -> tuple[Any, ...]:
-    layers: list[Any] = [hit]
-    metadata = _read(hit, "metadata")
-    if metadata is not None:
-        layers.append(metadata)
+    layers: list[Any] = []
+
+    def append(value: Any) -> None:
+        if value is None or any(value is item for item in layers):
+            return
+        layers.append(value)
+        source_locator = _read(value, "source_locator")
+        if source_locator is not None:
+            append(source_locator)
+        raw = _read(value, "raw")
+        if raw is not None:
+            append(raw)
+        manifest_locator = _read(value, "manifest_locator")
+        if manifest_locator is not None:
+            append(manifest_locator)
+
+    append(hit)
+    append(_read(hit, "metadata"))
     record = _read(hit, "record")
     if record is not None:
-        layers.append(record)
-        record_metadata = _read(record, "metadata")
-        if record_metadata is not None:
-            layers.append(record_metadata)
+        append(record)
+        append(_read(record, "metadata"))
     return tuple(layers)
 
 
