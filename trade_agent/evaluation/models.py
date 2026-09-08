@@ -274,8 +274,20 @@ class ReferenceMatchRecord(ReferenceMatch):
     artifact_type: Literal["reference_match"] = "reference_match"
 
 
+class TemplateSignatureRecord(_Contract):
+    """A bundle-level leakage signature, independent of evidence availability."""
+
+    artifact_type: Literal["template_signature"] = "template_signature"
+    template_family: LabelText
+
+    @field_validator("template_family")
+    @classmethod
+    def nonblank_value(cls, value: str) -> str:
+        return _nonblank(value)
+
+
 ReferenceRecord = Annotated[
-    ReferenceEvidenceRecord | ReferenceClaimRecord | BusinessDecisionRecord | ReferenceMatchRecord,
+    ReferenceEvidenceRecord | ReferenceClaimRecord | BusinessDecisionRecord | ReferenceMatchRecord | TemplateSignatureRecord,
     Field(discriminator="artifact_type"),
 ]
 
@@ -350,6 +362,7 @@ EvaluationArtifact = (
     | ReferenceClaimRecord
     | BusinessDecisionRecord
     | ReferenceMatchRecord
+    | TemplateSignatureRecord
     | EvaluationSnapshot
     | RunManifest
     | PerQueryResult

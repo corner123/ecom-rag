@@ -22,6 +22,7 @@ from trade_agent.evaluation.models import (
     ReferenceMatchRecord,
     ReferenceRecord,
     TaskType,
+    TemplateSignatureRecord,
 )
 from pydantic import TypeAdapter
 from trade_agent.schemas.source import content_sha256
@@ -294,6 +295,16 @@ def write_bundle(bundle: EvaluationBundle, output: Path, *, case_filename: str, 
     references.extend(ReferenceClaimRecord(**item.model_dump(mode="python")).model_dump(mode="json") for item in bundle.claims)
     references.extend(BusinessDecisionRecord(**item.model_dump(mode="python")).model_dump(mode="json") for item in bundle.decisions)
     references.extend(ReferenceMatchRecord(**item.model_dump(mode="python")).model_dump(mode="json") for item in bundle.matches)
+    # Unanswerable cases have no evidence matches. Persist their structural
+    # signatures separately, including every signature the fresh auditor sees.
+    template_families = {match.template_family for match in bundle.matches}
+    template_families.update(
+        template for item in bundle.provenance for template in item.get("template_families", ())
+    )
+    references.extend(
+        TemplateSignatureRecord(template_family=template).model_dump(mode="json")
+        for template in sorted(template_families)
+    )
     (output / reference_filename).write_text(
         "".join(canonical_json(item) + "\n" for item in references), encoding="utf-8"
     )
@@ -306,6 +317,7 @@ def read_bundle(case_file: Path, reference_file: Path) -> EvaluationBundle:
     claims: list[ReferenceClaim] = []
     decisions: list[BusinessDecision] = []
     matches: list[ReferenceMatch] = []
+    template_families: list[str] = []
     for line in reference_file.read_text(encoding="utf-8").splitlines():
         record = _REFERENCE_RECORD_ADAPTER.validate_json(line)
         item = record.model_dump(mode="json", exclude={"artifact_type"})
@@ -317,9 +329,12 @@ def read_bundle(case_file: Path, reference_file: Path) -> EvaluationBundle:
             decisions.append(BusinessDecision.model_validate_json(canonical_json(item)))
         elif isinstance(record, ReferenceMatchRecord):
             matches.append(ReferenceMatch.model_validate_json(canonical_json(item)))
+        elif isinstance(record, TemplateSignatureRecord):
+            template_families.append(record.template_family)
         else:  # pragma: no cover - discriminated union is exhaustive.
             raise ValueError(f"unsupported reference artifact {record.artifact_type!r}")
-    return EvaluationBundle(cases, tuple(evidence), tuple(claims), tuple(decisions), tuple(matches))
+    provenance = ({"template_families": tuple(template_families)},) if template_families else ()
+    return EvaluationBundle(cases, tuple(evidence), tuple(claims), tuple(decisions), tuple(matches), provenance)
 
 
 def indexed_corpus_content(manifest: Mapping[str, Any]) -> tuple[Mapping[str, str], ...]:

@@ -917,6 +917,30 @@
       ],
       "title": "TaskType",
       "type": "string"
+    },
+    "TemplateSignatureRecord": {
+      "additionalProperties": false,
+      "description": "A bundle-level leakage signature, independent of evidence availability.",
+      "properties": {
+        "artifact_type": {
+          "const": "template_signature",
+          "default": "template_signature",
+          "title": "Artifact Type",
+          "type": "string"
+        },
+        "template_family": {
+          "maxLength": 4000,
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Template Family",
+          "type": "string"
+        }
+      },
+      "required": [
+        "template_family"
+      ],
+      "title": "TemplateSignatureRecord",
+      "type": "object"
     }
   },
   "$id": "https://trade-agent.local/schemas/evaluation-v1.schema.json",
@@ -948,6 +972,9 @@
     },
     {
       "$ref": "#/$defs/ReferenceMatchRecord"
+    },
+    {
+      "$ref": "#/$defs/TemplateSignatureRecord"
     },
     {
       "$ref": "#/$defs/EvaluationSnapshot"

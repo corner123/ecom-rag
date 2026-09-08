@@ -110,7 +110,7 @@ def test_serialized_reference_records_validate_against_exported_schema() -> None
         json.loads(line)
         for line in Path("data/eval/trade_intel/references_dev.jsonl").read_text(encoding="utf-8").splitlines()
     ]
-    assert {"reference_claim", "business_decision", "reference_match"} <= {
+    assert {"reference_claim", "business_decision", "reference_match", "template_signature"} <= {
         record["artifact_type"] for record in records
     }
     for record in records:
