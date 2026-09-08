@@ -48,6 +48,60 @@
       "title": "BusinessDecision",
       "type": "object"
     },
+    "BusinessDecisionRecord": {
+      "additionalProperties": false,
+      "description": "The strict JSONL envelope for a business-decision artifact.",
+      "properties": {
+        "artifact_type": {
+          "const": "business_decision",
+          "default": "business_decision",
+          "title": "Artifact Type",
+          "type": "string"
+        },
+        "business_decision_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "title": "Business Decision Id",
+          "type": "string"
+        },
+        "decision_text": {
+          "maxLength": 4000,
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Decision Text",
+          "type": "string"
+        },
+        "decision_type": {
+          "default": "recommend",
+          "enum": [
+            "recommend",
+            "escalate",
+            "refuse"
+          ],
+          "title": "Decision Type",
+          "type": "string"
+        },
+        "key_claim_ids": {
+          "items": {
+            "maxLength": 70,
+            "minLength": 70,
+            "pattern": "^claim_[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "title": "Key Claim Ids",
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "business_decision_id",
+        "key_claim_ids",
+        "decision_text"
+      ],
+      "title": "BusinessDecisionRecord",
+      "type": "object"
+    },
     "EvaluationCase": {
       "additionalProperties": false,
       "allOf": [
@@ -405,6 +459,58 @@
       "title": "ReferenceClaim",
       "type": "object"
     },
+    "ReferenceClaimRecord": {
+      "additionalProperties": false,
+      "description": "The strict JSONL envelope for a reference-claim artifact.",
+      "properties": {
+        "artifact_type": {
+          "const": "reference_claim",
+          "default": "reference_claim",
+          "title": "Artifact Type",
+          "type": "string"
+        },
+        "claim_id": {
+          "maxLength": 70,
+          "minLength": 70,
+          "pattern": "^claim_[0-9a-f]{64}$",
+          "title": "Claim Id",
+          "type": "string"
+        },
+        "claim_text": {
+          "maxLength": 4000,
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Claim Text",
+          "type": "string"
+        },
+        "evidence_ids": {
+          "items": {
+            "maxLength": 68,
+            "minLength": 68,
+            "pattern": "^(?:rag|sql)_[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "title": "Evidence Ids",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "reference_evidence_set_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "title": "Reference Evidence Set Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "claim_id",
+        "reference_evidence_set_id",
+        "evidence_ids",
+        "claim_text"
+      ],
+      "title": "ReferenceClaimRecord",
+      "type": "object"
+    },
     "ReferenceEvidence": {
       "additionalProperties": false,
       "description": "A private reference mapping from an evaluation evidence set to evidence identity.",
@@ -442,6 +548,51 @@
         "required"
       ],
       "title": "ReferenceEvidence",
+      "type": "object"
+    },
+    "ReferenceEvidenceRecord": {
+      "additionalProperties": false,
+      "description": "The strict JSONL envelope for a reference-evidence artifact.",
+      "properties": {
+        "artifact_type": {
+          "const": "reference_evidence",
+          "default": "reference_evidence",
+          "title": "Artifact Type",
+          "type": "string"
+        },
+        "evidence_id": {
+          "maxLength": 68,
+          "minLength": 68,
+          "pattern": "^(?:rag|sql)_[0-9a-f]{64}$",
+          "title": "Evidence Id",
+          "type": "string"
+        },
+        "reference_evidence_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "title": "Reference Evidence Id",
+          "type": "string"
+        },
+        "reference_evidence_set_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "title": "Reference Evidence Set Id",
+          "type": "string"
+        },
+        "required": {
+          "title": "Required",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "reference_evidence_id",
+        "reference_evidence_set_id",
+        "evidence_id",
+        "required"
+      ],
+      "title": "ReferenceEvidenceRecord",
       "type": "object"
     },
     "ReferenceMatch": {
@@ -564,6 +715,132 @@
       "title": "ReferenceMatch",
       "type": "object"
     },
+    "ReferenceMatchRecord": {
+      "additionalProperties": false,
+      "description": "The strict JSONL envelope for a reviewed reference-match artifact.",
+      "properties": {
+        "approved_synthetic_template": {
+          "default": false,
+          "title": "Approved Synthetic Template",
+          "type": "boolean"
+        },
+        "artifact_type": {
+          "const": "reference_match",
+          "default": "reference_match",
+          "title": "Artifact Type",
+          "type": "string"
+        },
+        "branch": {
+          "enum": [
+            "rag",
+            "sql"
+          ],
+          "title": "Branch",
+          "type": "string"
+        },
+        "canonical_url": {
+          "maxLength": 4000,
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Canonical Url",
+          "type": "string"
+        },
+        "chunk_hash": {
+          "maxLength": 64,
+          "minLength": 64,
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Chunk Hash",
+          "type": "string"
+        },
+        "entity": {
+          "maxLength": 4000,
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Entity",
+          "type": "string"
+        },
+        "event": {
+          "maxLength": 4000,
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Event",
+          "type": "string"
+        },
+        "near_content": {
+          "maxLength": 4000,
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Near Content",
+          "type": "string"
+        },
+        "path": {
+          "maxLength": 4000,
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Path",
+          "type": "string"
+        },
+        "reference_evidence_set_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "title": "Reference Evidence Set Id",
+          "type": "string"
+        },
+        "reference_match_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "title": "Reference Match Id",
+          "type": "string"
+        },
+        "runtime_evidence_id": {
+          "default": null,
+          "title": "Runtime Evidence Id",
+          "type": "null"
+        },
+        "source_revision": {
+          "maxLength": 64,
+          "minLength": 64,
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Source Revision",
+          "type": "string"
+        },
+        "source_type": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "title": "Source Type",
+          "type": "string"
+        },
+        "sql_dimensions": {
+          "patternProperties": {
+            "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$": {}
+          },
+          "propertyNames": {
+            "maxLength": 128,
+            "minLength": 1
+          },
+          "title": "Sql Dimensions",
+          "type": "object"
+        }
+      },
+      "required": [
+        "reference_match_id",
+        "reference_evidence_set_id",
+        "branch",
+        "entity",
+        "event",
+        "source_type",
+        "path",
+        "chunk_hash",
+        "canonical_url",
+        "source_revision",
+        "near_content"
+      ],
+      "title": "ReferenceMatchRecord",
+      "type": "object"
+    },
     "RunManifest": {
       "additionalProperties": false,
       "description": "The reproducibility record for one evaluation run.\n\n``snapshot`` is the single source of every frozen input hash. Backend\nstatuses encode both available and degraded components without a second,\ncontradictory component list.",
@@ -643,6 +920,18 @@
     },
     {
       "$ref": "#/$defs/BusinessDecision"
+    },
+    {
+      "$ref": "#/$defs/ReferenceEvidenceRecord"
+    },
+    {
+      "$ref": "#/$defs/ReferenceClaimRecord"
+    },
+    {
+      "$ref": "#/$defs/BusinessDecisionRecord"
+    },
+    {
+      "$ref": "#/$defs/ReferenceMatchRecord"
     },
     {
       "$ref": "#/$defs/EvaluationSnapshot"

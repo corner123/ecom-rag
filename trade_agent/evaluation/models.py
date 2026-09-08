@@ -248,6 +248,36 @@ class BusinessDecision(_Contract):
         return self
 
 
+class ReferenceEvidenceRecord(ReferenceEvidence):
+    """The strict JSONL envelope for a reference-evidence artifact."""
+
+    artifact_type: Literal["reference_evidence"] = "reference_evidence"
+
+
+class ReferenceClaimRecord(ReferenceClaim):
+    """The strict JSONL envelope for a reference-claim artifact."""
+
+    artifact_type: Literal["reference_claim"] = "reference_claim"
+
+
+class BusinessDecisionRecord(BusinessDecision):
+    """The strict JSONL envelope for a business-decision artifact."""
+
+    artifact_type: Literal["business_decision"] = "business_decision"
+
+
+class ReferenceMatchRecord(ReferenceMatch):
+    """The strict JSONL envelope for a reviewed reference-match artifact."""
+
+    artifact_type: Literal["reference_match"] = "reference_match"
+
+
+ReferenceRecord = Annotated[
+    ReferenceEvidenceRecord | ReferenceClaimRecord | BusinessDecisionRecord | ReferenceMatchRecord,
+    Field(discriminator="artifact_type"),
+]
+
+
 class EvaluationSnapshot(_Contract):
     """The hashes that freeze a reproducible dataset and execution candidate."""
 
@@ -314,6 +344,10 @@ EvaluationArtifact = (
     | ReferenceMatch
     | ReferenceClaim
     | BusinessDecision
+    | ReferenceEvidenceRecord
+    | ReferenceClaimRecord
+    | BusinessDecisionRecord
+    | ReferenceMatchRecord
     | EvaluationSnapshot
     | RunManifest
     | PerQueryResult

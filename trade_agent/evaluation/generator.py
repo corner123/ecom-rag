@@ -10,13 +10,27 @@ from random import Random
 from typing import Any, Iterable, Mapping
 
 from trade_agent.data.manifest import canonical_json
-from trade_agent.evaluation.models import BusinessDecision, EvaluationCase, ReferenceClaim, ReferenceEvidence, ReferenceMatch, TaskType
+from trade_agent.evaluation.models import (
+    BusinessDecision,
+    BusinessDecisionRecord,
+    EvaluationCase,
+    ReferenceClaim,
+    ReferenceClaimRecord,
+    ReferenceEvidence,
+    ReferenceEvidenceRecord,
+    ReferenceMatch,
+    ReferenceMatchRecord,
+    ReferenceRecord,
+    TaskType,
+)
+from pydantic import TypeAdapter
 from trade_agent.schemas.source import content_sha256
 
 
 REQUIRED_TASK_TYPES = frozenset(TaskType)
 _AS_OF = date(2026, 8, 30)
 _ROOT = Path(__file__).resolve().parents[2]
+_REFERENCE_RECORD_ADAPTER = TypeAdapter(ReferenceRecord)
 
 
 @dataclass(frozen=True)
@@ -274,10 +288,10 @@ def write_bundle(bundle: EvaluationBundle, output: Path, *, case_filename: str, 
         "".join(canonical_json(case.model_dump(mode="json")) + "\n" for case in bundle.cases), encoding="utf-8"
     )
     references: list[Mapping[str, Any]] = []
-    references.extend({"artifact_type": "reference_evidence", **item.model_dump(mode="json")} for item in bundle.evidence)
-    references.extend({"artifact_type": "reference_claim", **item.model_dump(mode="json")} for item in bundle.claims)
-    references.extend({"artifact_type": "business_decision", **item.model_dump(mode="json")} for item in bundle.decisions)
-    references.extend({"artifact_type": "reference_match", **item.model_dump(mode="json")} for item in bundle.matches)
+    references.extend(ReferenceEvidenceRecord(**item.model_dump(mode="python")).model_dump(mode="json") for item in bundle.evidence)
+    references.extend(ReferenceClaimRecord(**item.model_dump(mode="python")).model_dump(mode="json") for item in bundle.claims)
+    references.extend(BusinessDecisionRecord(**item.model_dump(mode="python")).model_dump(mode="json") for item in bundle.decisions)
+    references.extend(ReferenceMatchRecord(**item.model_dump(mode="python")).model_dump(mode="json") for item in bundle.matches)
     (output / reference_filename).write_text(
         "".join(canonical_json(item) + "\n" for item in references), encoding="utf-8"
     )
@@ -291,18 +305,18 @@ def read_bundle(case_file: Path, reference_file: Path) -> EvaluationBundle:
     decisions: list[BusinessDecision] = []
     matches: list[ReferenceMatch] = []
     for line in reference_file.read_text(encoding="utf-8").splitlines():
-        item = json.loads(line)
-        artifact_type = item.pop("artifact_type")
-        if artifact_type == "reference_evidence":
+        record = _REFERENCE_RECORD_ADAPTER.validate_json(line)
+        item = record.model_dump(mode="json", exclude={"artifact_type"})
+        if isinstance(record, ReferenceEvidenceRecord):
             evidence.append(ReferenceEvidence.model_validate_json(canonical_json(item)))
-        elif artifact_type == "reference_claim":
+        elif isinstance(record, ReferenceClaimRecord):
             claims.append(ReferenceClaim.model_validate_json(canonical_json(item)))
-        elif artifact_type == "business_decision":
+        elif isinstance(record, BusinessDecisionRecord):
             decisions.append(BusinessDecision.model_validate_json(canonical_json(item)))
-        elif artifact_type == "reference_match":
+        elif isinstance(record, ReferenceMatchRecord):
             matches.append(ReferenceMatch.model_validate_json(canonical_json(item)))
-        else:
-            raise ValueError(f"unsupported reference artifact {artifact_type!r}")
+        else:  # pragma: no cover - discriminated union is exhaustive.
+            raise ValueError(f"unsupported reference artifact {record.artifact_type!r}")
     return EvaluationBundle(cases, tuple(evidence), tuple(claims), tuple(decisions), tuple(matches))
 
 

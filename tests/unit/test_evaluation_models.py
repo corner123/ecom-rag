@@ -19,6 +19,7 @@ from trade_agent.evaluation.models import (
     PerQueryResult,
     ReferenceClaim,
     ReferenceEvidence,
+    ReferenceMatchRecord,
     ReferenceMatch,
     RunManifest,
     evaluation_json_schema,
@@ -99,24 +100,29 @@ def test_reference_and_decision_contracts_bind_only_ids_and_bounded_label_text()
         ReferenceClaim.model_validate({**claim.model_dump(mode="json"), "claim_text": "x" * 4_001})
 
 
-def test_reference_match_contract_and_exported_schema_reject_malformed_dimensions() -> None:
-    """Reference matches are reviewed dimensions, never fabricated runtime evidence IDs."""
+def test_serialized_reference_records_validate_against_exported_schema() -> None:
+    """The committed JSONL wrapper is part of the public artifact contract."""
     match = ReferenceMatch.validated_fixture()
     exported = json.loads(Path("data/eval/trade_intel/schemas/evaluation-v1.schema.json").read_text(encoding="utf-8"))
     validator = Draft202012Validator(exported, format_checker=FormatChecker())
 
-    validator.validate(match.model_dump(mode="json"))
-    committed = next(
-        json.loads(line) for line in Path("data/eval/trade_intel/references_dev.jsonl").read_text(encoding="utf-8").splitlines()
-        if json.loads(line)["artifact_type"] == "reference_match"
-    )
-    committed.pop("artifact_type")
-    ReferenceMatch.model_validate_json(json.dumps(committed))
-    validator.validate(committed)
+    records = [
+        json.loads(line)
+        for line in Path("data/eval/trade_intel/references_dev.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert {"reference_claim", "business_decision", "reference_match"} <= {
+        record["artifact_type"] for record in records
+    }
+    for record in records:
+        validator.validate(record)
+    committed_match = next(record for record in records if record["artifact_type"] == "reference_match")
+    ReferenceMatchRecord.model_validate_json(json.dumps(committed_match))
+    validator.validate(ReferenceMatchRecord(artifact_type="reference_match", **match.model_dump(mode="json")).model_dump(mode="json"))
+
     with pytest.raises(ValidationError):
         ReferenceMatch.model_validate({**match.model_dump(mode="json"), "runtime_evidence_id": "rag_" + "1" * 64})
     with pytest.raises(JsonSchemaValidationError):
-        validator.validate({**match.model_dump(mode="json"), "runtime_evidence_id": "rag_" + "1" * 64})
+        validator.validate({**committed_match, "runtime_evidence_id": "rag_fake"})
 
 
 def test_snapshot_and_manifest_capture_every_frozen_input_and_backend_status() -> None:
