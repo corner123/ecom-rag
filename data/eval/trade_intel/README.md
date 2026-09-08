@@ -5,10 +5,12 @@ the frozen synthetic trade-intelligence corpus. Cases intentionally contain a
 question, task route, time boundary, and opaque reference IDs only. They do
 not contain answer text, source excerpts, or reference payloads.
 
-`references_dev.jsonl` keeps the matching evidence and claim labels in a
-separate artifact. It is needed to score development runs, but must never be
-inserted into a retrieval index or exposed through product-facing evaluation
-records.
+`references_dev.jsonl` keeps claim labels, business decisions, and reviewed
+source-match dimensions in a separate artifact. A `reference_match` is not a
+runtime Evidence ID: it records the branch, locator/source/chunk dimensions,
+and SQL aggregation dimensions needed to match a later runtime trace without
+inventing an identity. These records must never be inserted into a retrieval
+index or exposed through product-facing evaluation records.
 
 Regenerate the development partition deterministically with:
 

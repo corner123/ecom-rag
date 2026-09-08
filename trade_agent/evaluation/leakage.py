@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 import re
 from typing import Any, Iterable, Mapping
 from urllib.parse import urlsplit, urlunsplit
 
-from trade_agent.evaluation.generator import EvaluationBundle, _facts
+from trade_agent.evaluation.generator import EvaluationBundle
+from trade_agent.schemas.source import content_sha256
 
 
 _WORD = re.compile(r"[a-z0-9]+")
@@ -20,6 +22,7 @@ class LeakageReport:
     normalized_questions: tuple[str, ...] = ()
     exact_chunk_hashes: tuple[str, ...] = ()
     near_chunk_hashes: tuple[str, ...] = ()
+    approved_near_chunk_hashes: tuple[str, ...] = ()
     canonical_urls: tuple[str, ...] = ()
     source_revisions: tuple[str, ...] = ()
     reference_ids: tuple[str, ...] = ()
@@ -48,6 +51,11 @@ def _tokens(value: str) -> set[str]:
 def _near(left: str, right: str) -> bool:
     a, b = _tokens(left), _tokens(right)
     return bool(a and b) and len(a & b) / len(a | b) >= 0.45
+
+
+def _near_content(left: str, right: str) -> bool:
+    """Detect substantive source-text rewrites even when content hashes differ."""
+    return SequenceMatcher(a=_normalise(left), b=_normalise(right), autojunk=False).ratio() >= 0.82
 
 
 def _entities(question: str) -> set[str]:
@@ -82,22 +90,16 @@ def _bundle_values(bundle: EvaluationBundle, key: str) -> set[str]:
     return values
 
 
-def _provenance_from_corpus(bundle: EvaluationBundle, corpus: Any) -> dict[str, set[str]]:
-    """Recover source identity when bundles have been read from JSONL files."""
-    if not isinstance(corpus, Mapping) or "records" not in corpus:
-        return {}
-    try:
-        by_evidence = {fact.evidence_id: fact for fact in _facts(corpus)}
-    except (KeyError, TypeError, ValueError):
-        return {}
-    selected = [by_evidence[item.evidence_id] for item in bundle.evidence if item.evidence_id in by_evidence]
-    return {
-        "chunk_hashes": {fact.chunk_hash for fact in selected},
-        "near_chunk_hashes": {fact.chunk_hash for fact in selected},
-        "canonical_urls": {fact.canonical_url for fact in selected},
-        "source_revisions": {fact.source_revision for fact in selected},
-        "entity_event_template": {str((fact.entity, fact.event)) for fact in selected},
-    }
+def _match_values(bundle: EvaluationBundle, key: str) -> set[str]:
+    return {str(getattr(match, key)) for match in bundle.matches}
+
+
+def _contents(bundle: EvaluationBundle) -> set[str]:
+    return _bundle_values(bundle, "near_contents") or _match_values(bundle, "near_content")
+
+
+def _approved_contents(bundle: EvaluationBundle) -> set[str]:
+    return {match.near_content for match in bundle.matches if match.approved_synthetic_template}
 
 
 class LeakageAuditor:
@@ -113,20 +115,29 @@ class LeakageAuditor:
                 _near(question, holdout_question) and _entities(question) & _entities(holdout_question)
             )
         )
-        dev_recovered, holdout_recovered = _provenance_from_corpus(dev, corpus), _provenance_from_corpus(holdout, corpus)
-        def values(bundle: EvaluationBundle, recovered: Mapping[str, set[str]], key: str) -> set[str]:
-            return _bundle_values(bundle, key) or set(recovered.get(key, set()))
-        exact_hashes = sorted(values(dev, dev_recovered, "chunk_hashes") & values(holdout, holdout_recovered, "chunk_hashes"))
-        near_hashes = sorted(values(dev, dev_recovered, "near_chunk_hashes") &
-                             values(holdout, holdout_recovered, "near_chunk_hashes"))
-        urls = sorted({_url(value) for value in values(dev, dev_recovered, "canonical_urls")} &
-                      {_url(value) for value in values(holdout, holdout_recovered, "canonical_urls")})
-        revisions = sorted(values(dev, dev_recovered, "source_revisions") & values(holdout, holdout_recovered, "source_revisions"))
-        dev_refs = {item.reference_evidence_set_id for item in dev.evidence} | {item.claim_id for item in dev.claims}
-        holdout_refs = {item.reference_evidence_set_id for item in holdout.evidence} | {item.claim_id for item in holdout.claims}
+        def values(bundle: EvaluationBundle, provenance_key: str, match_key: str) -> set[str]:
+            return _bundle_values(bundle, provenance_key) or _match_values(bundle, match_key)
+        exact_hashes = sorted(values(dev, "chunk_hashes", "chunk_hash") & values(holdout, "chunk_hashes", "chunk_hash"))
+        dev_content, holdout_content = _contents(dev), _contents(holdout)
+        approved_dev, approved_holdout = _approved_contents(dev), _approved_contents(holdout)
+        near_pairs = [
+            (left, right) for left in dev_content for right in holdout_content if _near_content(left, right)
+        ]
+        near_hashes = sorted(
+            f"{content_sha256(left)[:16]}:{content_sha256(right)[:16]}"
+            for left, right in near_pairs if not (left in approved_dev and right in approved_holdout)
+        )
+        approved_near = sorted(
+            f"{content_sha256(left)[:16]}:{content_sha256(right)[:16]}"
+            for left, right in near_pairs if left in approved_dev and right in approved_holdout
+        )
+        urls = sorted({_url(value) for value in values(dev, "canonical_urls", "canonical_url")} &
+                      {_url(value) for value in values(holdout, "canonical_urls", "canonical_url")})
+        revisions = sorted(values(dev, "source_revisions", "source_revision") & values(holdout, "source_revisions", "source_revision"))
+        dev_refs = {match.reference_match_id for match in dev.matches} | {match.reference_evidence_set_id for match in dev.matches} | {item.claim_id for item in dev.claims}
+        holdout_refs = {match.reference_match_id for match in holdout.matches} | {match.reference_evidence_set_id for match in holdout.matches} | {item.claim_id for item in holdout.claims}
         refs = sorted(dev_refs & holdout_refs)
-        templates = sorted(values(dev, dev_recovered, "entity_event_template") &
-                           values(holdout, holdout_recovered, "entity_event_template"))
+        templates = sorted(_bundle_values(dev, "template_families") & _bundle_values(holdout, "template_families"))
         labels = {claim.claim_text for claim in (*dev.claims, *holdout.claims)}
         contamination: set[str] = set()
         for record in _iter_records(corpus):
@@ -137,5 +148,5 @@ class LeakageAuditor:
             for label in labels:
                 if label and label.casefold() in content.casefold():
                     contamination.add(label)
-        return LeakageReport(tuple(question_hits), tuple(exact_hashes), tuple(near_hashes), tuple(urls),
-                             tuple(revisions), tuple(refs), tuple(templates), tuple(sorted(contamination)))
+        return LeakageReport(tuple(question_hits), tuple(exact_hashes), tuple(near_hashes), tuple(approved_near),
+                             tuple(urls), tuple(revisions), tuple(refs), tuple(templates), tuple(sorted(contamination)))

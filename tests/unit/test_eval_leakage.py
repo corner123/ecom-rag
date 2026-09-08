@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
+import sys
 
 from trade_agent.evaluation.models import EvaluationCase, TaskType
 
@@ -44,3 +45,46 @@ def test_reference_label_contamination_in_indexed_content_is_detected() -> None:
 
     assert report.passed is False
     assert report.reference_label_contamination
+
+
+def test_similar_content_with_distinct_hashes_and_shared_template_are_detected() -> None:
+    from trade_agent.evaluation.generator import EvaluationBundle
+    from trade_agent.evaluation.leakage import LeakageAuditor
+
+    development = EvaluationBundle(
+        cases=(_case("development-1", "What is the status of Harbor CN Imports 01?", "development"),),
+        provenance=({"near_contents": ("Harbor exporter reported a 25 percent capacity increase this quarter.",), "template_families": ("operating_status:publisher-signal",)},),
+    )
+    holdout = EvaluationBundle(
+        cases=(_case("holdout-1", "What is the status of River DE Exports 03?", "holdout"),),
+        provenance=({"near_contents": ("River exporter reported a 27 percent capacity increase this quarter.",), "template_families": ("operating_status:publisher-signal",)},),
+    )
+
+    report = LeakageAuditor().audit(development, holdout, corpus=())
+
+    assert report.passed is False
+    assert report.near_chunk_hashes
+    assert report.entity_event_templates
+
+
+def test_validator_passes_indexable_source_content_to_contamination_gate(monkeypatch, tmp_path) -> None:
+    from trade_agent.evaluation.generator import EvaluationBundle
+    from trade_agent.evaluation.models import ReferenceClaim
+    from scripts import validate_trade_eval
+
+    development_case = _case("development-1", "Which supplier serves HS 010121?", "development")
+    development = EvaluationBundle(
+        cases=(development_case,),
+        claims=(ReferenceClaim(
+            claim_id="claim_" + "1" * 64,
+            reference_evidence_set_id=development_case.reference_evidence_set_id,
+            evidence_ids=(), claim_text="preferred supplier",
+        ),),
+    )
+    holdout = EvaluationBundle(cases=(_case("holdout-1", "Which supplier serves HS 020130?", "holdout"),))
+    bundles = iter((development, holdout))
+    monkeypatch.setattr(validate_trade_eval, "read_bundle", lambda *_: next(bundles))
+    monkeypatch.setattr(validate_trade_eval, "indexed_corpus_content", lambda _: ({"content": "preferred supplier"},))
+    monkeypatch.setattr(sys, "argv", ["validate_trade_eval", "--dev", str(tmp_path), "--holdout", str(tmp_path)])
+
+    assert validate_trade_eval.main() == 1

@@ -26,6 +26,16 @@ def test_development_covers_all_trade_task_families_and_keeps_labels_in_referenc
     assert {claim.claim_id for claim in bundle.claims} >= {
         claim_id for case in bundle.cases for claim_id in case.key_claim_ids
     }
+    assert not bundle.evidence
+    assert bundle.matches
+    assert {decision.business_decision_id for decision in bundle.decisions} == {
+        case.business_decision_id for case in bundle.cases if case.business_decision_id
+    }
+    assert all(match.runtime_evidence_id is None for match in bundle.matches)
+
+    operating_claim_ids = {claim_id for case in bundle.cases if case.task_type is TaskType.OPERATING_STATUS for claim_id in case.key_claim_ids}
+    operating_claims = [claim.claim_text for claim in bundle.claims if claim.claim_id in operating_claim_ids]
+    assert any("fictional report describes a demo-only market signal" in claim for claim in operating_claims)
 
 
 def test_private_holdout_is_disjoint_and_written_only_to_requested_path(tmp_path: Path) -> None:
@@ -39,6 +49,17 @@ def test_private_holdout_is_disjoint_and_written_only_to_requested_path(tmp_path
 
     assert output.joinpath("holdout_private.jsonl").is_file()
     assert all(case.dataset_role == "holdout" and case.visibility == "private" for case in holdout.cases)
-    assert {case.reference_evidence_set_id for case in development.cases}.isdisjoint(
-        case.reference_evidence_set_id for case in holdout.cases
-    )
+    for field in ("entity", "event", "chunk_hash", "canonical_url", "source_revision", "reference_match_id"):
+        assert {getattr(item, field) for item in development.matches}.isdisjoint(
+            getattr(item, field) for item in holdout.matches
+        )
+
+
+def test_private_holdout_secret_changes_selected_private_material(tmp_path: Path) -> None:
+    from trade_agent.evaluation.generator import generate_private_holdout
+
+    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    first = generate_private_holdout(manifest, secret_seed=91, output=tmp_path / "first")
+    second = generate_private_holdout(manifest, secret_seed=92, output=tmp_path / "second")
+
+    assert {match.chunk_hash for match in first.matches} != {match.chunk_hash for match in second.matches}
