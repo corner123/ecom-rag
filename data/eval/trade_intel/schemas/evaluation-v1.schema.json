@@ -697,12 +697,20 @@
           },
           "title": "Sql Dimensions",
           "type": "object"
+        },
+        "template_family": {
+          "maxLength": 4000,
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Template Family",
+          "type": "string"
         }
       },
       "required": [
         "reference_match_id",
         "reference_evidence_set_id",
         "branch",
+        "template_family",
         "entity",
         "event",
         "source_type",
@@ -823,12 +831,20 @@
           },
           "title": "Sql Dimensions",
           "type": "object"
+        },
+        "template_family": {
+          "maxLength": 4000,
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Template Family",
+          "type": "string"
         }
       },
       "required": [
         "reference_match_id",
         "reference_evidence_set_id",
         "branch",
+        "template_family",
         "entity",
         "event",
         "source_type",

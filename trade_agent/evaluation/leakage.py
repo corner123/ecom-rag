@@ -168,7 +168,9 @@ class LeakageAuditor:
         dev_refs = {match.reference_match_id for match in dev.matches} | {match.reference_evidence_set_id for match in dev.matches} | {item.claim_id for item in dev.claims}
         holdout_refs = {match.reference_match_id for match in holdout.matches} | {match.reference_evidence_set_id for match in holdout.matches} | {item.claim_id for item in holdout.claims}
         refs = sorted(dev_refs & holdout_refs)
-        templates = sorted(_bundle_values(dev, "template_families") & _bundle_values(holdout, "template_families"))
+        def template_values(bundle: EvaluationBundle) -> set[str]:
+            return _bundle_values(bundle, "template_families") | _match_values(bundle, "template_family")
+        templates = sorted(template_values(dev) & template_values(holdout))
         labels = {claim.claim_text for claim in (*dev.claims, *holdout.claims)}
         contamination: set[str] = set()
         for record in _iter_records(corpus):

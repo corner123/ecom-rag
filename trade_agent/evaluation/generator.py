@@ -173,6 +173,7 @@ def _build_bundle(manifest: Mapping[str, Any], role: str, seed: int) -> Evaluati
         ordinal = len(cases) + 1
         case_id = f"case-{role}-{ordinal:03d}"
         reference_set_id = f"reference-set-{role}-{ordinal:03d}"
+        template_family = f"{task_type.value}:{'restricted-review-form' if role == 'holdout' else 'direct-query-form'}"
         claim_ids: tuple[str, ...] = ()
         if answerable:
             claim_text = text or " ".join(fact.claim_text for fact in used)
@@ -198,6 +199,7 @@ def _build_bundle(manifest: Mapping[str, Any], role: str, seed: int) -> Evaluati
                 matches.append(ReferenceMatch(
                     reference_match_id=f"reference-match-{role}-{ordinal:03d}-{index:02d}",
                     reference_evidence_set_id=reference_set_id, branch=branch, entity=fact.entity, event=fact.event,
+                    template_family=template_family,
                     source_type=fact.source_type, path=fact.path, chunk_hash=fact.chunk_hash,
                     canonical_url=fact.canonical_url, source_revision=fact.source_revision,
                     near_content=str(fact.payload.get("body", fact.claim_text)),
@@ -216,7 +218,7 @@ def _build_bundle(manifest: Mapping[str, Any], role: str, seed: int) -> Evaluati
             "chunk_hashes": tuple(fact.chunk_hash for fact in used),
             "near_chunk_hashes": tuple(content_sha256(f"near-chunk/v1:{fact.chunk_hash}") for fact in used),
             "near_contents": tuple(str(fact.payload.get("body", fact.claim_text)) for fact in used),
-            "template_families": (f"{task_type.value}:{'restricted-review-form' if role == 'holdout' else 'direct-query-form'}",),
+            "template_families": (template_family,),
             "canonical_urls": tuple(fact.canonical_url for fact in used),
             "source_revisions": tuple(fact.source_revision for fact in used),
         })

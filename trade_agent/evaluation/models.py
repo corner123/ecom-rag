@@ -164,6 +164,7 @@ class ReferenceMatch(_Contract):
     reference_match_id: Identifier
     reference_evidence_set_id: Identifier
     branch: Literal["rag", "sql"]
+    template_family: LabelText
     entity: LabelText
     event: LabelText
     source_type: Identifier
@@ -176,7 +177,7 @@ class ReferenceMatch(_Contract):
     runtime_evidence_id: None = None
     sql_dimensions: dict[Identifier, Any] = Field(default_factory=dict)
 
-    @field_validator("reference_match_id", "reference_evidence_set_id", "entity", "event", "source_type", "path", "canonical_url", "near_content")
+    @field_validator("reference_match_id", "reference_evidence_set_id", "template_family", "entity", "event", "source_type", "path", "canonical_url", "near_content")
     @classmethod
     def nonblank_values(cls, value: str) -> str:
         return _nonblank(value)
@@ -197,6 +198,7 @@ class ReferenceMatch(_Contract):
             "reference_match_id": "reference-match-development-001",
             "reference_evidence_set_id": "reference-set-development-001",
             "branch": "rag",
+            "template_family": "operating_status:direct-query-form",
             "entity": "Example Exporter",
             "event": "news-001",
             "source_type": "industry_news",

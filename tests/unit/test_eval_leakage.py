@@ -107,6 +107,60 @@ def test_generated_partitions_use_distinct_actual_template_forms(tmp_path) -> No
     assert dev_forms.isdisjoint(holdout_forms)
 
 
+def test_template_leakage_survives_serialized_round_trip(tmp_path) -> None:
+    """A serialized reference match must retain its structural template signature."""
+    from trade_agent.evaluation.generator import EvaluationBundle, read_bundle, write_bundle
+    from trade_agent.evaluation.models import ReferenceMatch
+    from trade_agent.evaluation.leakage import LeakageAuditor
+
+    template = "operating_status:publisher-signal"
+    development = EvaluationBundle(
+        cases=(_case("development-1", "What is Harbor CN Imports 01 status?", "development"),),
+        matches=(ReferenceMatch.validated_fixture(
+            reference_match_id="reference-match-development-1",
+            reference_evidence_set_id="reference-set-development-1",
+            entity="Harbor CN Imports 01",
+            event="news-1",
+            path="news/stories.json#story-NEWS-001",
+            chunk_hash="a" * 64,
+            canonical_url="https://newsroom.example/story/001",
+            source_revision="b" * 64,
+            near_content="Harbor has a unique capacity signal.",
+            template_family=template,
+        ),),
+        provenance=({"template_families": (template,)},),
+    )
+    holdout = EvaluationBundle(
+        cases=(_case("holdout-1", "What is River DE Exports 03 status?", "holdout"),),
+        matches=(ReferenceMatch.validated_fixture(
+            reference_match_id="reference-match-holdout-1",
+            reference_evidence_set_id="reference-set-holdout-1",
+            entity="River DE Exports 03",
+            event="news-2",
+            path="news/stories.json#story-NEWS-002",
+            chunk_hash="c" * 64,
+            canonical_url="https://newsroom.example/story/002",
+            source_revision="d" * 64,
+            near_content="River has a distinct production signal.",
+            template_family=template,
+        ),),
+        provenance=({"template_families": (template,)},),
+    )
+
+    fresh = LeakageAuditor().audit(development, holdout, corpus=())
+    assert fresh.passed is False
+    assert fresh.entity_event_templates == (template,)
+
+    write_bundle(development, tmp_path / "development", case_filename="dev.jsonl", reference_filename="references.jsonl")
+    write_bundle(holdout, tmp_path / "holdout", case_filename="holdout.jsonl", reference_filename="references.jsonl")
+    reloaded_development = read_bundle(tmp_path / "development/dev.jsonl", tmp_path / "development/references.jsonl")
+    reloaded_holdout = read_bundle(tmp_path / "holdout/holdout.jsonl", tmp_path / "holdout/references.jsonl")
+
+    serialized = LeakageAuditor().audit(reloaded_development, reloaded_holdout, corpus=())
+    assert serialized.passed is False
+    assert serialized.entity_event_templates == (template,)
+
+
 def test_fresh_and_round_tripped_generated_bundles_have_identical_leakage_reports(tmp_path) -> None:
     import json
     from pathlib import Path
