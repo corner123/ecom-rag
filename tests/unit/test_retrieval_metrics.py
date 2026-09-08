@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -9,6 +10,7 @@ from trade_agent.evaluation.models import (
     ReferenceClaimRecord,
     ReferenceEvidenceRecord,
 )
+from trade_agent.evaluation.generator import read_bundle
 from trade_agent.evaluation.retrieval_metrics import evaluate_retrieval
 
 
@@ -59,6 +61,15 @@ def _outcome(ids: list[str], **attributes):
     }
     defaults.update(attributes)
     return SimpleNamespace(**defaults)
+
+
+def _development_bundle():
+    root = Path("data/eval/trade_intel")
+    return read_bundle(root / "dev_public.jsonl", root / "references_dev.jsonl")
+
+
+def _bundle_references(bundle):
+    return (*bundle.evidence, *bundle.claims, *bundle.matches, *bundle.decisions)
 
 
 def test_recall_precision_and_context_recall_are_hand_calculated() -> None:
@@ -134,6 +145,69 @@ def test_answerable_case_without_reference_evidence_is_rejected() -> None:
 
     with pytest.raises(ValueError, match="answerable cases require at least one reference evidence ID"):
         evaluate_retrieval(_case(claim_ids=(c1,)), (), _outcome([]))
+
+
+def test_real_bundle_reference_match_scores_nested_runtime_metadata_without_inventing_id() -> None:
+    bundle = _development_bundle()
+    case = next(case for case in bundle.cases if case.answerable)
+    match = next(
+        match
+        for match in bundle.matches
+        if match.reference_evidence_set_id == case.reference_evidence_set_id
+    )
+    runtime_id = "chunk_runtime_rag_001"
+    hit = SimpleNamespace(
+        chunk_id=runtime_id,
+        record=SimpleNamespace(
+            metadata={
+                "branch": match.branch,
+                "path": match.path,
+                "content_hash": match.chunk_hash,
+                "canonical_url": match.canonical_url,
+                "parent_document_hash": match.source_revision,
+                "source_type": match.source_type,
+            }
+        ),
+    )
+
+    metrics = evaluate_retrieval(
+        case,
+        _bundle_references(bundle),
+        _outcome([], hits=(hit,)),
+    )
+
+    assert metrics.retrieved_evidence_ids == (runtime_id,)
+    assert metrics.evidence_ranks == {match.reference_match_id: 1}
+    assert (metrics.recall_at_10, metrics.context_precision, metrics.context_recall) == (1.0, 1.0, 1.0)
+
+
+def test_real_bundle_sql_reference_match_scores_nested_sql_dimensions() -> None:
+    bundle = _development_bundle()
+    match = next(match for match in bundle.matches if match.branch == "sql")
+    case = next(
+        case
+        for case in bundle.cases
+        if case.reference_evidence_set_id == match.reference_evidence_set_id
+    )
+    runtime_id = "sql_runtime_result_001"
+    hit = {
+        "evidence_id": runtime_id,
+        "metadata": {
+            "branch": "sql",
+            "sql_dimensions": {**match.sql_dimensions, "row_count": 1},
+        },
+    }
+
+    metrics = evaluate_retrieval(
+        case,
+        _bundle_references(bundle),
+        _outcome([], hits=(hit,)),
+    )
+
+    assert metrics.retrieved_evidence_ids == (runtime_id,)
+    assert metrics.evidence_ranks == {match.reference_match_id: 1}
+    assert metrics.recall_at_10 == 1.0
+    assert metrics.context_recall == 1.0
 
 
 def test_unanswerable_cases_measure_clean_retrieval_and_noise_without_perfect_recall() -> None:

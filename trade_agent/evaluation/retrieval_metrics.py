@@ -43,9 +43,9 @@ def evaluate_retrieval(
 ) -> RetrievalMetrics:
     """Score ranked evidence IDs against the private references for ``case``.
 
-    Relevant evidence is the union of required reference-evidence records and
-    evidence IDs attached to the case's key reference claims. Duplicate runtime
-    hits retain their positions but receive relevance credit only once.
+    Required units are the union of reference Evidence IDs and reviewed
+    reference-match keys. Duplicate runtime hits retain their positions but
+    receive relevance credit only once.
     """
 
     if not isinstance(case, EvaluationCase):
@@ -54,11 +54,19 @@ def evaluate_retrieval(
         raise ValueError("k must be a positive integer")
 
     records = tuple(references)
-    claim_evidence, required_evidence = _reference_ids(case, records)
-    retrieved_ids = tuple(_hit_id(hit) for hit in getattr(retrieval_outcome, "hits", ()))
+    claim_evidence, required_evidence, reference_matches = _reference_targets(case, records)
+    hits = tuple(getattr(retrieval_outcome, "hits", ()))
+    retrieved_ids = tuple(_hit_id(hit) for hit in hits)
+    matched_units = tuple(
+        _matched_units(hit, evidence_id, required_evidence, reference_matches)
+        for hit, evidence_id in zip(hits, retrieved_ids, strict=True)
+    )
+    required_units = required_evidence | {
+        match.reference_match_id for match in reference_matches
+    }
     evidence_ranks = {
-        evidence_id: _first_rank(retrieved_ids, evidence_id)
-        for evidence_id in sorted(required_evidence)
+        required_key: _first_matching_rank(matched_units, required_key)
+        for required_key in sorted(required_units)
     }
     candidate_counts = _candidate_counts(retrieval_outcome, len(retrieved_ids))
     filter_counts = _named_counts(
@@ -95,24 +103,37 @@ def evaluate_retrieval(
             clean_unanswerable_retrieval=noise_count == 0,
         )
 
-    if not required_evidence:
-        raise ValueError("answerable cases require at least one reference evidence ID")
+    if not required_units:
+        raise ValueError(
+            "answerable cases require at least one reference evidence ID or reference match"
+        )
 
     top_ids = retrieved_ids[:k]
-    relevant_credit = _unique_relevant_count(top_ids, required_evidence)
+    top_matched_units = matched_units[:k]
+    credited_units: set[str] = set()
+    relevant_positions = 0
+    for units in top_matched_units:
+        new_units = units - credited_units
+        if new_units:
+            relevant_positions += 1
+            credited_units.update(new_units)
+    relevant_credit = len(credited_units)
     covered_claims = sum(
-        bool(set(evidence_ids).intersection(top_ids))
-        for claim_id, evidence_ids in claim_evidence.items()
-        if claim_id in case.key_claim_ids
+        any(
+            evidence_ranks.get(required_key) is not None
+            and evidence_ranks[required_key] <= k
+            for required_key in claim_evidence.get(claim_id, ())
+        )
+        for claim_id in case.key_claim_ids
     )
     first_relevant_rank = next(
-        (rank for rank, evidence_id in enumerate(top_ids, start=1) if evidence_id in required_evidence),
+        (rank for rank, units in enumerate(top_matched_units, start=1) if units),
         None,
     )
     return RetrievalMetrics(
         cutoff=k,
-        recall_at_10=relevant_credit / len(required_evidence),
-        context_precision=relevant_credit / len(top_ids) if top_ids else 0.0,
+        recall_at_10=relevant_credit / len(required_units),
+        context_precision=relevant_positions / len(top_ids) if top_ids else 0.0,
         context_recall=covered_claims / len(case.key_claim_ids),
         reciprocal_rank=0.0 if first_relevant_rank is None else 1.0 / first_relevant_rank,
         retrieved_evidence_ids=retrieved_ids,
@@ -122,17 +143,18 @@ def evaluate_retrieval(
         degradation=degradation,
         status=status,
         latency_ms=latency_ms,
-        retrieval_noise_count=len(top_ids) - relevant_credit,
-        retrieval_noise_rate=(len(top_ids) - relevant_credit) / len(top_ids) if top_ids else 0.0,
+        retrieval_noise_count=len(top_ids) - relevant_positions,
+        retrieval_noise_rate=(len(top_ids) - relevant_positions) / len(top_ids) if top_ids else 0.0,
         clean_unanswerable_retrieval=None,
     )
 
 
-def _reference_ids(
+def _reference_targets(
     case: EvaluationCase, records: tuple[Any, ...]
-) -> tuple[dict[str, tuple[str, ...]], set[str]]:
+) -> tuple[dict[str, tuple[str, ...]], set[str], tuple[Any, ...]]:
     claim_evidence: dict[str, tuple[str, ...]] = {}
     required_evidence: set[str] = set()
+    reference_matches: list[Any] = []
     for record in records:
         if getattr(record, "reference_evidence_set_id", None) != case.reference_evidence_set_id:
             continue
@@ -143,31 +165,144 @@ def _reference_ids(
             required_evidence.update(evidence_ids)
         if getattr(record, "required", False) is True and hasattr(record, "evidence_id"):
             required_evidence.add(record.evidence_id)
-    return claim_evidence, required_evidence
+        if isinstance(getattr(record, "reference_match_id", None), str):
+            reference_matches.append(record)
+    match_keys = tuple(match.reference_match_id for match in reference_matches)
+    for claim_id in case.key_claim_ids:
+        if not claim_evidence.get(claim_id):
+            claim_evidence[claim_id] = match_keys
+    return claim_evidence, required_evidence, tuple(reference_matches)
 
 
 def _hit_id(hit: Any) -> str:
-    evidence_id = getattr(hit, "evidence_id", None)
+    evidence_id = _read(hit, "evidence_id")
     if evidence_id is None:
-        evidence_id = getattr(hit, "chunk_id", None)
+        evidence_id = _read(hit, "chunk_id")
     if not isinstance(evidence_id, str) or not evidence_id:
         raise ValueError("each retrieval hit must expose a nonblank evidence_id or chunk_id")
     return evidence_id
 
 
-def _first_rank(retrieved_ids: tuple[str, ...], evidence_id: str) -> int | None:
-    try:
-        return retrieved_ids.index(evidence_id) + 1
-    except ValueError:
-        return None
+def _first_matching_rank(matched_units: tuple[frozenset[str], ...], required_key: str) -> int | None:
+    return next(
+        (rank for rank, units in enumerate(matched_units, start=1) if required_key in units),
+        None,
+    )
 
 
-def _unique_relevant_count(retrieved_ids: tuple[str, ...], required: set[str]) -> int:
-    credited: set[str] = set()
-    for evidence_id in retrieved_ids:
-        if evidence_id in required:
-            credited.add(evidence_id)
-    return len(credited)
+def _matched_units(
+    hit: Any,
+    evidence_id: str,
+    required_evidence: set[str],
+    reference_matches: tuple[Any, ...],
+) -> frozenset[str]:
+    units = {evidence_id} if evidence_id in required_evidence else set()
+    direct_match_id = _lookup(_hit_layers(hit), ("reference_match_id",))
+    if isinstance(direct_match_id, str):
+        units.update(
+            match.reference_match_id
+            for match in reference_matches
+            if match.reference_match_id == direct_match_id
+        )
+        return frozenset(units)
+    candidates = [
+        match.reference_match_id
+        for match in reference_matches
+        if _dimensions_match(hit, match)
+    ]
+    # A dimensional hit must identify exactly one reviewed match. Direct
+    # reference_match_id is available for otherwise ambiguous sources.
+    if len(candidates) == 1:
+        units.add(candidates[0])
+    return frozenset(units)
+
+
+def _dimensions_match(hit: Any, reference_match: Any) -> bool:
+    layers = _hit_layers(hit)
+    runtime_branch = _lookup(layers, ("branch",))
+    if runtime_branch is not None and _scalar(runtime_branch) != reference_match.branch:
+        return False
+
+    if reference_match.branch == "sql" and reference_match.sql_dimensions:
+        dimensions = _runtime_dimensions(layers)
+        return all(
+            name in dimensions and _scalar(dimensions[name]) == _scalar(expected)
+            for name, expected in reference_match.sql_dimensions.items()
+        )
+
+    identities = (
+        ("path", ("path", "source_path", "relative_path")),
+        ("chunk_hash", ("chunk_hash", "content_hash")),
+        ("canonical_url", ("canonical_url",)),
+        ("source_revision", ("source_revision", "parent_document_hash")),
+    )
+    compared = 0
+    for reference_name, runtime_names in identities:
+        runtime_value = _lookup(layers, runtime_names)
+        if runtime_value is None:
+            continue
+        compared += 1
+        if _scalar(runtime_value) != _scalar(getattr(reference_match, reference_name)):
+            return False
+    if compared == 0:
+        return False
+    for reference_name, runtime_names in (
+        ("source_type", ("source_type",)),
+        ("entity", ("entity", "company", "company_name")),
+        ("event", ("event",)),
+    ):
+        runtime_value = _lookup(layers, runtime_names)
+        if runtime_value is not None and _scalar(runtime_value) != _scalar(
+            getattr(reference_match, reference_name)
+        ):
+            return False
+    return True
+
+
+def _hit_layers(hit: Any) -> tuple[Any, ...]:
+    layers: list[Any] = [hit]
+    metadata = _read(hit, "metadata")
+    if metadata is not None:
+        layers.append(metadata)
+    record = _read(hit, "record")
+    if record is not None:
+        layers.append(record)
+        record_metadata = _read(record, "metadata")
+        if record_metadata is not None:
+            layers.append(record_metadata)
+    return tuple(layers)
+
+
+def _runtime_dimensions(layers: tuple[Any, ...]) -> dict[str, Any]:
+    dimensions: dict[str, Any] = {}
+    for layer in layers:
+        for name in ("sql_dimensions", "aggregation_info", "raw"):
+            supplied = _read(layer, name)
+            if isinstance(supplied, Mapping):
+                dimensions.update(supplied)
+        if isinstance(layer, Mapping):
+            dimensions.update(layer)
+    return dimensions
+
+
+def _lookup(layers: tuple[Any, ...], names: tuple[str, ...]) -> Any:
+    for layer in layers:
+        for name in names:
+            value = _read(layer, name)
+            if value is not None:
+                return value
+    return None
+
+
+def _read(value: Any, name: str) -> Any:
+    if isinstance(value, Mapping):
+        return value.get(name)
+    return getattr(value, name, None)
+
+
+def _scalar(value: Any) -> Any:
+    enum_value = getattr(value, "value", None)
+    return enum_value if enum_value is not None else str(value) if not isinstance(value, (str, int, float, bool)) else value
 
 
 def _candidate_counts(outcome: Any, selected_count: int) -> dict[str, int]:
