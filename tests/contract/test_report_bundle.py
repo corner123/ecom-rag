@@ -164,6 +164,8 @@ def test_development_bundle_contains_immutable_evidence_and_verifies(bundle):
     published = json.loads(bundle.aggregate.read_text(encoding="utf-8"))
     assert published["judge"] == {
         "coverage": 0.0,
+        "error_categories": {"judge_not_run": 36},
+        "error_count": 36,
         "errors": ["missing api_key, provider, client, model"],
         "model": None,
         "model_hash": OptionalJudge().evaluate({}).model_hash,
@@ -172,7 +174,7 @@ def test_development_bundle_contains_immutable_evidence_and_verifies(bundle):
         "scores": {"faithfulness": None, "relevance": None},
         "status": "judge_not_run",
         "status_counts": {"judge_not_run": 36},
-        "temperature": None,
+        "temperature": 0.0,
     }
     assert verify_report_bundle(bundle.root).valid is True
 
@@ -251,10 +253,16 @@ def test_holdout_writer_projects_aggregate_through_strict_allowlist(writer, tmp_
         "question": "SECRET HOLDOUT QUESTION",
         "notes": "Escalate Acme immediately",
         "nested": {"anything": "SECRET REFERENCE CLAIM"},
-        "degradation": ["SECRET source excerpt", "dense:failed"],
+        "degradation": ["SECRET source excerpt", "Acme:failed", "dense:failed"],
     }
     (run.path / "aggregate.json").write_text(canonical_json(unsafe_aggregate) + "\n", encoding="utf-8")
     unsafe_run = EvaluationRun(run.path, run.manifest, unsafe_aggregate)
+    rows = [json.loads(line) for line in (run.path / "per_query.jsonl").read_text().splitlines()]
+    for row in rows:
+        row["judge"]["errors"] = ["Escalate Acme immediately"]
+    (run.path / "per_query.jsonl").write_text(
+        "".join(canonical_json(row) + "\n" for row in rows), encoding="utf-8"
+    )
 
     bundle = writer.write(unsafe_run, tmp_path / "reports")
     published = json.loads(bundle.aggregate.read_text(encoding="utf-8"))
@@ -265,6 +273,9 @@ def test_holdout_writer_projects_aggregate_through_strict_allowlist(writer, tmp_
     assert "SECRET" not in public
     assert "Acme" not in public
     assert published["degradation"] == ["dense:failed"]
+    assert published["judge"]["errors"] == []
+    assert published["judge"]["error_count"] == 15
+    assert published["judge"]["error_categories"] == {"judge_not_run": 15}
 
 
 def test_failed_judge_preserves_null_scores_errors_and_identifiers(writer, tmp_path):
@@ -276,7 +287,6 @@ def test_failed_judge_preserves_null_scores_errors_and_identifiers(writer, tmp_p
     failed = OptionalJudge(
         api_key="test", provider="test-provider", model="judge-v1", client=fail_client
     ).evaluate({}).to_dict()
-    failed["temperature"] = 0.0
     rows = [json.loads(line) for line in (run.path / "per_query.jsonl").read_text().splitlines()]
     for row in rows:
         row["judge"] = failed
@@ -294,6 +304,74 @@ def test_failed_judge_preserves_null_scores_errors_and_identifiers(writer, tmp_p
     }
     assert len(judge["prompt_hash"]) == len(judge["model_hash"]) == 64
     assert verify_report_bundle(bundle.root).valid is True
+
+
+def test_completed_real_shape_judge_reports_frozen_temperature(writer, tmp_path):
+    run = _run(tmp_path / "runs")
+    completed = OptionalJudge(
+        api_key="test",
+        provider="test-provider",
+        model="judge-v1",
+        client=lambda **_: '{"faithfulness":0.75,"relevance":1.0}',
+    ).evaluate({}).to_dict()
+    rows = [json.loads(line) for line in (run.path / "per_query.jsonl").read_text().splitlines()]
+    for row in rows:
+        row["judge"] = completed
+    (run.path / "per_query.jsonl").write_text(
+        "".join(canonical_json(row) + "\n" for row in rows), encoding="utf-8"
+    )
+    aggregate = {**run.aggregate, "judge_coverage": 1.0}
+    (run.path / "aggregate.json").write_text(canonical_json(aggregate) + "\n", encoding="utf-8")
+    run = EvaluationRun(run.path, run.manifest, aggregate)
+
+    bundle = writer.write(run, tmp_path / "reports")
+    judge = json.loads(bundle.aggregate.read_text(encoding="utf-8"))["judge"]
+    assert judge["status"] == "judge_completed"
+    assert judge["scores"] == {"faithfulness": 0.75, "relevance": 1.0}
+    assert judge["temperature"] == 0.0
+    assert judge["provider"] == "test-provider"
+    assert judge["model"] == "judge-v1"
+    assert judge["error_count"] == 0
+    assert verify_report_bundle(bundle.root).valid is True
+
+
+@pytest.mark.parametrize("judge_update", [
+    {
+        "status": "judge_completed", "status_counts": {"judge_failed": 15},
+        "scores": {"faithfulness": None, "relevance": None}, "coverage": 0.0,
+        "error_count": 15, "error_categories": {"judge_failed": 15},
+    },
+    {
+        "status": "judge_completed", "status_counts": {"judge_completed": 15},
+        "scores": {"faithfulness": None, "relevance": None}, "coverage": 1.0,
+        "error_count": 0, "error_categories": {},
+    },
+    {
+        "status": "judge_not_run", "status_counts": {"judge_not_run": 15},
+        "scores": {"faithfulness": 0.5, "relevance": 0.5}, "coverage": 0.0,
+    },
+    {
+        "status": "judge_completed", "status_counts": {"judge_completed": 15},
+        "scores": {"faithfulness": 0.5, "relevance": 0.5}, "coverage": 0.0,
+        "error_count": 0, "error_categories": {},
+    },
+])
+def test_contradictory_holdout_judge_summary_fails_with_recomputed_checksums(
+    writer, tmp_path, judge_update
+):
+    bundle = writer.write(_run(tmp_path / "runs", role="holdout"), tmp_path / "reports")
+    aggregate = json.loads(bundle.aggregate.read_text(encoding="utf-8"))
+    aggregate["judge"].update(judge_update)
+    bundle.aggregate.write_text(canonical_json(aggregate) + "\n", encoding="utf-8")
+    report = json.loads(bundle.report_json.read_text(encoding="utf-8"))
+    report["aggregate"] = aggregate
+    bundle.report_json.write_text(canonical_json(report) + "\n", encoding="utf-8")
+    _rewrite_checksum(bundle.checksums, bundle.aggregate)
+    _rewrite_checksum(bundle.checksums, bundle.report_json)
+
+    result = verify_report_bundle(bundle.root)
+    assert result.valid is False
+    assert any("judge summary" in error for error in result.errors)
 
 
 def test_fresh_development_bundle_with_error_case_tuple_verifies(writer, tmp_path):

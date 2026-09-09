@@ -17,6 +17,7 @@ from uuid import uuid4
 from trade_agent.data.manifest import canonical_json
 from trade_agent.evaluation.error_analysis import ErrorAnalyzer
 from trade_agent.evaluation.models import RunManifest
+from trade_agent.evaluation.profiles import COMPONENTS
 from trade_agent.evaluation.runner import EvaluationRun
 
 
@@ -28,8 +29,10 @@ _JUDGE_STATUSES = {"judge_not_run", "judge_completed", "judge_failed"}
 _RETRIEVAL_METRICS = ("recall_at_10", "context_precision", "context_recall", "reciprocal_rank")
 _JUDGE_SCORES = ("faithfulness", "relevance")
 _HASH = re.compile(r"^[0-9a-f]{64}$")
-_DEGRADATION_STATUS = re.compile(
-    r"^[A-Za-z0-9._-]+:(?:degraded|unavailable|not_run|failed)$"
+_DEGRADATION_STATUSES = frozenset(
+    f"{component}:{status}"
+    for component in COMPONENTS
+    for status in ("degraded", "unavailable", "not_run", "failed")
 )
 _COMMON_FILES = {
     "manifest.json",
@@ -150,7 +153,8 @@ def _validate_judge_summary(value: object) -> dict[str, Any]:
         raise ValueError("judge summary must be an object")
     expected_keys = {
         "status", "status_counts", "scores", "errors", "coverage", "prompt_hash",
-        "model_hash", "provider", "model", "temperature",
+        "model_hash", "provider", "model", "temperature", "error_count",
+        "error_categories",
     }
     if set(value) != expected_keys:
         raise ValueError("judge summary has an invalid schema")
@@ -159,7 +163,7 @@ def _validate_judge_summary(value: object) -> dict[str, Any]:
         raise ValueError("judge summary status is invalid")
     counts = value["status_counts"]
     if not isinstance(counts, Mapping) or not counts or any(
-        key not in _JUDGE_STATUSES or type(count) is not int or count < 0
+        key not in _JUDGE_STATUSES or type(count) is not int or count <= 0
         for key, count in counts.items()
     ):
         raise ValueError("judge status counts are invalid")
@@ -173,6 +177,16 @@ def _validate_judge_summary(value: object) -> dict[str, Any]:
     errors = value["errors"]
     if not isinstance(errors, list) or any(not isinstance(item, str) or not item for item in errors):
         raise ValueError("judge errors must be nonblank strings")
+    error_count = value["error_count"]
+    categories = value["error_categories"]
+    if type(error_count) is not int or error_count < 0:
+        raise ValueError("judge summary error_count is invalid")
+    if not isinstance(categories, Mapping) or any(
+        key not in {"judge_not_run", "judge_failed"}
+        or type(count) is not int or count <= 0 or key not in counts
+        for key, count in categories.items()
+    ) or sum(categories.values()) != error_count or len(errors) > error_count:
+        raise ValueError("judge summary error categories are invalid")
     coverage = _finite_number(value["coverage"], field="judge coverage")
     if coverage is None or not 0 <= coverage <= 1:
         raise ValueError("judge coverage must be in [0,1]")
@@ -183,17 +197,34 @@ def _validate_judge_summary(value: object) -> dict[str, Any]:
         if value[field] is not None and (not isinstance(value[field], str) or not value[field]):
             raise ValueError(f"judge {field} must be a nonblank string or null")
     temperature = value["temperature"]
-    if temperature is not None:
-        temperature = _finite_number(temperature, field="judge temperature")
-    if status in {"judge_not_run", "judge_failed"} and any(
-        score is not None for score in normalized_scores.values()
-    ):
-        raise ValueError("an unscored judge status requires null scores")
+    temperature = _finite_number(temperature, field="judge temperature")
+    if temperature != 0:
+        raise ValueError("judge temperature must match the frozen value 0")
+    positive_statuses = tuple(sorted(counts))
+    expected_status = positive_statuses[0] if len(positive_statuses) == 1 else "mixed"
+    if status != expected_status:
+        raise ValueError("judge summary status does not match status_counts")
+    completed_count = counts.get("judge_completed", 0)
+    has_scores = [score is not None for score in normalized_scores.values()]
+    if completed_count and not all(has_scores):
+        raise ValueError("judge summary with completed rows requires non-null scores")
+    if not completed_count and any(has_scores):
+        raise ValueError("judge summary without completed rows requires null scores")
+    expected_coverage = completed_count / sum(counts.values())
+    if not math.isclose(coverage, expected_coverage):
+        raise ValueError("judge summary coverage does not match completed count")
+    expected_model_hash = sha256(canonical_json({
+        "provider": value["provider"], "model": value["model"], "temperature": 0,
+    }).encode()).hexdigest()
+    if value["model_hash"] != expected_model_hash:
+        raise ValueError("judge summary model hash does not match its identifiers")
     return {
         "status": status,
         "status_counts": dict(sorted(counts.items())),
         "scores": normalized_scores,
         "errors": list(errors),
+        "error_count": error_count,
+        "error_categories": dict(sorted(categories.items())),
         "coverage": coverage,
         "prompt_hash": value["prompt_hash"],
         "model_hash": value["model_hash"],
@@ -207,6 +238,8 @@ def _judge_summary(rows: tuple[Mapping[str, Any], ...]) -> dict[str, Any]:
     statuses: Counter[str] = Counter()
     score_values: dict[str, list[float]] = {name: [] for name in _JUDGE_SCORES}
     errors: set[str] = set()
+    error_count = 0
+    error_categories: Counter[str] = Counter()
     coverage: list[float] = []
     identities: dict[str, list[object]] = {
         name: [] for name in ("prompt_hash", "model_hash", "provider", "model", "temperature")
@@ -236,6 +269,11 @@ def _judge_summary(rows: tuple[Mapping[str, Any], ...]) -> dict[str, Any]:
         ):
             raise ValueError("per-query judge errors must be nonblank strings")
         errors.update(judge_errors)
+        error_count += len(judge_errors)
+        if judge_errors and status in {"judge_not_run", "judge_failed"}:
+            error_categories[status] += len(judge_errors)
+        elif judge_errors:
+            raise ValueError("completed judge rows cannot contain errors")
         row_coverage = _finite_number(judge.get("coverage"), field="judge coverage")
         if row_coverage is None or not 0 <= row_coverage <= 1:
             raise ValueError("judge coverage must be in [0,1]")
@@ -250,6 +288,8 @@ def _judge_summary(rows: tuple[Mapping[str, Any], ...]) -> dict[str, Any]:
             for name, values in score_values.items()
         },
         "errors": sorted(errors),
+        "error_count": error_count,
+        "error_categories": dict(sorted(error_categories.items())),
         "coverage": sum(coverage) / len(coverage),
         **{
             name: _consistent(values, field=name)
@@ -257,6 +297,12 @@ def _judge_summary(rows: tuple[Mapping[str, Any], ...]) -> dict[str, Any]:
         },
     }
     return _validate_judge_summary(summary)
+
+
+def _public_holdout_judge(judge: Mapping[str, Any]) -> dict[str, Any]:
+    public = _validate_judge_summary(judge)
+    public["errors"] = []
+    return public
 
 
 def _status_counts(value: object, case_count: int) -> dict[str, int]:
@@ -297,14 +343,14 @@ def _holdout_aggregate(source: Mapping[str, Any], judge: Mapping[str, Any]) -> d
         raise ValueError("holdout aggregate degradation statuses are invalid")
     public_degradation = [
         item for item in degradation
-        if isinstance(item, str) and _DEGRADATION_STATUS.fullmatch(item)
+        if isinstance(item, str) and item in _DEGRADATION_STATUSES
     ]
     return {
         "schema_version": "trade-holdout-aggregate/v1",
         "case_count": case_count,
         "status_counts": _status_counts(source.get("status_counts"), case_count),
         "retrieval": _retrieval_summary(source.get("retrieval"), case_count),
-        "judge": _validate_judge_summary(judge),
+        "judge": _public_holdout_judge(judge),
         "degradation": sorted(set(public_degradation)),
     }
 

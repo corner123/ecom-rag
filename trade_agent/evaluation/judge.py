@@ -17,6 +17,7 @@ _SCHEMA = {'type': 'object', 'properties': {
     name: {'type': 'number', 'minimum': 0, 'maximum': 1}
     for name in ('faithfulness', 'relevance')},
     'required': ['faithfulness', 'relevance'], 'additionalProperties': False}
+_TEMPERATURE = 0
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,7 @@ class JudgeOutcome:
     model_hash: str
     provider: str | None
     model: str | None
+    temperature: int
 
     @property
     def faithfulness(self) -> float | None:
@@ -62,10 +64,10 @@ class OptionalJudge:
     def evaluate(self, answer: Any, *, evidence: Any = (), question: str = '') -> JudgeOutcome:
         prompt_hash = sha256(canonical_json({'prompt': _PROMPT, 'schema': _SCHEMA}).encode()).hexdigest()
         model_hash = sha256(canonical_json({'provider': self.provider, 'model': self.model,
-                                          'temperature': 0}).encode()).hexdigest()
+                                          'temperature': _TEMPERATURE}).encode()).hexdigest()
         def outcome(status, scores=None, errors=()):
             return JudgeOutcome(status, scores, errors, 1.0 if scores is not None else 0.0,
-                                prompt_hash, model_hash, self.provider, self.model)
+                                prompt_hash, model_hash, self.provider, self.model, _TEMPERATURE)
         missing = [name for name, value in (
             ('api_key', self.api_key), ('provider', self.provider), ('client', self.client), ('model', self.model)
         ) if not value]
@@ -73,7 +75,7 @@ class OptionalJudge:
             return outcome('judge_not_run', errors=('missing ' + ', '.join(missing),))
         try:
             payload = canonical_json(deepcopy({'answer': answer, 'evidence': evidence, 'question': question}))
-            raw = self.client(model=self.model, temperature=0,
+            raw = self.client(model=self.model, temperature=_TEMPERATURE,
                 messages=[{'role': 'system', 'content': _PROMPT}, {'role': 'user', 'content': payload}],
                 response_format={'type': 'json_schema', 'json_schema': {
                     'name': 'semantic_residual', 'strict': True, 'schema': deepcopy(_SCHEMA)}})

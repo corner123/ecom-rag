@@ -34,6 +34,8 @@ def test_success_strict_json_temperature_hashes_and_separate_scores():
     assert outcome.status == 'judge_completed'
     assert outcome.faithfulness == 0.75
     assert outcome.coverage == 1.0
+    assert outcome.temperature == 0
+    assert outcome.to_dict()['temperature'] == 0
     assert len(outcome.prompt_hash) == len(outcome.model_hash) == 64
     assert calls[0]['temperature'] == 0
     assert calls[0]['response_format']['json_schema']['strict'] is True
