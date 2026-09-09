@@ -14,7 +14,7 @@ def _latest(root: Path, kind: str) -> Path:
     for report_path in root.glob("*/report.json"):
         try:
             value = json.loads(report_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, UnicodeError, json.JSONDecodeError):
             continue
         if value.get("dataset_role") == kind:
             candidates.append((str(value.get("created_at", "")), report_path.parent.name, report_path.parent))

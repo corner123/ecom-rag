@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
+import math
 from pathlib import Path, PurePosixPath
 import re
 import shutil
@@ -21,6 +23,14 @@ from trade_agent.evaluation.runner import EvaluationRun
 _CHECKSUM_LINE = re.compile(r"^([0-9a-f]{64})  (.+)$")
 _SAFE_PART = re.compile(r"[^A-Za-z0-9._-]+")
 _ROLES = {"development", "holdout"}
+_RESULT_STATUSES = {"completed", "refused", "failed"}
+_JUDGE_STATUSES = {"judge_not_run", "judge_completed", "judge_failed"}
+_RETRIEVAL_METRICS = ("recall_at_10", "context_precision", "context_recall", "reciprocal_rank")
+_JUDGE_SCORES = ("faithfulness", "relevance")
+_HASH = re.compile(r"^[0-9a-f]{64}$")
+_DEGRADATION_STATUS = re.compile(
+    r"^[A-Za-z0-9._-]+:(?:degraded|unavailable|not_run|failed)$"
+)
 _COMMON_FILES = {
     "manifest.json",
     "aggregate.json",
@@ -35,26 +45,6 @@ _HOLDOUT_MARKDOWN_FORBIDDEN = re.compile(
     r"(?i)\b(?:question|reference[ _-]?(?:claim|evidence)|decision[ _-]?(?:label|text)|"
     r"source[ _-]?excerpt|per[ _-]?query|case[ _-]?id|claim[ _-]?id)\b"
 )
-_PRIVATE_AGGREGATE_FIELDS = {
-    "question",
-    "questions",
-    "case_id",
-    "claim_id",
-    "claim_ids",
-    "claim_text",
-    "reference_claim",
-    "reference_claims",
-    "reference_evidence",
-    "reference_evidence_ids",
-    "decision_label",
-    "decision_text",
-    "source_excerpt",
-    "source_excerpts",
-    "per_query",
-    "rows",
-}
-
-
 @dataclass(frozen=True)
 class ReportBundle:
     root: Path
@@ -91,7 +81,7 @@ def _safe_part(value: object, *, field: str) -> str:
 def _read_json(path: Path) -> Mapping[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"cannot read JSON artifact {path}: {exc}") from exc
     if not isinstance(value, Mapping):
         raise ValueError(f"JSON artifact must contain an object: {path}")
@@ -110,15 +100,267 @@ def _safe_artifact(metadata: Mapping[str, Any], name: str, default: str) -> Path
     return value
 
 
-def _contains_private_fields(value: object) -> bool:
-    if isinstance(value, Mapping):
-        for key, child in value.items():
-            normalized = str(key).casefold().replace("-", "_").replace(" ", "_")
-            if normalized in _PRIVATE_AGGREGATE_FIELDS or _contains_private_fields(child):
-                return True
-    elif isinstance(value, (list, tuple)):
-        return any(_contains_private_fields(item) for item in value)
-    return False
+def _read_rows(path: Path, run_id: str, case_count: int) -> tuple[Mapping[str, Any], ...]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise ValueError(f"cannot read per-query artifact {path}: {exc}") from exc
+    rows: list[Mapping[str, Any]] = []
+    case_ids: set[str] = set()
+    for line_number, line in enumerate(lines, 1):
+        try:
+            row = json.loads(line)
+            result = row["result"]
+            case_id = str(result["case_id"])
+            if not isinstance(row, Mapping) or result.get("run_id") != run_id:
+                raise ValueError("row identity mismatch")
+            if case_id in case_ids:
+                raise ValueError("duplicate case ID")
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError(f"invalid per-query row {line_number}: {exc}") from exc
+        case_ids.add(case_id)
+        rows.append(row)
+    if len(rows) != case_count:
+        raise ValueError("per-query row count does not match run manifest")
+    return tuple(rows)
+
+
+def _finite_number(value: object, *, field: str, nullable: bool = False) -> float | None:
+    if value is None and nullable:
+        return None
+    if type(value) not in (int, float) or not math.isfinite(value):
+        raise ValueError(f"{field} must be a finite number")
+    return float(value)
+
+
+def _consistent(values: list[object], *, field: str) -> object:
+    if not values or any(value != values[0] for value in values[1:]):
+        raise ValueError(f"per-query judge {field} must be consistent")
+    return values[0]
+
+
+def _validate_judge_summary(value: object) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("judge summary must be an object")
+    expected_keys = {
+        "status", "status_counts", "scores", "errors", "coverage", "prompt_hash",
+        "model_hash", "provider", "model", "temperature",
+    }
+    if set(value) != expected_keys:
+        raise ValueError("judge summary has an invalid schema")
+    status = value["status"]
+    if status not in _JUDGE_STATUSES | {"mixed"}:
+        raise ValueError("judge summary status is invalid")
+    counts = value["status_counts"]
+    if not isinstance(counts, Mapping) or not counts or any(
+        key not in _JUDGE_STATUSES or type(count) is not int or count < 0
+        for key, count in counts.items()
+    ):
+        raise ValueError("judge status counts are invalid")
+    scores = value["scores"]
+    if not isinstance(scores, Mapping) or set(scores) != set(_JUDGE_SCORES):
+        raise ValueError("judge scores have an invalid schema")
+    normalized_scores = {
+        name: _finite_number(scores[name], field=f"judge {name}", nullable=True)
+        for name in _JUDGE_SCORES
+    }
+    errors = value["errors"]
+    if not isinstance(errors, list) or any(not isinstance(item, str) or not item for item in errors):
+        raise ValueError("judge errors must be nonblank strings")
+    coverage = _finite_number(value["coverage"], field="judge coverage")
+    if coverage is None or not 0 <= coverage <= 1:
+        raise ValueError("judge coverage must be in [0,1]")
+    for field in ("prompt_hash", "model_hash"):
+        if not isinstance(value[field], str) or not _HASH.fullmatch(value[field]):
+            raise ValueError(f"judge {field} must be a SHA-256 digest")
+    for field in ("provider", "model"):
+        if value[field] is not None and (not isinstance(value[field], str) or not value[field]):
+            raise ValueError(f"judge {field} must be a nonblank string or null")
+    temperature = value["temperature"]
+    if temperature is not None:
+        temperature = _finite_number(temperature, field="judge temperature")
+    if status in {"judge_not_run", "judge_failed"} and any(
+        score is not None for score in normalized_scores.values()
+    ):
+        raise ValueError("an unscored judge status requires null scores")
+    return {
+        "status": status,
+        "status_counts": dict(sorted(counts.items())),
+        "scores": normalized_scores,
+        "errors": list(errors),
+        "coverage": coverage,
+        "prompt_hash": value["prompt_hash"],
+        "model_hash": value["model_hash"],
+        "provider": value["provider"],
+        "model": value["model"],
+        "temperature": temperature,
+    }
+
+
+def _judge_summary(rows: tuple[Mapping[str, Any], ...]) -> dict[str, Any]:
+    statuses: Counter[str] = Counter()
+    score_values: dict[str, list[float]] = {name: [] for name in _JUDGE_SCORES}
+    errors: set[str] = set()
+    coverage: list[float] = []
+    identities: dict[str, list[object]] = {
+        name: [] for name in ("prompt_hash", "model_hash", "provider", "model", "temperature")
+    }
+    for row in rows:
+        judge = row.get("judge")
+        if not isinstance(judge, Mapping):
+            raise ValueError("per-query judge payload must be an object")
+        status = judge.get("status")
+        if status not in _JUDGE_STATUSES:
+            raise ValueError("per-query judge status is invalid")
+        statuses[status] += 1
+        scores = judge.get("scores")
+        if status == "judge_completed":
+            if not isinstance(scores, Mapping) or set(scores) != set(_JUDGE_SCORES):
+                raise ValueError("completed judge requires faithfulness and relevance scores")
+            for name in _JUDGE_SCORES:
+                score = _finite_number(scores[name], field=f"judge {name}")
+                if score is None or not 0 <= score <= 1:
+                    raise ValueError(f"judge {name} must be in [0,1]")
+                score_values[name].append(score)
+        elif scores is not None:
+            raise ValueError("not-run or failed judge requires null scores")
+        judge_errors = judge.get("errors", ())
+        if not isinstance(judge_errors, (list, tuple)) or any(
+            not isinstance(item, str) or not item for item in judge_errors
+        ):
+            raise ValueError("per-query judge errors must be nonblank strings")
+        errors.update(judge_errors)
+        row_coverage = _finite_number(judge.get("coverage"), field="judge coverage")
+        if row_coverage is None or not 0 <= row_coverage <= 1:
+            raise ValueError("judge coverage must be in [0,1]")
+        coverage.append(row_coverage)
+        for name in identities:
+            identities[name].append(judge.get(name))
+    summary = {
+        "status": next(iter(statuses)) if len(statuses) == 1 else "mixed",
+        "status_counts": dict(sorted(statuses.items())),
+        "scores": {
+            name: sum(values) / len(values) if values else None
+            for name, values in score_values.items()
+        },
+        "errors": sorted(errors),
+        "coverage": sum(coverage) / len(coverage),
+        **{
+            name: _consistent(values, field=name)
+            for name, values in identities.items()
+        },
+    }
+    return _validate_judge_summary(summary)
+
+
+def _status_counts(value: object, case_count: int) -> dict[str, int]:
+    if not isinstance(value, Mapping) or any(
+        key not in _RESULT_STATUSES or type(count) is not int or count < 0
+        for key, count in value.items()
+    ) or sum(value.values()) != case_count:
+        raise ValueError("aggregate status_counts are invalid")
+    return dict(sorted(value.items()))
+
+
+def _retrieval_summary(value: object, case_count: int) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != set(_RETRIEVAL_METRICS):
+        raise ValueError("aggregate retrieval metrics have an invalid schema")
+    result: dict[str, Any] = {}
+    for name in _RETRIEVAL_METRICS:
+        metric = value[name]
+        if not isinstance(metric, Mapping) or set(metric) != {"value", "scored_count", "total_count"}:
+            raise ValueError(f"aggregate retrieval metric {name} has an invalid schema")
+        scored = metric["scored_count"]
+        total = metric["total_count"]
+        if type(scored) is not int or type(total) is not int or not 0 <= scored <= total or total != case_count:
+            raise ValueError(f"aggregate retrieval metric {name} has invalid counts")
+        result[name] = {
+            "value": _finite_number(metric["value"], field=name, nullable=True),
+            "scored_count": scored,
+            "total_count": total,
+        }
+    return result
+
+
+def _holdout_aggregate(source: Mapping[str, Any], judge: Mapping[str, Any]) -> dict[str, Any]:
+    case_count = source.get("case_count")
+    if type(case_count) is not int or case_count < 15:
+        raise ValueError("holdout aggregate requires at least 15 cases")
+    degradation = source.get("degradation", [])
+    if not isinstance(degradation, list):
+        raise ValueError("holdout aggregate degradation statuses are invalid")
+    public_degradation = [
+        item for item in degradation
+        if isinstance(item, str) and _DEGRADATION_STATUS.fullmatch(item)
+    ]
+    return {
+        "schema_version": "trade-holdout-aggregate/v1",
+        "case_count": case_count,
+        "status_counts": _status_counts(source.get("status_counts"), case_count),
+        "retrieval": _retrieval_summary(source.get("retrieval"), case_count),
+        "judge": _validate_judge_summary(judge),
+        "degradation": sorted(set(public_degradation)),
+    }
+
+
+def _published_aggregate(
+    source: Mapping[str, Any], role: str, judge: Mapping[str, Any]
+) -> dict[str, Any]:
+    if role == "holdout":
+        return _holdout_aggregate(source, judge)
+    result = dict(source)
+    result["judge"] = _validate_judge_summary(judge)
+    return result
+
+
+def _environment_manifest(metadata: Mapping[str, Any], persisted: RunManifest) -> dict[str, Any]:
+    adapter = metadata["adapter"]
+    return {
+        "schema_version": "trade-report-environment/v1",
+        "backend": adapter.get("backend"),
+        "runtime": adapter.get("runtime", {}),
+        "backend_statuses": persisted.backend_statuses,
+    }
+
+
+def _model_manifest(
+    metadata: Mapping[str, Any], persisted: RunManifest, judge: Mapping[str, Any]
+) -> dict[str, Any]:
+    adapter = metadata["adapter"]
+    return {
+        "schema_version": "trade-report-model/v1",
+        "model_id": adapter.get("model_id"),
+        "model_hash": persisted.snapshot.model_hash,
+        "prompt_id": adapter.get("prompt_id"),
+        "prompt_hash": persisted.snapshot.prompt_hash,
+        "judge": {
+            name: judge[name]
+            for name in ("provider", "model", "model_hash", "prompt_hash", "temperature")
+        },
+    }
+
+
+def _config_manifest(metadata: Mapping[str, Any], persisted: RunManifest) -> dict[str, Any]:
+    return {
+        "schema_version": "trade-report-config/v1",
+        "build_id": metadata["adapter"]["build_id"],
+        "profile": metadata.get("profile", {"arm": metadata["arm"]}),
+        "budget": metadata.get("budget", {}),
+        "snapshot": persisted.snapshot.model_dump(mode="json"),
+        "evaluator_id": metadata.get("evaluator_id"),
+    }
+
+
+def _error_analysis(role: str, run: EvaluationRun) -> dict[str, Any]:
+    if role == "development":
+        return {"status": "available", **ErrorAnalyzer().analyze((run,)).to_dict()}
+    return {
+        "schema_version": "trade-error-analysis-placeholder/v1",
+        "dataset_role": "holdout",
+        "status": "not_applicable",
+        "reason": "private_holdout_is_never_used_for_development_error_analysis",
+        "analysis": None,
+    }
 
 
 class ReportWriter:
@@ -154,15 +396,21 @@ class ReportWriter:
 
         aggregate_artifact = _safe_artifact(metadata, "aggregate", "aggregate.json")
         per_query_artifact = _safe_artifact(metadata, "per_query", "per_query.jsonl")
-        aggregate = _read_json(run.path / aggregate_artifact)
-        if dict(aggregate) != dict(run.aggregate):
+        source_aggregate = _read_json(run.path / aggregate_artifact)
+        if dict(source_aggregate) != dict(run.aggregate):
             raise ValueError("EvaluationRun aggregate does not match its persisted artifact")
-        if int(aggregate.get("case_count", -1)) != case_count:
+        if int(source_aggregate.get("case_count", -1)) != case_count:
             raise ValueError("aggregate case_count does not match run manifest")
-        if role == "holdout" and _contains_private_fields(aggregate):
-            raise ValueError("holdout aggregate contains private fields")
         if not (run.path / per_query_artifact).is_file():
             raise ValueError("run per-query artifact is missing")
+        rows = _read_rows(run.path / per_query_artifact, persisted.run_id, case_count)
+        judge = _judge_summary(rows)
+        source_coverage = _finite_number(
+            source_aggregate.get("judge_coverage"), field="aggregate judge coverage"
+        )
+        if source_coverage is None or not math.isclose(source_coverage, judge["coverage"]):
+            raise ValueError("aggregate judge coverage does not match per-query judge payloads")
+        aggregate = _published_aggregate(source_aggregate, role, judge)
 
         created_at = _safe_part(self._now(), field="UTC timestamp")
         nonce = _safe_part(self._nonce(), field="nonce")
@@ -186,45 +434,14 @@ class ReportWriter:
         temporary.mkdir(exist_ok=False)
         try:
             shutil.copyfile(run.path / "manifest.json", temporary / "manifest.json")
-            shutil.copyfile(run.path / aggregate_artifact, temporary / "aggregate.json")
+            _write_json_new(temporary / "aggregate.json", aggregate)
             if role == "development":
                 shutil.copyfile(run.path / per_query_artifact, temporary / "per_query.jsonl")
 
-            adapter = metadata.get("adapter", {})
-            environment_manifest = {
-                "schema_version": "trade-report-environment/v1",
-                "backend": adapter.get("backend"),
-                "runtime": adapter.get("runtime", {}),
-                "backend_statuses": persisted.backend_statuses,
-            }
-            model_manifest = {
-                "schema_version": "trade-report-model/v1",
-                "model_id": adapter.get("model_id"),
-                "model_hash": persisted.snapshot.model_hash,
-                "prompt_id": adapter.get("prompt_id"),
-                "prompt_hash": persisted.snapshot.prompt_hash,
-            }
-            config_manifest = {
-                "schema_version": "trade-report-config/v1",
-                "build_id": build_id,
-                "profile": metadata.get("profile", {"arm": profile}),
-                "budget": metadata.get("budget", {}),
-                "snapshot": persisted.snapshot.model_dump(mode="json"),
-                "evaluator_id": metadata.get("evaluator_id"),
-            }
-            if role == "development":
-                error_analysis: Mapping[str, Any] = {
-                    "status": "available",
-                    **ErrorAnalyzer().analyze((run,)).to_dict(),
-                }
-            else:
-                error_analysis = {
-                    "schema_version": "trade-error-analysis-placeholder/v1",
-                    "dataset_role": "holdout",
-                    "status": "not_applicable",
-                    "reason": "private_holdout_is_never_used_for_development_error_analysis",
-                    "analysis": None,
-                }
+            environment_manifest = _environment_manifest(metadata, persisted)
+            model_manifest = _model_manifest(metadata, persisted, judge)
+            config_manifest = _config_manifest(metadata, persisted)
+            error_analysis = _error_analysis(role, run)
             report = {
                 "schema_version": "trade-evaluation-report/v1",
                 "bundle_id": bundle_id,
@@ -306,14 +523,18 @@ def verify_report_bundle(path: Path) -> VerificationResult:
         return VerificationResult(path, False, ("bundle path is not a safe directory",))
     checksum_path = path / "checksums.sha256"
     entries: dict[str, str] = {}
-    try:
-        lines = checksum_path.read_text(encoding="utf-8").splitlines()
-    except UnicodeError:
+    if checksum_path.is_symlink():
         lines = []
-        errors.append("invalid checksum encoding")
-    except OSError:
-        lines = []
-        errors.append("missing file: checksums.sha256")
+        errors.append("unsafe bundle entry: checksums.sha256")
+    else:
+        try:
+            lines = checksum_path.read_text(encoding="utf-8").splitlines()
+        except UnicodeError:
+            lines = []
+            errors.append("invalid checksum encoding")
+        except OSError:
+            lines = []
+            errors.append("missing file: checksums.sha256")
     for line_number, line in enumerate(lines, 1):
         match = _CHECKSUM_LINE.fullmatch(line)
         if not match:
@@ -345,8 +566,6 @@ def verify_report_bundle(path: Path) -> VerificationResult:
         if sha256((path / name).read_bytes()).hexdigest() != entries[name]:
             errors.append(f"checksum mismatch: {name}")
 
-    manifest: Mapping[str, Any] | None = None
-    report: Mapping[str, Any] | None = None
     try:
         manifest = _read_json(path / "manifest.json")
         report = _read_json(path / "report.json")
@@ -363,6 +582,10 @@ def verify_report_bundle(path: Path) -> VerificationResult:
             message = f"unexpected file: {name}"
             if message not in errors:
                 errors.append(message)
+        case_count = manifest["case_count"]
+        minimum = 36 if role == "development" else 15
+        if type(case_count) is not int or case_count < minimum:
+            errors.append(f"{role} report requires at least {minimum} cases")
         required_report_keys = {
             "schema_version", "bundle_id", "source_run_id", "dataset_role", "created_at",
             "code_sha", "build_id", "profile", "aggregate", "error_analysis_status",
@@ -380,9 +603,52 @@ def verify_report_bundle(path: Path) -> VerificationResult:
         aggregate = _read_json(path / "aggregate.json")
         if report.get("aggregate") != aggregate:
             errors.append("report aggregate does not match aggregate artifact")
+        if aggregate.get("case_count") != case_count:
+            errors.append("aggregate case_count does not match run manifest")
+        if role == "development":
+            rows = _read_rows(path / "per_query.jsonl", persisted.run_id, case_count)
+            judge = _judge_summary(rows)
+            source_coverage = _finite_number(
+                aggregate.get("judge_coverage"), field="aggregate judge coverage"
+            )
+            if source_coverage is None or not math.isclose(source_coverage, judge["coverage"]):
+                errors.append("aggregate judge coverage mismatch")
+            expected_aggregate = _published_aggregate(aggregate, role, judge)
+        else:
+            judge = _validate_judge_summary(aggregate.get("judge"))
+            expected_aggregate = _holdout_aggregate(aggregate, judge)
+        if aggregate != expected_aggregate:
+            errors.append(f"{role} aggregate schema mismatch")
+        if sum(judge["status_counts"].values()) != case_count:
+            errors.append("judge status counts do not match case_count")
+
+        environment = _read_json(path / "environment_manifest.json")
+        model = _read_json(path / "model_manifest.json")
+        config = _read_json(path / "config_manifest.json")
+        analysis = _read_json(path / "error_analysis.json")
+        if environment != _environment_manifest(manifest, persisted):
+            errors.append("environment manifest mismatch")
+        if model != _model_manifest(manifest, persisted, judge):
+            errors.append("model manifest mismatch")
+        if config != _config_manifest(manifest, persisted):
+            errors.append("config manifest mismatch")
+        expected_analysis = _error_analysis(
+            role, EvaluationRun(path=path, manifest=persisted, aggregate=aggregate)
+        )
+        if analysis != expected_analysis:
+            errors.append("error analysis mismatch")
+        if report.get("build_id") != manifest["adapter"]["build_id"]:
+            errors.append("build identity mismatch")
+        if report.get("profile") != manifest["arm"]:
+            errors.append("profile identity mismatch")
+        if report.get("error_analysis_status") != analysis.get("status"):
+            errors.append("error analysis status mismatch")
+
+        markdown = (path / "report.md").read_text(encoding="utf-8")
+        if markdown != ReportWriter._markdown(report):
+            errors.append("report Markdown mismatch")
         if role == "holdout":
-            markdown = (path / "report.md").read_text(encoding="utf-8")
-            if _contains_private_fields(report.get("aggregate")):
+            if report.get("aggregate") != _holdout_aggregate(aggregate, judge):
                 errors.append("holdout redaction failure: report.json")
             if _HOLDOUT_MARKDOWN_FORBIDDEN.search(markdown):
                 errors.append("holdout redaction failure: report.md")

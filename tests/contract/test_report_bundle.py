@@ -8,6 +8,7 @@ import pytest
 from scripts.verify_trade_report import main as verify_main
 from trade_agent.data.manifest import canonical_json
 from trade_agent.evaluation.models import EvaluationSnapshot, RunManifest
+from trade_agent.evaluation.judge import OptionalJudge
 from trade_agent.evaluation.report import ReportWriter, verify_report_bundle
 from trade_agent.evaluation.runner import EvaluationRun
 
@@ -45,12 +46,7 @@ def _row(run_id: str, case_id: str) -> dict:
             "business": None,
         },
         "generation_outcome": None,
-        "judge": {
-            "status": "judge_not_run",
-            "scores": None,
-            "error": "provider was not configured",
-            "coverage": 0.0,
-        },
+        "judge": OptionalJudge().evaluate({}).to_dict(),
     }
 
 
@@ -100,8 +96,13 @@ def _run(root: Path, *, role: str = "development") -> EvaluationRun:
     }
     aggregate = {
         "case_count": case_count,
-        "rule_metrics": {"recall_at_10": 1.0},
-        "judge": {"status": "judge_not_run", "scores": None, "error": "provider was not configured"},
+        "status_counts": {"completed": case_count},
+        "retrieval": {
+            name: {"value": 1.0, "scored_count": case_count, "total_count": case_count}
+            for name in ("recall_at_10", "context_precision", "context_recall", "reciprocal_rank")
+        },
+        "judge_coverage": 0.0,
+        "degradation": [],
     }
     (path / "manifest.json").write_text(canonical_json(manifest_doc) + "\n", encoding="utf-8")
     (path / "aggregate.json").write_text(canonical_json(aggregate) + "\n", encoding="utf-8")
@@ -160,6 +161,19 @@ def test_development_bundle_contains_immutable_evidence_and_verifies(bundle):
     assert bundle.environment_manifest == bundle.root / "environment_manifest.json"
     assert bundle.model_manifest == bundle.root / "model_manifest.json"
     assert bundle.config_manifest == bundle.root / "config_manifest.json"
+    published = json.loads(bundle.aggregate.read_text(encoding="utf-8"))
+    assert published["judge"] == {
+        "coverage": 0.0,
+        "errors": ["missing api_key, provider, client, model"],
+        "model": None,
+        "model_hash": OptionalJudge().evaluate({}).model_hash,
+        "prompt_hash": OptionalJudge().evaluate({}).prompt_hash,
+        "provider": None,
+        "scores": {"faithfulness": None, "relevance": None},
+        "status": "judge_not_run",
+        "status_counts": {"judge_not_run": 36},
+        "temperature": None,
+    }
     assert verify_report_bundle(bundle.root).valid is True
 
 
@@ -208,12 +222,10 @@ def test_invalid_checksum_encoding_fails_without_crashing(bundle):
 def test_holdout_bundle_is_aggregate_only_and_redaction_is_verified(writer, tmp_path):
     run = _run(tmp_path / "runs", role="holdout")
     private_row = run.path / "per_query.jsonl"
-    private_row.write_text(
-        private_row.read_text(encoding="utf-8")
-        + canonical_json({"question": "SECRET HOLDOUT QUESTION", "decision_text": "SECRET LABEL"})
-        + "\n",
-        encoding="utf-8",
-    )
+    rows = [json.loads(line) for line in private_row.read_text(encoding="utf-8").splitlines()]
+    rows[0]["question"] = "SECRET HOLDOUT QUESTION"
+    rows[0]["decision_text"] = "SECRET LABEL"
+    private_row.write_text("".join(canonical_json(row) + "\n" for row in rows), encoding="utf-8")
     bundle = writer.write(run, tmp_path / "reports")
     assert bundle.per_query is None
     assert not (bundle.root / "per_query.jsonl").exists()
@@ -232,14 +244,56 @@ def test_holdout_bundle_is_aggregate_only_and_redaction_is_verified(writer, tmp_
     assert "holdout redaction failure: report.md" in result.errors
 
 
-def test_holdout_writer_rejects_private_fields_in_aggregate(writer, tmp_path):
+def test_holdout_writer_projects_aggregate_through_strict_allowlist(writer, tmp_path):
     run = _run(tmp_path / "runs", role="holdout")
-    unsafe_aggregate = {**run.aggregate, "question": "SECRET HOLDOUT QUESTION"}
+    unsafe_aggregate = {
+        **run.aggregate,
+        "question": "SECRET HOLDOUT QUESTION",
+        "notes": "Escalate Acme immediately",
+        "nested": {"anything": "SECRET REFERENCE CLAIM"},
+        "degradation": ["SECRET source excerpt", "dense:failed"],
+    }
     (run.path / "aggregate.json").write_text(canonical_json(unsafe_aggregate) + "\n", encoding="utf-8")
     unsafe_run = EvaluationRun(run.path, run.manifest, unsafe_aggregate)
 
-    with pytest.raises(ValueError, match="aggregate contains private fields"):
-        writer.write(unsafe_run, tmp_path / "reports")
+    bundle = writer.write(unsafe_run, tmp_path / "reports")
+    published = json.loads(bundle.aggregate.read_text(encoding="utf-8"))
+    assert set(published) == {
+        "schema_version", "case_count", "status_counts", "retrieval", "judge", "degradation"
+    }
+    public = bundle.aggregate.read_text(encoding="utf-8") + bundle.report_markdown.read_text(encoding="utf-8")
+    assert "SECRET" not in public
+    assert "Acme" not in public
+    assert published["degradation"] == ["dense:failed"]
+
+
+def test_failed_judge_preserves_null_scores_errors_and_identifiers(writer, tmp_path):
+    run = _run(tmp_path / "runs")
+
+    def fail_client(**_):
+        raise RuntimeError("judge unavailable")
+
+    failed = OptionalJudge(
+        api_key="test", provider="test-provider", model="judge-v1", client=fail_client
+    ).evaluate({}).to_dict()
+    failed["temperature"] = 0.0
+    rows = [json.loads(line) for line in (run.path / "per_query.jsonl").read_text().splitlines()]
+    for row in rows:
+        row["judge"] = failed
+    (run.path / "per_query.jsonl").write_text(
+        "".join(canonical_json(row) + "\n" for row in rows), encoding="utf-8"
+    )
+
+    bundle = writer.write(run, tmp_path / "reports")
+    judge = json.loads(bundle.aggregate.read_text(encoding="utf-8"))["judge"]
+    assert judge["status"] == "judge_failed"
+    assert judge["scores"] == {"faithfulness": None, "relevance": None}
+    assert judge["errors"] == ["RuntimeError: judge unavailable"]
+    assert {name: judge[name] for name in ("provider", "model", "temperature")} == {
+        "provider": "test-provider", "model": "judge-v1", "temperature": 0.0,
+    }
+    assert len(judge["prompt_hash"]) == len(judge["model_hash"]) == 64
+    assert verify_report_bundle(bundle.root).valid is True
 
 
 def test_holdout_verifier_rejects_private_report_with_recomputed_checksums(writer, tmp_path):
@@ -256,6 +310,50 @@ def test_holdout_verifier_rejects_private_report_with_recomputed_checksums(write
     result = verify_report_bundle(bundle.root)
     assert result.valid is False
     assert "holdout redaction failure: report.json" in result.errors
+
+
+@pytest.mark.parametrize(
+    ("artifact_name", "mutate", "expected"),
+    [
+        ("config_manifest.json", lambda value: value["snapshot"].update(index_hash="f" * 64), "config manifest mismatch"),
+        ("model_manifest.json", lambda value: value.update(model_hash="f" * 64), "model manifest mismatch"),
+        ("environment_manifest.json", lambda value: value.update(backend="different"), "environment manifest mismatch"),
+        ("error_analysis.json", lambda value: value.update(dataset_hash="f" * 64), "error analysis mismatch"),
+    ],
+)
+def test_recomputed_checksums_cannot_certify_inconsistent_derived_manifests(bundle, artifact_name, mutate, expected):
+    artifact = bundle.root / artifact_name
+    value = json.loads(artifact.read_text(encoding="utf-8"))
+    mutate(value)
+    artifact.write_text(canonical_json(value) + "\n", encoding="utf-8")
+    _rewrite_checksum(bundle.checksums, artifact)
+
+    result = verify_report_bundle(bundle.root)
+    assert result.valid is False
+    assert expected in result.errors
+
+
+@pytest.mark.parametrize("artifact_name", ["report.json", "report.md", "model_manifest.json"])
+def test_malformed_utf8_artifact_fails_verifier_and_cli(bundle, artifact_name, capsys):
+    artifact = bundle.root / artifact_name
+    artifact.write_bytes(b"\xff\xfe")
+    _rewrite_checksum(bundle.checksums, artifact)
+
+    result = verify_report_bundle(bundle.root)
+    assert result.valid is False
+    assert verify_main([str(bundle.root)]) == 1
+    assert json.loads(capsys.readouterr().out)["valid"] is False
+
+
+def test_symlinked_checksum_manifest_is_unsafe(bundle, tmp_path):
+    external = tmp_path / "external-checksums.sha256"
+    external.write_bytes(bundle.checksums.read_bytes())
+    bundle.checksums.unlink()
+    bundle.checksums.symlink_to(external)
+
+    result = verify_report_bundle(bundle.root)
+    assert result.valid is False
+    assert "unsafe bundle entry: checksums.sha256" in result.errors
 
 
 def _rewrite_checksum(checksums: Path, artifact: Path) -> None:
