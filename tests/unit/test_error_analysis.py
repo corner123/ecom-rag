@@ -17,21 +17,24 @@ def _run(
     rows: list[dict],
     *,
     dataset_role: str = "development",
+    snapshot_updates: dict[str, str] | None = None,
 ) -> EvaluationRun:
     path = root / run_id
     path.mkdir(parents=True)
-    snapshot = EvaluationSnapshot(
-        snapshot_id=f"snapshot-{run_id}",
-        dataset_hash="1" * 64,
-        reference_hash="2" * 64,
-        corpus_hash="3" * 64,
-        index_hash="4" * 64,
-        profile_hash="5" * 64,
-        model_hash="6" * 64,
-        prompt_hash="7" * 64,
-        evaluator_hash="8" * 64,
-        code_hash="9" * 64,
-    )
+    snapshot_values = {
+        "snapshot_id": f"snapshot-{run_id}",
+        "dataset_hash": "1" * 64,
+        "reference_hash": "2" * 64,
+        "corpus_hash": "3" * 64,
+        "index_hash": "4" * 64,
+        "profile_hash": "5" * 64,
+        "model_hash": "6" * 64,
+        "prompt_hash": "7" * 64,
+        "evaluator_hash": "8" * 64,
+        "code_hash": "9" * 64,
+    }
+    snapshot_values.update(snapshot_updates or {})
+    snapshot = EvaluationSnapshot.model_validate(snapshot_values)
     manifest = RunManifest(
         run_id=run_id,
         snapshot=snapshot,
@@ -105,11 +108,23 @@ def _row(
     }
 
 
+def _analyzer() -> ErrorAnalyzer:
+    """Keep focused fixtures small while production defaults to the 36-case floor."""
+
+    return ErrorAnalyzer(minimum_case_count=1)
+
+
 def test_error_analyzer_assigns_actionable_bucket_from_measured_arm_delta(tmp_path: Path) -> None:
     dense = _run(tmp_path, "run-dense", "dense", [_row("run-dense", "hs-case", 0.0)])
-    bm25 = _run(tmp_path, "run-bm25", "bm25", [_row("run-bm25", "hs-case", 1.0)])
+    bm25 = _run(
+        tmp_path,
+        "run-bm25",
+        "bm25",
+        [_row("run-bm25", "hs-case", 1.0)],
+        snapshot_updates={"profile_hash": "a" * 64},
+    )
 
-    analysis = ErrorAnalyzer().analyze([dense, bm25])
+    analysis = _analyzer().analyze([dense, bm25])
 
     assert len(analysis.cases) == 1
     assert analysis.cases[0].bucket == "keyword_miss"
@@ -132,7 +147,7 @@ def test_error_analyzer_detects_filter_and_reranker_regressions_from_pairs(tmp_p
         [_row("run-rerank", "filter-case", 0.0, precision=0.0)],
     )
 
-    analysis = ErrorAnalyzer().analyze([fused, filtered, reranked])
+    analysis = _analyzer().analyze([fused, filtered, reranked])
 
     assert [(case.run_id, case.bucket) for case in analysis.cases] == [
         ("run-filter", "filter_false_negative"),
@@ -152,7 +167,7 @@ def test_error_analyzer_reports_backend_degradation_without_inventing_metric_zer
         [_row("run-degraded", "backend-case", None, degradation=["dense:failed"])],
     )
 
-    analysis = ErrorAnalyzer().analyze([run])
+    analysis = _analyzer().analyze([run])
 
     assert analysis.cases[0].bucket == "backend_degraded"
     assert analysis.cases[0].observed_value is None
@@ -169,7 +184,7 @@ def test_error_analyzer_refuses_holdout_before_reading_per_query(tmp_path: Path)
     (run.path / "per_query.jsonl").unlink()
 
     with pytest.raises(HoldoutPolicyError, match="holdout"):
-        ErrorAnalyzer().analyze([run])
+        _analyzer().analyze([run])
 
 
 def test_error_analyzer_reads_actual_conflict_metric_shape(tmp_path: Path) -> None:
@@ -182,7 +197,7 @@ def test_error_analyzer_reads_actual_conflict_metric_shape(tmp_path: Path) -> No
     }
     run = _run(tmp_path, "run-conflict", "wrrf", [row])
 
-    analysis = ErrorAnalyzer().analyze([run])
+    analysis = _analyzer().analyze([run])
 
     assert analysis.cases[0].bucket == "conflict_missed"
 
@@ -195,7 +210,7 @@ def test_error_analyzer_maps_full_recall_noise_to_source_prior(tmp_path: Path) -
         [_row("run-noisy", "noisy-case", 1.0, precision=0.5)],
     )
 
-    analysis = ErrorAnalyzer().analyze([run])
+    analysis = _analyzer().analyze([run])
 
     assert analysis.cases[0].bucket == "wrong_source_prior"
     assert analysis.cases[0].suggested_component == "fusion_weights"
@@ -210,7 +225,53 @@ def test_error_analyzer_flags_answer_that_bypasses_rejecting_guard(tmp_path: Pat
     }
     run = _run(tmp_path, "run-unsafe", "wrrf", [row])
 
-    analysis = ErrorAnalyzer().analyze([run])
+    analysis = _analyzer().analyze([run])
 
     assert analysis.cases[0].bucket == "unsafe_decision"
     assert analysis.cases[0].suggested_component == "decision_policy"
+
+
+def test_error_analyzer_enforces_development_sample_floor(tmp_path: Path) -> None:
+    run = _run(tmp_path, "run-small", "dense", [_row("run-small", "case-1", 0.0)])
+
+    with pytest.raises(ValueError, match="at least 36"):
+        ErrorAnalyzer().analyze([run])
+
+
+def test_error_analyzer_rejects_partial_cross_arm_case_sets(tmp_path: Path) -> None:
+    dense = _run(
+        tmp_path,
+        "run-dense",
+        "dense",
+        [_row("run-dense", "case-1", 0.0), _row("run-dense", "case-2", 0.0)],
+    )
+    bm25 = _run(tmp_path, "run-bm25", "bm25", [_row("run-bm25", "case-1", 1.0)])
+
+    with pytest.raises(ValueError, match="identical case-ID sets"):
+        _analyzer().analyze([dense, bm25])
+
+
+def test_error_analyzer_rejects_duplicate_case_ids(tmp_path: Path) -> None:
+    run = _run(
+        tmp_path,
+        "run-duplicate",
+        "dense",
+        [_row("run-duplicate", "case-1", 0.0), _row("run-duplicate", "case-1", 1.0)],
+    )
+
+    with pytest.raises(ValueError, match="duplicate case ID"):
+        _analyzer().analyze([run])
+
+
+def test_error_analyzer_rejects_cross_arm_index_mismatch(tmp_path: Path) -> None:
+    dense = _run(tmp_path, "run-dense", "dense", [_row("run-dense", "case-1", 0.0)])
+    bm25 = _run(
+        tmp_path,
+        "run-bm25",
+        "bm25",
+        [_row("run-bm25", "case-1", 1.0)],
+        snapshot_updates={"index_hash": "a" * 64},
+    )
+
+    with pytest.raises(ValueError, match="frozen snapshot field index_hash"):
+        _analyzer().analyze([dense, bm25])

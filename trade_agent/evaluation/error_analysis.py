@@ -42,6 +42,17 @@ _SUGGESTED_COMPONENTS = {
     "backend_degraded": "runtime_backend",
 }
 
+_COMPARABLE_SNAPSHOT_FIELDS = (
+    "dataset_hash",
+    "reference_hash",
+    "corpus_hash",
+    "index_hash",
+    "model_hash",
+    "prompt_hash",
+    "evaluator_hash",
+    "code_hash",
+)
+
 
 class HoldoutPolicyError(ValueError):
     """Raised before private holdout results can enter development analysis."""
@@ -183,23 +194,43 @@ def load_evaluation_runs(paths: Sequence[Path]) -> tuple[EvaluationRun, ...]:
 class ErrorAnalyzer:
     """Turn failed development rows into one reproducible actionable bucket each."""
 
+    def __init__(self, *, minimum_case_count: int = 36):
+        if type(minimum_case_count) is not int or minimum_case_count < 1:
+            raise ValueError("minimum_case_count must be a positive integer")
+        self.minimum_case_count = minimum_case_count
+
     def analyze(self, runs: Sequence[EvaluationRun]) -> ErrorAnalysis:
         values = tuple(runs)
         if not values:
             raise ValueError("error analysis requires at least one development run")
         # Complete the metadata preflight for every run before reading any result row.
         metadata = tuple(read_development_metadata(run) for run in values)
-        dataset_hashes = {run.manifest.snapshot.dataset_hash for run in values}
-        if len(dataset_hashes) != 1:
-            raise ValueError("paired error analysis requires one development dataset hash")
+        baseline_snapshot = values[0].manifest.snapshot
+        for field in _COMPARABLE_SNAPSHOT_FIELDS:
+            expected = getattr(baseline_snapshot, field)
+            if any(getattr(run.manifest.snapshot, field) != expected for run in values[1:]):
+                raise ValueError(
+                    f"paired error analysis requires identical frozen snapshot field {field}"
+                )
         data = tuple(
             _RunData(run, meta, read_per_query_rows(run, meta))
             for run, meta in zip(values, metadata, strict=True)
         )
+        indexed_rows = tuple(_index_analysis_rows(item) for item in data)
+        baseline_cases = set(indexed_rows[0])
+        if len(baseline_cases) < self.minimum_case_count:
+            raise ValueError(
+                f"development error analysis requires at least {self.minimum_case_count} unique cases"
+            )
+        if any(set(indexed) != baseline_cases for indexed in indexed_rows[1:]):
+            raise ValueError("paired error analysis requires identical case-ID sets")
+        profiles = [item.components for item in data]
+        if len(set(profiles)) != len(profiles):
+            raise ValueError("paired error analysis requires unique enabled-component profiles")
         row_index = {
-            (item.run.manifest.run_id, str(row["result"]["case_id"])): row
-            for item in data
-            for row in item.rows
+            (item.run.manifest.run_id, case_id): row
+            for item, indexed in zip(data, indexed_rows, strict=True)
+            for case_id, row in indexed.items()
         }
         failures: list[ErrorCase] = []
         for item in data:
@@ -212,7 +243,7 @@ class ErrorAnalyzer:
             cases=tuple(failures),
             bucket_counts=dict(sorted(counts.items())),
             analyzed_run_ids=tuple(item.run.manifest.run_id for item in data),
-            dataset_hash=next(iter(dataset_hashes)),
+            dataset_hash=baseline_snapshot.dataset_hash,
         )
 
     def _classify(self, current: _RunData, row: Mapping[str, Any], all_runs: tuple[_RunData, ...],
@@ -322,6 +353,18 @@ def _number(value: Any, key: str) -> float | None:
         return None
     item = value.get(key)
     return float(item) if isinstance(item, (int, float)) and not isinstance(item, bool) else None
+
+
+def _index_analysis_rows(item: _RunData) -> dict[str, Mapping[str, Any]]:
+    result: dict[str, Mapping[str, Any]] = {}
+    for row in item.rows:
+        case_id = str(row["result"]["case_id"])
+        if case_id in result:
+            raise ValueError(
+                f"duplicate case ID in run {item.run.manifest.run_id}: {case_id}"
+            )
+        result[case_id] = row
+    return result
 
 
 def _nested_number(value: Any, outer: str, inner: str) -> float | None:

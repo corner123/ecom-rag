@@ -62,6 +62,11 @@ class DevelopmentOptimizer:
 
     priority = ("recall_at_10", "context_precision", "faithfulness")
 
+    def __init__(self, *, minimum_case_count: int = 36):
+        if type(minimum_case_count) is not int or minimum_case_count < 1:
+            raise ValueError("minimum_case_count must be a positive integer")
+        self.minimum_case_count = minimum_case_count
+
     def select(
         self,
         candidates: Sequence[EvaluationRun],
@@ -93,6 +98,10 @@ class DevelopmentOptimizer:
         }
         baseline = rows[baseline_id]
         baseline_cases = set(baseline)
+        if len(baseline_cases) < self.minimum_case_count:
+            raise ValueError(
+                f"development optimization requires at least {self.minimum_case_count} unique cases"
+            )
         rejected: dict[str, tuple[str, ...]] = {}
         summaries: dict[str, tuple[dict[str, PairedDelta], dict[str, float | None]]] = {}
         eligible = [baseline_id]
@@ -106,6 +115,9 @@ class DevelopmentOptimizer:
             deltas = _paired_deltas(baseline, current)
             summaries[run_id] = (deltas, _candidate_metrics(current))
             reasons = []
+            run = runs[run_ids.index(run_id)]
+            if not _execution_healthy(run, current):
+                reasons.append("execution_constraint")
             latency = deltas["latency_ms"].delta
             refusal = deltas["refusal_rate"].delta
             if latency is None or latency > objective.max_mean_latency_increase_ms:
@@ -145,6 +157,19 @@ def _index_rows(rows: tuple[Mapping[str, Any], ...]) -> dict[str, Mapping[str, A
             raise ValueError(f"duplicate case ID in run: {case_id}")
         result[case_id] = row
     return result
+
+
+def _execution_healthy(run: EvaluationRun, rows: Mapping[str, Mapping[str, Any]]) -> bool:
+    unhealthy = {"degraded", "unavailable", "failed"}
+    if any(status in unhealthy for status in run.manifest.backend_statuses.values()):
+        return False
+    for row in rows.values():
+        result = row.get("result", {})
+        if result.get("status") == "failed":
+            return False
+        if any(status in unhealthy for status in result.get("backend_statuses", {}).values()):
+            return False
+    return True
 
 
 def _paired_deltas(

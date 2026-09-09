@@ -17,6 +17,7 @@ def _candidate(
     values: dict[str, tuple[float, float, float | None, float, str]],
     *,
     dataset_role: str = "development",
+    backend_status: str = "available",
 ) -> EvaluationRun:
     path = root / run_id
     path.mkdir(parents=True)
@@ -35,7 +36,7 @@ def _candidate(
     manifest = RunManifest(
         run_id=run_id,
         snapshot=snapshot,
-        backend_statuses={"dense": "available"},
+        backend_statuses={"dense": backend_status},
     )
     (path / "manifest.json").write_text(
         json.dumps(
@@ -60,7 +61,7 @@ def _candidate(
                     "status": status,
                     "retrieved_evidence_ids": [],
                     "produced_claim_ids": [],
-                    "backend_statuses": {"dense": "available"},
+                    "backend_statuses": {"dense": backend_status},
                     "latency_ms": latency,
                 },
                 "metrics": {
@@ -90,6 +91,12 @@ def _candidate(
     return EvaluationRun(path=path, manifest=manifest, aggregate=aggregate)
 
 
+def _optimizer() -> DevelopmentOptimizer:
+    """Keep focused fixtures small while production defaults to the 36-case floor."""
+
+    return DevelopmentOptimizer(minimum_case_count=1)
+
+
 def test_optimizer_prioritizes_paired_recall_then_rule_precision_and_faithfulness(tmp_path: Path) -> None:
     baseline = _candidate(
         tmp_path,
@@ -107,7 +114,7 @@ def test_optimizer_prioritizes_paired_recall_then_rule_precision_and_faithfulnes
         {"case-1": (1.0, 0.4, 0.4, 25.0, "completed"), "case-2": (1.0, 0.4, 0.4, 25.0, "completed")},
     )
 
-    decision = DevelopmentOptimizer().select(
+    decision = _optimizer().select(
         [baseline, precision_candidate, recall_candidate],
         OptimizationObjective(
             baseline_run_id="baseline",
@@ -130,7 +137,7 @@ def test_optimizer_applies_latency_and_refusal_constraints_before_ranking(tmp_pa
     unsafe = _candidate(tmp_path, "unsafe", {"case": (1.0, 1.0, 1.0, 20.0, "refused")})
     eligible = _candidate(tmp_path, "eligible", {"case": (0.75, 0.6, 0.6, 25.0, "completed")})
 
-    decision = DevelopmentOptimizer().select(
+    decision = _optimizer().select(
         [baseline, slow, unsafe, eligible],
         OptimizationObjective(
             baseline_run_id="baseline",
@@ -156,7 +163,7 @@ def test_optimizer_refuses_holdout_input_before_reading_candidate_rows(tmp_path:
     (holdout.path / "per_query.jsonl").unlink()
 
     with pytest.raises(HoldoutPolicyError, match="holdout"):
-        DevelopmentOptimizer().select(
+        _optimizer().select(
             [holdout],
             OptimizationObjective(baseline_run_id="holdout"),
         )
@@ -183,7 +190,7 @@ def test_optimizer_refuses_protected_holdout_path_without_reading_it(tmp_path: P
     run = EvaluationRun(protected, manifest, {})
 
     with pytest.raises(HoldoutPolicyError, match="holdout"):
-        DevelopmentOptimizer().select(
+        _optimizer().select(
             [run], OptimizationObjective(baseline_run_id="unreadable-holdout")
         )
 
@@ -198,9 +205,48 @@ def test_no_change_decision_reports_actual_rule_metric_coverage(tmp_path: Path) 
         },
     )
 
-    decision = DevelopmentOptimizer().select(
+    decision = _optimizer().select(
         [baseline], OptimizationObjective(baseline_run_id="baseline")
     )
 
     assert decision.accepted_change is False
     assert decision.paired_deltas["faithfulness"].paired_count == 1
+
+
+@pytest.mark.parametrize(
+    ("candidate_status", "backend_status"),
+    [("failed", "available"), ("completed", "degraded")],
+)
+def test_optimizer_rejects_unhealthy_candidate_even_when_retrieval_improves(
+    tmp_path: Path,
+    candidate_status: str,
+    backend_status: str,
+) -> None:
+    baseline = _candidate(
+        tmp_path, "baseline", {"case": (0.5, 0.5, 0.5, 20.0, "completed")}
+    )
+    unhealthy = _candidate(
+        tmp_path,
+        "unhealthy",
+        {"case": (1.0, 1.0, None, 20.0, candidate_status)},
+        backend_status=backend_status,
+    )
+
+    decision = _optimizer().select(
+        [baseline, unhealthy], OptimizationObjective(baseline_run_id="baseline")
+    )
+
+    assert decision.selected_run_id == "baseline"
+    assert decision.accepted_change is False
+    assert decision.rejected_candidates == {"unhealthy": ("execution_constraint",)}
+
+
+def test_optimizer_enforces_development_sample_floor(tmp_path: Path) -> None:
+    baseline = _candidate(
+        tmp_path, "baseline", {"case": (1.0, 1.0, 1.0, 20.0, "completed")}
+    )
+
+    with pytest.raises(ValueError, match="at least 36"):
+        DevelopmentOptimizer().select(
+            [baseline], OptimizationObjective(baseline_run_id="baseline")
+        )
