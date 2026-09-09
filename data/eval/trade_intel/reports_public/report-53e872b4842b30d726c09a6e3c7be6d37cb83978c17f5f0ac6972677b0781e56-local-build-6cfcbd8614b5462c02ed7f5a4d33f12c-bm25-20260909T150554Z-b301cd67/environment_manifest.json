@@ -1,0 +1,1 @@
+{"backend":"local-cpu-baseline","backend_statuses":{"bm25":"available","dense":"not_run","filter":"not_run","generation":"not_run","reranker":"not_run","rrf":"not_run","wrrf":"not_run"},"runtime":{"machine":"arm64","numpy":"2.5.2","platform":"Darwin","python":"3.12.14","rank_bm25":"0.2.2"},"schema_version":"trade-report-environment/v1"}
