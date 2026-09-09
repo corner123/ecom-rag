@@ -32,13 +32,12 @@ def evidence_coverage(answer: Any) -> float:
 
 def faithfulness(answer: Any, evidence: Any, guard: Any) -> FaithfulnessMetrics:
     """Measure factual claims retained by the guard and bound to valid evidence."""
-    if _read(guard, "accepted", default=False) is not True or _read(
-        answer, "refusal_reason", default=None
-    ) is not None:
-        return _unscored("not_scored_no_checked_answer")
-
     factual = tuple(claim for claim in _claims(answer) if _is_factual(claim))
     if not factual:
+        if _read(guard, "accepted", default=False) is not True or _read(
+            answer, "refusal_reason", default=None
+        ) is not None:
+            return _unscored("not_scored_no_checked_answer")
         return _unscored("not_scored_no_factual_claims")
 
     evidence_ids = frozenset(_evidence_id(item) for item in _sequence(evidence, "evidence"))

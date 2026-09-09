@@ -72,6 +72,27 @@ def test_faithfulness_counts_invalid_citation_as_unsupported() -> None:
     assert result.supported_count == 1
 
 
+def test_rejected_guard_still_scores_invalid_citation_as_unsupported() -> None:
+    mutated = StubClaim("C1", "supported", ("E-MUTATED",), factual=True)
+    answer = StubAnswer(claims=(mutated,))
+    guard = StubGuard(
+        accepted=False,
+        claims=(),
+        refusal_reason="core_claim_unsupported",
+    )
+
+    result = faithfulness(answer, (StubEvidence("E1"),), guard)
+
+    assert result.faithfulness == 0.0
+    assert result.policy == "scored"
+    assert result.checked_factual_claim_ids == ("C1",)
+    assert result.supported_factual_claim_ids == ()
+    assert result.unsupported_factual_claim_ids == ("C1",)
+    assert result.invalid_citation_ids == ("E-MUTATED",)
+    assert result.checked_count == 1
+    assert result.supported_count == 0
+
+
 def test_faithfulness_requires_guard_to_retain_supported_claim() -> None:
     first = StubClaim("C1", "supported", ("E1",), factual=True)
     removed = StubClaim("C2", "supported", ("E2",), factual=True)
