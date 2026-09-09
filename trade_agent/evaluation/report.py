@@ -93,6 +93,12 @@ def _write_json_new(path: Path, value: object) -> None:
         stream.write(canonical_json(value) + "\n")
 
 
+def _json_equivalent(left: object, right: object) -> bool:
+    """Compare values after converting tuples and other JSON containers canonically."""
+
+    return json.loads(canonical_json(left)) == json.loads(canonical_json(right))
+
+
 def _safe_artifact(metadata: Mapping[str, Any], name: str, default: str) -> Path:
     value = Path(str(metadata.get("artifacts", {}).get(name, default)))
     if value.is_absolute() or len(value.parts) != 1 or ".." in value.parts:
@@ -397,7 +403,7 @@ class ReportWriter:
         aggregate_artifact = _safe_artifact(metadata, "aggregate", "aggregate.json")
         per_query_artifact = _safe_artifact(metadata, "per_query", "per_query.jsonl")
         source_aggregate = _read_json(run.path / aggregate_artifact)
-        if dict(source_aggregate) != dict(run.aggregate):
+        if not _json_equivalent(source_aggregate, run.aggregate):
             raise ValueError("EvaluationRun aggregate does not match its persisted artifact")
         if int(source_aggregate.get("case_count", -1)) != case_count:
             raise ValueError("aggregate case_count does not match run manifest")
@@ -601,7 +607,7 @@ def verify_report_bundle(path: Path) -> VerificationResult:
         if report.get("code_sha") != persisted.snapshot.code_hash:
             errors.append("code SHA mismatch")
         aggregate = _read_json(path / "aggregate.json")
-        if report.get("aggregate") != aggregate:
+        if not _json_equivalent(report.get("aggregate"), aggregate):
             errors.append("report aggregate does not match aggregate artifact")
         if aggregate.get("case_count") != case_count:
             errors.append("aggregate case_count does not match run manifest")
@@ -617,7 +623,7 @@ def verify_report_bundle(path: Path) -> VerificationResult:
         else:
             judge = _validate_judge_summary(aggregate.get("judge"))
             expected_aggregate = _holdout_aggregate(aggregate, judge)
-        if aggregate != expected_aggregate:
+        if not _json_equivalent(aggregate, expected_aggregate):
             errors.append(f"{role} aggregate schema mismatch")
         if sum(judge["status_counts"].values()) != case_count:
             errors.append("judge status counts do not match case_count")
@@ -626,16 +632,16 @@ def verify_report_bundle(path: Path) -> VerificationResult:
         model = _read_json(path / "model_manifest.json")
         config = _read_json(path / "config_manifest.json")
         analysis = _read_json(path / "error_analysis.json")
-        if environment != _environment_manifest(manifest, persisted):
+        if not _json_equivalent(environment, _environment_manifest(manifest, persisted)):
             errors.append("environment manifest mismatch")
-        if model != _model_manifest(manifest, persisted, judge):
+        if not _json_equivalent(model, _model_manifest(manifest, persisted, judge)):
             errors.append("model manifest mismatch")
-        if config != _config_manifest(manifest, persisted):
+        if not _json_equivalent(config, _config_manifest(manifest, persisted)):
             errors.append("config manifest mismatch")
         expected_analysis = _error_analysis(
             role, EvaluationRun(path=path, manifest=persisted, aggregate=aggregate)
         )
-        if analysis != expected_analysis:
+        if not _json_equivalent(analysis, expected_analysis):
             errors.append("error analysis mismatch")
         if report.get("build_id") != manifest["adapter"]["build_id"]:
             errors.append("build identity mismatch")
@@ -648,7 +654,9 @@ def verify_report_bundle(path: Path) -> VerificationResult:
         if markdown != ReportWriter._markdown(report):
             errors.append("report Markdown mismatch")
         if role == "holdout":
-            if report.get("aggregate") != _holdout_aggregate(aggregate, judge):
+            if not _json_equivalent(
+                report.get("aggregate"), _holdout_aggregate(aggregate, judge)
+            ):
                 errors.append("holdout redaction failure: report.json")
             if _HOLDOUT_MARKDOWN_FORBIDDEN.search(markdown):
                 errors.append("holdout redaction failure: report.md")

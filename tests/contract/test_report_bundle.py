@@ -296,6 +296,27 @@ def test_failed_judge_preserves_null_scores_errors_and_identifiers(writer, tmp_p
     assert verify_report_bundle(bundle.root).valid is True
 
 
+def test_fresh_development_bundle_with_error_case_tuple_verifies(writer, tmp_path):
+    run = _run(tmp_path / "runs")
+    rows = [json.loads(line) for line in (run.path / "per_query.jsonl").read_text().splitlines()]
+    rows[0]["metrics"]["retrieval"]["recall_at_10"] = 0.0
+    (run.path / "per_query.jsonl").write_text(
+        "".join(canonical_json(row) + "\n" for row in rows), encoding="utf-8"
+    )
+    aggregate = dict(run.aggregate)
+    aggregate["retrieval"] = dict(aggregate["retrieval"])
+    aggregate["retrieval"]["recall_at_10"] = {
+        "value": 35 / 36, "scored_count": 36, "total_count": 36,
+    }
+    (run.path / "aggregate.json").write_text(canonical_json(aggregate) + "\n", encoding="utf-8")
+    run = EvaluationRun(path=run.path, manifest=run.manifest, aggregate=aggregate)
+
+    bundle = writer.write(run, tmp_path / "reports")
+    analysis = json.loads(bundle.error_analysis.read_text(encoding="utf-8"))
+    assert analysis["cases"][0]["evidence"] == []
+    assert verify_report_bundle(bundle.root).valid is True
+
+
 def test_holdout_verifier_rejects_private_report_with_recomputed_checksums(writer, tmp_path):
     bundle = writer.write(_run(tmp_path / "runs", role="holdout"), tmp_path / "reports")
     aggregate = json.loads((bundle.root / "aggregate.json").read_text(encoding="utf-8"))
