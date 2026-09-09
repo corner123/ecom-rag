@@ -98,15 +98,7 @@ class EvaluationRunner:
         profile = profile_for(arm)
         identity = dict(self.adapter.identity)
         run_id = f'run-{profile.arm.value}-{uuid4().hex}'
-        snapshot = EvaluationSnapshot(snapshot_id=f'snapshot-{uuid4().hex}',
-            dataset_hash=canonical_hash([case.model_dump(mode='json') for case in bundle.cases]),
-            reference_hash=canonical_hash([item.model_dump(mode='json') for collection in
-                (bundle.evidence, bundle.claims, bundle.decisions, bundle.matches) for item in collection]),
-            corpus_hash=identity['corpus_hash'], index_hash=identity['index_hash'],
-            profile_hash=canonical_hash({'profile': asdict(profile), 'budget': asdict(self.budget)}),
-            model_hash=canonical_hash(identity['model_id']), prompt_hash=canonical_hash(identity['prompt_id']),
-            evaluator_hash=canonical_hash({path.name: sha256(path.read_bytes()).hexdigest()
-                for path in sorted(Path(__file__).parent.glob('*metrics.py'))}), code_hash=_code_hash())
+        snapshot = self.freeze(bundle, arm)
         path = Path(output) / run_id
         path.mkdir(parents=True, exist_ok=False)
         rows = []
@@ -137,6 +129,21 @@ class EvaluationRunner:
             'artifacts': {'per_query': 'per_query.jsonl', 'aggregate': 'aggregate.json'},
         })
         return EvaluationRun(path, manifest, aggregate)
+
+    def freeze(self, bundle: EvaluationBundle, arm: EvaluationArm) -> EvaluationSnapshot:
+        if not bundle.cases or any(case.dataset_role != 'development' for case in bundle.cases):
+            raise ValueError('freeze requires nonempty development cases')
+        profile = profile_for(arm)
+        identity = dict(self.adapter.identity)
+        return EvaluationSnapshot(snapshot_id=f'snapshot-{uuid4().hex}',
+            dataset_hash=canonical_hash([case.model_dump(mode='json') for case in bundle.cases]),
+            reference_hash=canonical_hash([item.model_dump(mode='json') for collection in
+                (bundle.evidence, bundle.claims, bundle.decisions, bundle.matches) for item in collection]),
+            corpus_hash=identity['corpus_hash'], index_hash=identity['index_hash'],
+            profile_hash=canonical_hash({'profile': asdict(profile), 'budget': asdict(self.budget)}),
+            model_hash=canonical_hash(identity['model_id']), prompt_hash=canonical_hash(identity['prompt_id']),
+            evaluator_hash=canonical_hash({path.name: sha256(path.read_bytes()).hexdigest()
+                for path in sorted(Path(__file__).parent.glob('*metrics.py'))}), code_hash=_code_hash())
 
     def _query(self, bundle, case, profile, run_id, seen):
         start = perf_counter()
@@ -253,7 +260,10 @@ class LocalCorpusAdapter:
         self.vectors = tuple(self._vector(tokens) for tokens in self.tokens)
         self.bm25 = BM25Okapi(self.tokens)
         corpus_hash = canonical_hash(documents)
-        self.identity = {'backend': 'local-cpu-baseline', 'build_id': f'local-build-{corpus_hash[:32]}',
+        filter_id = 'explicit-hs-calendar-month/v2'
+        build_hash = canonical_hash({'corpus': corpus_hash, 'filter': filter_id})
+        self.identity = {'backend': 'local-cpu-baseline', 'build_id': f'local-build-{build_hash[:32]}',
+            'filter_id': filter_id,
             'corpus_hash': corpus_hash, 'index_hash': canonical_hash({'corpus': corpus_hash, 'version': 'local-v1'}),
             'model_id': 'sha256-token-cosine-256/v1;bm25-okapi-k1-1.5-b-0.75;lexical-rerank/v1',
             'prompt_id': 'generation-unavailable/v1', 'generation_available': False,
@@ -284,8 +294,10 @@ class LocalCorpusAdapter:
                                            for index in positions[:limit] if scores[index] > 0))
         if component == 'filter':
             hs_codes = re.findall(r'\bHS\s+(\d{4,10})\b', query, re.I)
-            filtered = tuple(hit for hit in hits if not hs_codes or
-                             str(hit.get('metadata', {}).get('hs_code', '')) in hs_codes)
+            months = re.findall(r'\b(\d{4}-(?:0[1-9]|1[0-2]))\b', query)
+            filtered = tuple(hit for hit in hits
+                if (not hs_codes or str(hit.get('metadata', {}).get('hs_code', '')) in hs_codes)
+                and (not months or hit.get('metadata', {}).get('calendar_month') in months))
             return StageOutcome(hits=filtered[:limit])
         if component == 'reranker':
             ordered = sorted(hits, key=lambda hit: (-len(set(tokens) & set(self._tokens(hit['content']))), hit['evidence_id']))

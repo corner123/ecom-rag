@@ -154,3 +154,26 @@ def test_failed_branch_cannot_contribute_stale_hits(tmp_path, bundle):
     row = json.loads((run.path / 'per_query.jsonl').read_text())
     assert row['result']['retrieved_evidence_ids'] == ['rag_' + 'c' * 64]
     assert row['metrics']['retrieval']['recall_at_10'] == 0.0
+
+
+def test_explicit_month_filter_removes_measured_development_001_noise():
+    from trade_agent.evaluation.generator import indexed_corpus_content
+    manifest = json.loads(Path('demo/trade_intel_seed/manifests/corpus_manifest.json').read_text())
+    docs = tuple({'content': item['content'], 'metadata': json.loads(item['content'])}
+                 for item in indexed_corpus_content(manifest))
+    adapter = LocalCorpusAdapter(docs)
+    query = 'What company is named in the 2026-06 profile for HS 090111?'
+    hits = adapter.execute('filter', query, adapter.documents, limit=100).hits
+    assert len(hits) == 1  # Baseline includes seven unrelated-month/undated sources.
+    assert hits[0]['metadata']['calendar_month'] == '2026-06'
+    assert hits[0]['metadata']['hs_code'] == '090111'
+    assert hits[0]['metadata']['company'] == 'Harbor CN Imports 01'
+
+
+def test_month_filter_preserves_explicit_comparisons_and_queries_without_month():
+    docs = tuple({'content': month, 'metadata': {'calendar_month': month, 'hs_code': '090111'}}
+                 for month in ('2026-06', '2026-07', '2025-06'))
+    adapter = LocalCorpusAdapter(docs)
+    hits = adapter.execute('filter', 'Compare 2026-06 and 2026-07 for HS 090111', adapter.documents, limit=100).hits
+    assert {hit['metadata']['calendar_month'] for hit in hits} == {'2026-06', '2026-07'}
+    assert adapter.execute('filter', 'Compare two dated records for HS 090111', adapter.documents, limit=100).hits == adapter.documents

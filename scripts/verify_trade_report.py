@@ -39,6 +39,15 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         parser.error(str(exc))
     result = verify_report_bundle(path)
+    if args.latest is not None and args.kind == 'development':
+        from trade_agent.evaluation.cycle import verify_cycle_bundle
+        cycle_errors = []
+        for cycle in sorted(args.latest.glob('cycle-*')):
+            verified = verify_cycle_bundle(cycle)
+            cycle_errors.extend(f'{cycle.name}: {error}' for error in verified.errors)
+        if cycle_errors:
+            from trade_agent.evaluation.report import VerificationResult
+            result = VerificationResult(path, False, (*result.errors, *cycle_errors))
     print(json.dumps({"errors": list(result.errors), "path": str(result.path), "valid": result.valid}, sort_keys=True))
     return 0 if result.valid else 1
 
