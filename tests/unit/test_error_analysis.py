@@ -18,6 +18,7 @@ def _run(
     *,
     dataset_role: str = "development",
     snapshot_updates: dict[str, str] | None = None,
+    pad_to_minimum: bool = True,
 ) -> EvaluationRun:
     path = root / run_id
     path.mkdir(parents=True)
@@ -54,12 +55,26 @@ def _run(
         }[arm],
         "artifacts": {"per_query": "per_query.jsonl", "aggregate": "aggregate.json"},
     }
+    padded_rows = list(rows)
+    case_ids = {str(row["result"]["case_id"]) for row in padded_rows}
+    filler_number = 1
+    while pad_to_minimum and len(case_ids) < 36:
+        case_id = f"filler-{filler_number:02d}"
+        filler_number += 1
+        if case_id in case_ids:
+            continue
+        padded_rows.append(_row(run_id, case_id, 1.0))
+        case_ids.add(case_id)
     (path / "manifest.json").write_text(json.dumps(manifest_doc), encoding="utf-8")
-    (path / "aggregate.json").write_text(json.dumps({"case_count": len(rows)}), encoding="utf-8")
-    (path / "per_query.jsonl").write_text(
-        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    (path / "aggregate.json").write_text(
+        json.dumps({"case_count": len(padded_rows)}), encoding="utf-8"
     )
-    return EvaluationRun(path=path, manifest=manifest, aggregate={"case_count": len(rows)})
+    (path / "per_query.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in padded_rows), encoding="utf-8"
+    )
+    return EvaluationRun(
+        path=path, manifest=manifest, aggregate={"case_count": len(padded_rows)}
+    )
 
 
 def _row(
@@ -108,12 +123,6 @@ def _row(
     }
 
 
-def _analyzer() -> ErrorAnalyzer:
-    """Keep focused fixtures small while production defaults to the 36-case floor."""
-
-    return ErrorAnalyzer(minimum_case_count=1)
-
-
 def test_error_analyzer_assigns_actionable_bucket_from_measured_arm_delta(tmp_path: Path) -> None:
     dense = _run(tmp_path, "run-dense", "dense", [_row("run-dense", "hs-case", 0.0)])
     bm25 = _run(
@@ -124,7 +133,7 @@ def test_error_analyzer_assigns_actionable_bucket_from_measured_arm_delta(tmp_pa
         snapshot_updates={"profile_hash": "a" * 64},
     )
 
-    analysis = _analyzer().analyze([dense, bm25])
+    analysis = ErrorAnalyzer().analyze([dense, bm25])
 
     assert len(analysis.cases) == 1
     assert analysis.cases[0].bucket == "keyword_miss"
@@ -147,7 +156,7 @@ def test_error_analyzer_detects_filter_and_reranker_regressions_from_pairs(tmp_p
         [_row("run-rerank", "filter-case", 0.0, precision=0.0)],
     )
 
-    analysis = _analyzer().analyze([fused, filtered, reranked])
+    analysis = ErrorAnalyzer().analyze([fused, filtered, reranked])
 
     assert [(case.run_id, case.bucket) for case in analysis.cases] == [
         ("run-filter", "filter_false_negative"),
@@ -167,7 +176,7 @@ def test_error_analyzer_reports_backend_degradation_without_inventing_metric_zer
         [_row("run-degraded", "backend-case", None, degradation=["dense:failed"])],
     )
 
-    analysis = _analyzer().analyze([run])
+    analysis = ErrorAnalyzer().analyze([run])
 
     assert analysis.cases[0].bucket == "backend_degraded"
     assert analysis.cases[0].observed_value is None
@@ -184,7 +193,7 @@ def test_error_analyzer_refuses_holdout_before_reading_per_query(tmp_path: Path)
     (run.path / "per_query.jsonl").unlink()
 
     with pytest.raises(HoldoutPolicyError, match="holdout"):
-        _analyzer().analyze([run])
+        ErrorAnalyzer().analyze([run])
 
 
 def test_error_analyzer_reads_actual_conflict_metric_shape(tmp_path: Path) -> None:
@@ -197,7 +206,7 @@ def test_error_analyzer_reads_actual_conflict_metric_shape(tmp_path: Path) -> No
     }
     run = _run(tmp_path, "run-conflict", "wrrf", [row])
 
-    analysis = _analyzer().analyze([run])
+    analysis = ErrorAnalyzer().analyze([run])
 
     assert analysis.cases[0].bucket == "conflict_missed"
 
@@ -210,7 +219,7 @@ def test_error_analyzer_maps_full_recall_noise_to_source_prior(tmp_path: Path) -
         [_row("run-noisy", "noisy-case", 1.0, precision=0.5)],
     )
 
-    analysis = _analyzer().analyze([run])
+    analysis = ErrorAnalyzer().analyze([run])
 
     assert analysis.cases[0].bucket == "wrong_source_prior"
     assert analysis.cases[0].suggested_component == "fusion_weights"
@@ -225,14 +234,20 @@ def test_error_analyzer_flags_answer_that_bypasses_rejecting_guard(tmp_path: Pat
     }
     run = _run(tmp_path, "run-unsafe", "wrrf", [row])
 
-    analysis = _analyzer().analyze([run])
+    analysis = ErrorAnalyzer().analyze([run])
 
     assert analysis.cases[0].bucket == "unsafe_decision"
     assert analysis.cases[0].suggested_component == "decision_policy"
 
 
 def test_error_analyzer_enforces_development_sample_floor(tmp_path: Path) -> None:
-    run = _run(tmp_path, "run-small", "dense", [_row("run-small", "case-1", 0.0)])
+    run = _run(
+        tmp_path,
+        "run-small",
+        "dense",
+        [_row("run-small", "case-1", 0.0)],
+        pad_to_minimum=False,
+    )
 
     with pytest.raises(ValueError, match="at least 36"):
         ErrorAnalyzer().analyze([run])
@@ -248,7 +263,7 @@ def test_error_analyzer_rejects_partial_cross_arm_case_sets(tmp_path: Path) -> N
     bm25 = _run(tmp_path, "run-bm25", "bm25", [_row("run-bm25", "case-1", 1.0)])
 
     with pytest.raises(ValueError, match="identical case-ID sets"):
-        _analyzer().analyze([dense, bm25])
+        ErrorAnalyzer().analyze([dense, bm25])
 
 
 def test_error_analyzer_rejects_duplicate_case_ids(tmp_path: Path) -> None:
@@ -260,7 +275,7 @@ def test_error_analyzer_rejects_duplicate_case_ids(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ValueError, match="duplicate case ID"):
-        _analyzer().analyze([run])
+        ErrorAnalyzer().analyze([run])
 
 
 def test_error_analyzer_rejects_cross_arm_index_mismatch(tmp_path: Path) -> None:
@@ -274,4 +289,9 @@ def test_error_analyzer_rejects_cross_arm_index_mismatch(tmp_path: Path) -> None
     )
 
     with pytest.raises(ValueError, match="frozen snapshot field index_hash"):
-        _analyzer().analyze([dense, bm25])
+        ErrorAnalyzer().analyze([dense, bm25])
+
+
+def test_error_analyzer_does_not_expose_sample_floor_override() -> None:
+    with pytest.raises(TypeError):
+        ErrorAnalyzer(minimum_case_count=1)

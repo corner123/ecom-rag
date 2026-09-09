@@ -52,6 +52,7 @@ _COMPARABLE_SNAPSHOT_FIELDS = (
     "evaluator_hash",
     "code_hash",
 )
+_MINIMUM_DEVELOPMENT_CASE_COUNT = 36
 
 
 class HoldoutPolicyError(ValueError):
@@ -194,11 +195,6 @@ def load_evaluation_runs(paths: Sequence[Path]) -> tuple[EvaluationRun, ...]:
 class ErrorAnalyzer:
     """Turn failed development rows into one reproducible actionable bucket each."""
 
-    def __init__(self, *, minimum_case_count: int = 36):
-        if type(minimum_case_count) is not int or minimum_case_count < 1:
-            raise ValueError("minimum_case_count must be a positive integer")
-        self.minimum_case_count = minimum_case_count
-
     def analyze(self, runs: Sequence[EvaluationRun]) -> ErrorAnalysis:
         values = tuple(runs)
         if not values:
@@ -218,9 +214,10 @@ class ErrorAnalyzer:
         )
         indexed_rows = tuple(_index_analysis_rows(item) for item in data)
         baseline_cases = set(indexed_rows[0])
-        if len(baseline_cases) < self.minimum_case_count:
+        if len(baseline_cases) < _MINIMUM_DEVELOPMENT_CASE_COUNT:
             raise ValueError(
-                f"development error analysis requires at least {self.minimum_case_count} unique cases"
+                "development error analysis requires at least "
+                f"{_MINIMUM_DEVELOPMENT_CASE_COUNT} unique cases"
             )
         if any(set(indexed) != baseline_cases for indexed in indexed_rows[1:]):
             raise ValueError("paired error analysis requires identical case-ID sets")

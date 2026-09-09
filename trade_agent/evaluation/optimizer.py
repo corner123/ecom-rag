@@ -10,6 +10,9 @@ from trade_agent.evaluation.error_analysis import read_development_metadata, rea
 from trade_agent.evaluation.runner import EvaluationRun
 
 
+_MINIMUM_DEVELOPMENT_CASE_COUNT = 36
+
+
 @dataclass(frozen=True)
 class OptimizationObjective:
     baseline_run_id: str | None = None
@@ -62,11 +65,6 @@ class DevelopmentOptimizer:
 
     priority = ("recall_at_10", "context_precision", "faithfulness")
 
-    def __init__(self, *, minimum_case_count: int = 36):
-        if type(minimum_case_count) is not int or minimum_case_count < 1:
-            raise ValueError("minimum_case_count must be a positive integer")
-        self.minimum_case_count = minimum_case_count
-
     def select(
         self,
         candidates: Sequence[EvaluationRun],
@@ -98,9 +96,10 @@ class DevelopmentOptimizer:
         }
         baseline = rows[baseline_id]
         baseline_cases = set(baseline)
-        if len(baseline_cases) < self.minimum_case_count:
+        if len(baseline_cases) < _MINIMUM_DEVELOPMENT_CASE_COUNT:
             raise ValueError(
-                f"development optimization requires at least {self.minimum_case_count} unique cases"
+                "development optimization requires at least "
+                f"{_MINIMUM_DEVELOPMENT_CASE_COUNT} unique cases"
             )
         rejected: dict[str, tuple[str, ...]] = {}
         summaries: dict[str, tuple[dict[str, PairedDelta], dict[str, float | None]]] = {}

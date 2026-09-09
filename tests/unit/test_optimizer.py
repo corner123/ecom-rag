@@ -18,6 +18,8 @@ def _candidate(
     *,
     dataset_role: str = "development",
     backend_status: str = "available",
+    pad_to_minimum: bool = True,
+    padding_value: tuple[float, float, float | None, float, str] | None = None,
 ) -> EvaluationRun:
     path = root / run_id
     path.mkdir(parents=True)
@@ -51,8 +53,15 @@ def _candidate(
         ),
         encoding="utf-8",
     )
+    padded_values = dict(values)
+    filler_number = 1
+    default_padding = padding_value or next(iter(values.values()))
+    while pad_to_minimum and len(padded_values) < 36:
+        case_id = f"filler-{filler_number:02d}"
+        filler_number += 1
+        padded_values.setdefault(case_id, default_padding)
     rows = []
-    for case_id, (recall, precision, faithfulness, latency, status) in values.items():
+    for case_id, (recall, precision, faithfulness, latency, status) in padded_values.items():
         rows.append(
             {
                 "result": {
@@ -91,12 +100,6 @@ def _candidate(
     return EvaluationRun(path=path, manifest=manifest, aggregate=aggregate)
 
 
-def _optimizer() -> DevelopmentOptimizer:
-    """Keep focused fixtures small while production defaults to the 36-case floor."""
-
-    return DevelopmentOptimizer(minimum_case_count=1)
-
-
 def test_optimizer_prioritizes_paired_recall_then_rule_precision_and_faithfulness(tmp_path: Path) -> None:
     baseline = _candidate(
         tmp_path,
@@ -114,7 +117,7 @@ def test_optimizer_prioritizes_paired_recall_then_rule_precision_and_faithfulnes
         {"case-1": (1.0, 0.4, 0.4, 25.0, "completed"), "case-2": (1.0, 0.4, 0.4, 25.0, "completed")},
     )
 
-    decision = _optimizer().select(
+    decision = DevelopmentOptimizer().select(
         [baseline, precision_candidate, recall_candidate],
         OptimizationObjective(
             baseline_run_id="baseline",
@@ -125,7 +128,7 @@ def test_optimizer_prioritizes_paired_recall_then_rule_precision_and_faithfulnes
 
     assert decision.selected_run_id == "recall"
     assert decision.paired_deltas["recall_at_10"].delta == 0.5
-    assert decision.paired_deltas["recall_at_10"].paired_count == 2
+    assert decision.paired_deltas["recall_at_10"].paired_count == 36
     assert decision.paired_deltas["faithfulness"].delta == pytest.approx(-0.1)
     # Judge faithfulness is deliberately zero in every row; deterministic rule metrics remain authoritative.
     assert decision.selected_metrics["faithfulness"] == 0.4
@@ -137,7 +140,7 @@ def test_optimizer_applies_latency_and_refusal_constraints_before_ranking(tmp_pa
     unsafe = _candidate(tmp_path, "unsafe", {"case": (1.0, 1.0, 1.0, 20.0, "refused")})
     eligible = _candidate(tmp_path, "eligible", {"case": (0.75, 0.6, 0.6, 25.0, "completed")})
 
-    decision = _optimizer().select(
+    decision = DevelopmentOptimizer().select(
         [baseline, slow, unsafe, eligible],
         OptimizationObjective(
             baseline_run_id="baseline",
@@ -163,7 +166,7 @@ def test_optimizer_refuses_holdout_input_before_reading_candidate_rows(tmp_path:
     (holdout.path / "per_query.jsonl").unlink()
 
     with pytest.raises(HoldoutPolicyError, match="holdout"):
-        _optimizer().select(
+        DevelopmentOptimizer().select(
             [holdout],
             OptimizationObjective(baseline_run_id="holdout"),
         )
@@ -190,7 +193,7 @@ def test_optimizer_refuses_protected_holdout_path_without_reading_it(tmp_path: P
     run = EvaluationRun(protected, manifest, {})
 
     with pytest.raises(HoldoutPolicyError, match="holdout"):
-        _optimizer().select(
+        DevelopmentOptimizer().select(
             [run], OptimizationObjective(baseline_run_id="unreadable-holdout")
         )
 
@@ -203,9 +206,10 @@ def test_no_change_decision_reports_actual_rule_metric_coverage(tmp_path: Path) 
             "case-measured": (1.0, 1.0, 0.8, 10.0, "completed"),
             "case-unmeasured": (1.0, 1.0, None, 10.0, "completed"),
         },
+        padding_value=(1.0, 1.0, None, 10.0, "completed"),
     )
 
-    decision = _optimizer().select(
+    decision = DevelopmentOptimizer().select(
         [baseline], OptimizationObjective(baseline_run_id="baseline")
     )
 
@@ -232,7 +236,7 @@ def test_optimizer_rejects_unhealthy_candidate_even_when_retrieval_improves(
         backend_status=backend_status,
     )
 
-    decision = _optimizer().select(
+    decision = DevelopmentOptimizer().select(
         [baseline, unhealthy], OptimizationObjective(baseline_run_id="baseline")
     )
 
@@ -243,10 +247,18 @@ def test_optimizer_rejects_unhealthy_candidate_even_when_retrieval_improves(
 
 def test_optimizer_enforces_development_sample_floor(tmp_path: Path) -> None:
     baseline = _candidate(
-        tmp_path, "baseline", {"case": (1.0, 1.0, 1.0, 20.0, "completed")}
+        tmp_path,
+        "baseline",
+        {"case": (1.0, 1.0, 1.0, 20.0, "completed")},
+        pad_to_minimum=False,
     )
 
     with pytest.raises(ValueError, match="at least 36"):
         DevelopmentOptimizer().select(
             [baseline], OptimizationObjective(baseline_run_id="baseline")
         )
+
+
+def test_optimizer_does_not_expose_sample_floor_override() -> None:
+    with pytest.raises(TypeError):
+        DevelopmentOptimizer(minimum_case_count=1)
