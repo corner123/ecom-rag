@@ -13,11 +13,13 @@ from trade_agent.evaluation.leakage import LeakageAuditor
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def main() -> int:
+def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dev", type=Path, required=True)
     parser.add_argument("--holdout", type=Path, required=True)
-    args = parser.parse_args()
+    parser.add_argument("--require-zero-leakage", action="store_true",
+                        help="Explicitly require the zero-leakage gate (already the default)")
+    args = parser.parse_args(argv)
     development = read_bundle(args.dev / "dev_public.jsonl", args.dev / "references_dev.jsonl")
     holdout = read_bundle(args.holdout / "holdout_private.jsonl", args.holdout / "references_private.jsonl")
     corpus = json.loads((ROOT / "demo/trade_intel_seed/manifests/corpus_manifest.json").read_text(encoding="utf-8"))

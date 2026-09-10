@@ -39,6 +39,9 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         parser.error(str(exc))
     result = verify_report_bundle(path)
+    if args.kind == 'holdout' or (path / 'manifest.json').is_file() and 'holdout_freeze' in json.loads((path / 'manifest.json').read_text()):
+        from trade_agent.evaluation.holdout import verify_snapshot
+        result = verify_snapshot(path)
     if args.latest is not None and args.kind == 'development':
         from trade_agent.evaluation.cycle import verify_cycle_bundle
         cycle_errors = []

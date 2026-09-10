@@ -64,7 +64,7 @@ def _write_new(path: Path, value: Any) -> None:
 def _code_hash() -> str:
     root = Path(__file__).resolve().parents[2]
     paths = sorted((root / 'trade_agent').rglob('*.py'))
-    paths.append(root / 'scripts' / 'run_trade_eval.py')
+    paths.extend(sorted((root / 'scripts').glob('*trade*.py')))
     return canonical_hash({str(path.relative_to(root)): sha256(path.read_bytes()).hexdigest() for path in paths})
 
 
@@ -93,12 +93,14 @@ class EvaluationRunner:
     def run(self, bundle: EvaluationBundle, arm: EvaluationArm, output: Path) -> EvaluationRun:
         if any(case.dataset_role == 'holdout' for case in bundle.cases):
             raise ValueError('holdout requires separate frozen-snapshot preflight; this runner is development-only')
+        return self._run_frozen(bundle, arm, output, self.freeze(bundle, arm))
+
+    def _run_frozen(self, bundle, arm, output, snapshot, *, holdout_freeze=None):
         if not bundle.cases or len({case.case_id for case in bundle.cases}) != len(bundle.cases):
             raise ValueError('bundle requires nonempty unique cases')
         profile = profile_for(arm)
         identity = dict(self.adapter.identity)
         run_id = f'run-{profile.arm.value}-{uuid4().hex}'
-        snapshot = self.freeze(bundle, arm)
         path = Path(output) / run_id
         path.mkdir(parents=True, exist_ok=False)
         rows = []
@@ -119,7 +121,8 @@ class EvaluationRunner:
         _write_new(path / 'manifest.json', {
             'schema_version': 'trade-eval-run/v1', 'run': manifest.model_dump(mode='json'),
             'arm': profile.arm.value, 'created_at': datetime.now(timezone.utc).isoformat(),
-            'dataset_role': 'development', 'case_count': len(rows),
+            'dataset_role': bundle.cases[0].dataset_role, 'case_count': len(rows),
+            **({'holdout_freeze': holdout_freeze} if holdout_freeze else {}),
             'enabled_components': list(profile.enabled_components),
             'disabled_components': [name for name in COMPONENTS if name not in profile.enabled_components],
             'actual_components': [name for name in COMPONENTS if statuses[name] != 'not_run'],
@@ -143,7 +146,7 @@ class EvaluationRunner:
             profile_hash=canonical_hash({'profile': asdict(profile), 'budget': asdict(self.budget)}),
             model_hash=canonical_hash(identity['model_id']), prompt_hash=canonical_hash(identity['prompt_id']),
             evaluator_hash=canonical_hash({path.name: sha256(path.read_bytes()).hexdigest()
-                for path in sorted(Path(__file__).parent.glob('*metrics.py'))}), code_hash=_code_hash())
+                for path in sorted(Path(__file__).parent.glob('*.py'))}), code_hash=_code_hash())
 
     def _query(self, bundle, case, profile, run_id, seen):
         start = perf_counter()

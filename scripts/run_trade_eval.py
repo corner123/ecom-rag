@@ -21,15 +21,52 @@ def main(argv=None):
     parser.add_argument('--references', type=Path)
     parser.add_argument('--arms', default=','.join(arm.value for arm in EvaluationArm))
     parser.add_argument('--freeze-only', action='store_true')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--preflight-holdout', action='store_true')
+    mode.add_argument('--consume-holdout', action='store_true')
+    parser.add_argument('--candidate', type=Path)
+    parser.add_argument('--development', type=Path, default=Path('data/eval/trade_intel'))
     parser.add_argument('--baseline', type=Path)
     parser.add_argument('--publish', type=Path)
     parser.add_argument('--max-cases', type=int)
-    parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--output', type=Path)
     parser.add_argument('--candidate-limit', type=int, default=100)
     parser.add_argument('--top-k', type=int, default=10)
     parser.add_argument('--corpus-manifest', type=Path,
                         default=Path('demo/trade_intel_seed/manifests/corpus_manifest.json'))
     args = parser.parse_args(argv)
+    if args.preflight_holdout or args.consume_holdout:
+        from trade_agent.evaluation.holdout import _atomic_new, consume, preflight
+        if args.freeze_only or args.baseline or args.max_cases is not None or args.references:
+            parser.error('holdout cannot truncate, override references, or run development modes')
+        if args.arms != ','.join(arm.value for arm in EvaluationArm) or args.candidate_limit != 100 or args.top_k != 10:
+            parser.error('holdout uses the frozen development-selected arm and config')
+        freeze_path = args.dataset.with_name('holdout_preflight.json')
+        if args.preflight_holdout:
+            if args.candidate is None:
+                parser.error('--preflight-holdout requires --candidate')
+            frozen = preflight(dataset=args.dataset, candidate=args.candidate,
+                               corpus_manifest=args.corpus_manifest, development=args.development)
+            payload = {'candidate': str(args.candidate.resolve()), 'frozen': frozen}
+            if freeze_path.exists():
+                if json.loads(freeze_path.read_text()) != payload:
+                    parser.error('existing holdout preflight differs; do not overwrite')
+            else:
+                _atomic_new(freeze_path, payload)
+            print(json.dumps({'preflight': 'passed', 'candidate_hash': frozen['candidate_hash'],
+                              'git_sha': frozen['git_sha']}))
+            return 0
+        if args.output is None or args.publish is None or not freeze_path.is_file():
+            parser.error('--consume-holdout requires saved preflight, --output, and --publish')
+        saved = json.loads(freeze_path.read_text())
+        report = consume(dataset=args.dataset, candidate=args.candidate or Path(saved['candidate']),
+                         output=args.output, publish=args.publish, frozen=saved['frozen'],
+                         corpus_manifest=args.corpus_manifest, development=args.development)
+        result = json.loads((args.publish.parent / 'holdout_snapshot.json').read_text())['result']
+        print(json.dumps({'published_holdout': str(report), 'result': result}, sort_keys=True))
+        return 0 if result['status'] == 'passed' else 1
+    if args.output is None:
+        parser.error('--output is required')
     if args.max_cases is not None and args.max_cases < 1:
         parser.error('--max-cases must be positive')
     if args.publish and not args.baseline:
