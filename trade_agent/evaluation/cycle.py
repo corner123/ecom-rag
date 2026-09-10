@@ -28,8 +28,15 @@ def compare_runs(baselines, candidates):
     arms = {}
     for arm, candidate in after.items():
         baseline = before[arm]
-        for field in ('dataset_hash', 'reference_hash', 'corpus_hash', 'prompt_hash', 'evaluator_hash'):
+        for field in ('dataset_hash', 'reference_hash', 'corpus_hash', 'index_hash',
+                      'model_hash', 'profile_hash', 'prompt_hash', 'evaluator_hash'):
             if getattr(baseline.manifest.snapshot, field) != getattr(candidate.manifest.snapshot, field):
+                raise ValueError(f'paired development cycle requires matching {field}')
+        baseline_metadata = read_development_metadata(baseline)
+        candidate_metadata = read_development_metadata(candidate)
+        for field in ('budget', 'profile'):
+            if (not isinstance(baseline_metadata.get(field), dict)
+                    or baseline_metadata[field] != candidate_metadata.get(field)):
                 raise ValueError(f'paired development cycle requires matching {field}')
         rows = []
         for run in (baseline, candidate):
@@ -71,6 +78,18 @@ def cycle_markdown(cycle):
 
 
 def publish_cycle(cycle, runs, root):
+    runs = tuple(runs)
+    by_id = {run.manifest.run_id: run for run in runs}
+    if len(by_id) != len(runs):
+        raise ValueError('publication requires unique run IDs')
+    try:
+        before = [by_id[item['baseline_run_id']] for item in cycle['arms'].values()]
+        after = [by_id[item['candidate_run_id']] for item in cycle['arms'].values()]
+    except KeyError as exc:
+        raise ValueError('publication requires every paired run') from exc
+    recomputed = compare_runs(before, after)
+    if canonical_json(recomputed) != canonical_json(cycle):
+        raise ValueError('paired evidence does not match publication runs')
     root = Path(root)
     writer = ReportWriter()
     bundles = {}
