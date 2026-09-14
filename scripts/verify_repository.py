@@ -67,17 +67,6 @@ REQUIRED_TRACKED = (
     f"data/eval/trade_intel/reports_public/{HOLDOUT_BUNDLE_NAME}/report.json",
     "data/eval/trade_intel/reports_public/cycle-d2f1d18c65a549e2a191a989fd734236/paired.json",
 )
-DELIVERABLE_SCAN = (
-    "README.md",
-    "docs/architecture.md",
-    "docs/data-contract.md",
-    "docs/evaluation.md",
-    "docs/operations.md",
-    "docs/completion-audit.md",
-    "scripts/verify_repository.py",
-    "tests/security/test_repository_hygiene.py",
-    "trade_agent/cli.py",
-)
 LEGACY_RUNTIME = ("rag_core/engineering", "demo/ecommerce_seed", "engineering_api.py")
 PRIVATE_REQUIRED = (
     "data/eval/private/trade_intel/holdout_private.jsonl",
@@ -86,13 +75,6 @@ PRIVATE_REQUIRED = (
     "data/eval/private/trade_intel/holdout_consumption.json",
 )
 README_PROHIBITED = ("生产已部署", "真实客户数据", "线上转化提升")
-HOST_PATH = re.compile(r"(?:/(?:Users|home)/[^/\s]+|[A-Za-z]:\\Users\\)")
-SECRET_PATTERNS = (
-    re.compile(r"AKIA[0-9A-Z]{16}"),
-    re.compile(r"(?:^|[^A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}"),
-    re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),
-    re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
-)
 PUBLIC_HOLDOUT_FORBIDDEN_FILES = {
     "per_query.jsonl",
     "holdout_private.jsonl",
@@ -126,6 +108,202 @@ class Check:
             "evidence": list(self.evidence),
             "error": self.error,
         }
+
+
+@dataclass(frozen=True)
+class MatrixExpectation:
+    status: str
+    code_paths: tuple[str, ...]
+    test_paths: tuple[str, ...]
+    artifact_paths: tuple[str, ...]
+
+
+_HOLDOUT_REPORT = (
+    f"data/eval/trade_intel/reports_public/{HOLDOUT_BUNDLE_NAME}/report.json"
+)
+_CYCLE_REPORT = (
+    "data/eval/trade_intel/reports_public/"
+    "cycle-d2f1d18c65a549e2a191a989fd734236/paired.json"
+)
+_CORPUS_MANIFEST = "demo/trade_intel_seed/manifests/corpus_manifest.json"
+_STATUSES = {
+    "repository_evidence_present",
+    "committed_synthetic_evidence",
+    "controller_final_live_gate",
+}
+
+
+def _matrix(
+    status: str,
+    code: tuple[str, ...],
+    tests: tuple[str, ...],
+    artifacts: tuple[str, ...],
+) -> MatrixExpectation:
+    return MatrixExpectation(status, code, tests, artifacts)
+
+
+MATRIX_EXPECTATIONS = {
+    "REQ-001": _matrix("repository_evidence_present", ("trade_agent/data/demo_generator.py",), ("tests/unit/test_demo_corpus.py",), (_CORPUS_MANIFEST,)),
+    "REQ-002": _matrix("controller_final_live_gate", ("docker-compose.yml",), ("tests/contract/test_compose_contract.py",), ("scripts/smoke_foundation.py",)),
+    "REQ-003": _matrix("controller_final_live_gate", ("db/migrations/001_schema.sql", "db/init/010_users.sh"), ("tests/integration/test_mysql_schema.py",), ("scripts/smoke_foundation.py",)),
+    "REQ-004": _matrix("controller_final_live_gate", ("trade_agent/db/sql_validator.py", "trade_agent/db/sql_executor.py"), ("tests/integration/test_sql_execution.py",), ("trade_agent/config/schema_registry.yaml",)),
+    "REQ-005": _matrix("repository_evidence_present", ("trade_agent/data/router.py", "trade_agent/data/pdf.py"), ("tests/integration/test_corpus_routing.py", "tests/integration/test_pdf_pipeline.py"), (_CORPUS_MANIFEST,)),
+    "REQ-006": _matrix("repository_evidence_present", ("trade_agent/schemas/source.py", "trade_agent/data/chunkers.py"), ("tests/unit/test_source_schemas.py", "tests/unit/test_chunkers.py"), (_CORPUS_MANIFEST,)),
+    "REQ-007": _matrix("controller_final_live_gate", ("trade_agent/index/embeddings.py", "trade_agent/index/bge_m3_artifact_manifest.json"), ("tests/model/test_real_bge_m3.py",), ("scripts/smoke_embeddings.py",)),
+    "REQ-008": _matrix("controller_final_live_gate", ("trade_agent/index/milvus_store.py", "trade_agent/index/builder.py"), ("tests/milvus/test_milvus_roundtrip.py", "tests/milvus/test_full_index.py"), ("scripts/smoke_milvus_roundtrip.py",)),
+    "REQ-009": _matrix("controller_final_live_gate", ("trade_agent/retrieval/service.py", "trade_agent/retrieval/reranker.py"), ("tests/integration/test_retrieval_service.py", "tests/model/test_real_bge_reranker.py"), (_CYCLE_REPORT, "scripts/smoke_milvus_roundtrip.py")),
+    "REQ-010": _matrix("repository_evidence_present", ("trade_agent/entities/resolver.py", "trade_agent/entities/dedup.py"), ("tests/unit/test_entity_resolution.py", "tests/unit/test_deduplication.py"), (_CORPUS_MANIFEST,)),
+    "REQ-011": _matrix("repository_evidence_present", ("trade_agent/entities/conflicts.py",), ("tests/unit/test_conflicts.py",), ("tests/integration/test_graph.py",)),
+    "REQ-012": _matrix("repository_evidence_present", ("trade_agent/evidence/validator.py",), ("tests/unit/test_evidence_validator.py",), ("tests/integration/test_graph.py",)),
+    "REQ-013": _matrix("repository_evidence_present", ("trade_agent/evidence/claim_guard.py",), ("tests/unit/test_claim_guard.py",), ("tests/integration/test_graph.py",)),
+    "REQ-014": _matrix("controller_final_live_gate", ("trade_agent/agents/graph.py", "trade_agent/agents/nodes.py"), ("tests/integration/test_graph.py", "tests/e2e/test_query_workflow.py"), ("tests/e2e/test_query_workflow.py",)),
+    "REQ-015": _matrix("controller_final_live_gate", ("trade_agent/agents/checkpoint.py",), ("tests/integration/test_redis_checkpoint.py",), ("scripts/smoke_foundation.py",)),
+    "REQ-016": _matrix("repository_evidence_present", ("trade_agent/api/app.py", "trade_agent/cli.py"), ("tests/contract/test_api.py",), ("scripts/verify_trade_report.py",)),
+    "REQ-017": _matrix("repository_evidence_present", ("trade_agent/errors.py", "trade_agent/config/settings.py"), ("tests/unit/test_settings.py", "tests/integration/test_graph.py"), ("docs/operations.md",)),
+    "REQ-018": _matrix("repository_evidence_present", ("trade_agent/evaluation/generator.py",), ("tests/unit/test_eval_generator.py",), ("data/eval/trade_intel/dev_public.jsonl",)),
+    "REQ-019": _matrix("committed_synthetic_evidence", (".gitignore", "trade_agent/evaluation/holdout.py"), ("tests/unit/test_holdout_consumption.py",), (_HOLDOUT_REPORT, "data/eval/private/trade_intel/holdout_private.jsonl", "data/eval/private/trade_intel/references_private.jsonl", "data/eval/private/trade_intel/holdout_consumption.json")),
+    "REQ-020": _matrix("repository_evidence_present", ("trade_agent/evaluation/leakage.py", "trade_agent/evaluation/runner.py"), ("tests/unit/test_eval_leakage.py",), (_CORPUS_MANIFEST,)),
+    "REQ-021": _matrix("committed_synthetic_evidence", ("trade_agent/evaluation/holdout.py",), ("tests/unit/test_holdout_consumption.py",), ("data/eval/trade_intel/holdout_snapshot.json", "data/eval/private/trade_intel/holdout_preflight.json", "data/eval/private/trade_intel/holdout_consumption.json")),
+    "REQ-022": _matrix("committed_synthetic_evidence", ("trade_agent/evaluation/report.py", "trade_agent/evaluation/judge.py"), ("tests/contract/test_report_bundle.py", "tests/unit/test_judge.py"), (_HOLDOUT_REPORT,)),
+    "REQ-023": _matrix("committed_synthetic_evidence", ("trade_agent/evaluation/optimizer.py", "trade_agent/evaluation/cycle.py"), ("tests/unit/test_trade_eval_cycle.py",), (_CYCLE_REPORT,)),
+    "REQ-024": _matrix("committed_synthetic_evidence", ("trade_agent/evaluation/holdout.py", "trade_agent/evaluation/report.py"), ("tests/unit/test_holdout_consumption.py",), (_HOLDOUT_REPORT, "data/eval/trade_intel/holdout_snapshot.json")),
+    "REQ-025": _matrix("repository_evidence_present", ("scripts/run_trade_eval.py",), ("tests/security/test_repository_hygiene.py",), (_CYCLE_REPORT, _HOLDOUT_REPORT)),
+    "REQ-026": _matrix("repository_evidence_present", ("scripts/verify_repository.py", ".gitignore"), ("tests/security/test_repository_hygiene.py",), ("docs/completion-audit.md",)),
+    "ACC-001": _matrix("controller_final_live_gate", ("docker-compose.yml",), ("tests/contract/test_compose_contract.py",), ("scripts/smoke_foundation.py",)),
+    "ACC-002": _matrix("controller_final_live_gate", ("db/migrations/001_schema.sql", "db/init/010_users.sh"), ("tests/integration/test_mysql_schema.py",), ("scripts/smoke_foundation.py",)),
+    "ACC-003": _matrix("controller_final_live_gate", ("trade_agent/data/router.py", "trade_agent/data/pdf.py"), ("tests/integration/test_corpus_routing.py", "tests/integration/test_pdf_pipeline.py"), ("scripts/smoke_foundation.py",)),
+    "ACC-004": _matrix("repository_evidence_present", ("trade_agent/data/chunkers.py", "trade_agent/schemas/source.py"), ("tests/unit/test_chunkers.py", "tests/unit/test_source_schemas.py"), (_CORPUS_MANIFEST,)),
+    "ACC-005": _matrix("controller_final_live_gate", ("trade_agent/index/milvus_store.py",), ("tests/milvus/test_milvus_roundtrip.py",), ("scripts/smoke_milvus_roundtrip.py",)),
+    "ACC-006": _matrix("controller_final_live_gate", ("trade_agent/retrieval/service.py", "trade_agent/retrieval/reranker.py"), ("tests/integration/test_retrieval_service.py",), (_CYCLE_REPORT, "scripts/smoke_milvus_roundtrip.py")),
+    "ACC-007": _matrix("controller_final_live_gate", ("trade_agent/agents/graph.py", "trade_agent/agents/checkpoint.py"), ("tests/integration/test_graph.py", "tests/integration/test_redis_checkpoint.py"), ("tests/e2e/test_query_workflow.py",)),
+    "ACC-008": _matrix("repository_evidence_present", ("trade_agent/evidence/validator.py", "trade_agent/evidence/claim_guard.py"), ("tests/unit/test_evidence_validator.py", "tests/unit/test_claim_guard.py"), ("tests/integration/test_graph.py",)),
+    "ACC-009": _matrix("committed_synthetic_evidence", ("trade_agent/evaluation/cycle.py", "trade_agent/evaluation/holdout.py"), ("tests/unit/test_trade_eval_cycle.py", "tests/unit/test_holdout_consumption.py"), (_CYCLE_REPORT, _HOLDOUT_REPORT)),
+    "ACC-010": _matrix("controller_final_live_gate", ("scripts/verify_repository.py",), ("tests/security/test_repository_hygiene.py",), ("docs/operations.md",)),
+    "ACC-011": _matrix("repository_evidence_present", ("README.md",), ("tests/security/test_repository_hygiene.py",), ("docs/evaluation.md",)),
+    "ACC-012": _matrix("controller_final_live_gate", ("scripts/verify_repository.py",), ("tests/security/test_repository_hygiene.py",), ("docs/completion-audit.md",)),
+}
+
+
+_BACKTICK_PATH = re.compile(r"`([^`]+)`")
+_MATRIX_ROW = re.compile(r"^\| ((?:REQ|ACC)-\d{3}) \|")
+_HOST_PATTERNS = (
+    re.compile(r"/(?:Users|home)/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._?=&%-]+)*"),
+    re.compile(r"/private/var/folders/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*"),
+    re.compile(r"[A-Za-z]:\\{1,2}Users\\{1,2}[A-Za-z0-9._-]+(?:\\{1,2}[A-Za-z0-9._-]+)*"),
+)
+_SECRET_PATTERNS = (
+    re.compile(r"AKIA[0-9A-Z]{16}"),
+    re.compile(r"(?:^|[^A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}"),
+    re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),
+    re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
+)
+
+
+def _fixture_posix_path(*parts: str) -> str:
+    """Build intentional host-path fixtures without embedding one in this file."""
+    return "/" + "/".join(parts)
+
+
+def _fixture_windows_path(*parts: str) -> str:
+    """Build the doubled-backslash fixture used by the manifest tests."""
+    return "C:" + ("\\" * 2) + ("\\" * 2).join(parts)
+
+
+_HOST_SENTINEL_ALLOWLIST = {
+    "tests/unit/test_evidence_models.py": {
+        _fixture_posix_path("Users", "private"),
+        _fixture_posix_path("Users", "private", "corpus.json"),
+    },
+    "tests/unit/test_manifest.py": {
+        _fixture_posix_path("Users", "alice", "project", "input.pdf"),
+        _fixture_posix_path("home", "alice", "input.pdf"),
+        _fixture_posix_path("private", "var", "folders", "aa", "bb", "input.pdf"),
+        _fixture_windows_path("Users", "alice", "input.pdf"),
+    },
+    "tests/unit/test_smoke_embeddings.py": {
+        _fixture_posix_path("Users", "private", "model-cache?token=secret"),
+    },
+    "tests/unit/test_smoke_foundation.py": {
+        _fixture_posix_path("Users", "private", "app"),
+        _fixture_posix_path("Users", "private", "secret.txt"),
+    },
+}
+
+
+def _cell_paths(cell: str) -> set[str]:
+    return set(_BACKTICK_PATH.findall(cell))
+
+
+def validate_completion_matrix(
+    text: str, tracked: set[str], *, root: Path = ROOT
+) -> tuple[str, ...]:
+    """Validate stable requirement rows and exact evidence categories."""
+    errors: list[str] = []
+    rows: dict[str, list[str]] = {}
+    for line in text.splitlines():
+        match = _MATRIX_ROW.match(line)
+        if not match:
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        row_id = match.group(1)
+        if row_id in rows:
+            errors.append(f"{row_id}: duplicate matrix row")
+        elif len(cells) != 6:
+            errors.append(f"{row_id}: expected six matrix columns")
+        else:
+            rows[row_id] = cells
+    expected_ids = set(MATRIX_EXPECTATIONS)
+    for row_id in sorted(expected_ids - set(rows)):
+        errors.append(f"{row_id}: missing matrix row")
+    for row_id in sorted(set(rows) - expected_ids):
+        errors.append(f"{row_id}: unexpected matrix row")
+    for row_id in sorted(expected_ids & set(rows)):
+        cells = rows[row_id]
+        expected = MATRIX_EXPECTATIONS[row_id]
+        status = cells[5].strip("`")
+        if status not in _STATUSES or status != expected.status:
+            errors.append(f"{row_id}: status must be {expected.status}")
+        categories = (
+            ("code", _cell_paths(cells[2]), set(expected.code_paths)),
+            ("test", _cell_paths(cells[3]), set(expected.test_paths)),
+            ("artifact", _cell_paths(cells[4]), set(expected.artifact_paths)),
+        )
+        for category, actual, required in categories:
+            if not actual:
+                errors.append(f"{row_id}: {category} evidence must contain exact paths")
+                continue
+            missing = sorted(required - actual)
+            if missing:
+                errors.append(f"{row_id}: missing required {category} paths: {', '.join(missing)}")
+            for path in sorted(actual):
+                candidate = Path(path)
+                if candidate.is_absolute() or ".." in candidate.parts:
+                    errors.append(f"{row_id}: unsafe evidence path {path}")
+                elif not (root / candidate).exists():
+                    errors.append(f"{row_id}: evidence path does not exist: {path}")
+                elif not path.startswith("data/eval/private/") and path not in tracked:
+                    errors.append(f"{row_id}: evidence path is not tracked: {path}")
+            if category == "test" and any(not path.startswith("tests/") for path in actual):
+                errors.append(f"{row_id}: test evidence must use tests/ paths")
+    return tuple(errors)
+
+
+def scan_tracked_texts(files: Iterable[tuple[str, bytes]]) -> tuple[str, ...]:
+    """Scan every supplied tracked blob, allowing only exact reviewed sentinels."""
+    findings: set[str] = set()
+    for path, content in files:
+        text = content.decode("utf-8", errors="replace")
+        allowed_hosts = _HOST_SENTINEL_ALLOWLIST.get(path, set())
+        for line_number, line in enumerate(text.splitlines(), 1):
+            if any(
+                match.group(0) not in allowed_hosts
+                for pattern in _HOST_PATTERNS
+                for match in pattern.finditer(line)
+            ):
+                findings.add(f"{path}:{line_number}:host_absolute_path")
+            if any(pattern.search(line) for pattern in _SECRET_PATTERNS):
+                findings.add(f"{path}:{line_number}:secret_shaped_value")
+    return tuple(sorted(findings))
 
 
 def _command(arguments: Iterable[str]) -> subprocess.CompletedProcess[str]:
@@ -388,17 +566,13 @@ def audit_repository() -> tuple[Check, ...]:
     )
 
     audit_doc = (ROOT / "docs/completion-audit.md").read_text(encoding="utf-8")
-    live_terms = (
-        "Controller-final live gate",
-        "Milvus insert/search/filter/reconnect/cleanup",
-        "Redis recovery",
-        "no Task 10 Docker receipt",
-    )
+    matrix_errors = validate_completion_matrix(audit_doc, tracked)
     record(
-        "completion-audit-separates-live-gates",
-        all(term in audit_doc for term in live_terms),
+        "completion-matrix-exact-evidence",
+        not matrix_errors,
         "docs/completion-audit.md",
-        error="completion audit does not enumerate controller-final live gates",
+        f"stable_rows={len(MATRIX_EXPECTATIONS)}",
+        error="; ".join(matrix_errors) if matrix_errors else None,
     )
 
     help_result = _command((sys.executable, "-m", "trade_agent.cli", "--help"))
@@ -455,23 +629,20 @@ def audit_repository() -> tuple[Check, ...]:
         error="CLI surface or evaluation/report delegation is unavailable" if not cli_ok else None,
     )
 
-    unsafe: list[str] = []
-    for relative in DELIVERABLE_SCAN:
-        if relative not in tracked:
-            continue
+    blobs: list[tuple[str, bytes]] = []
+    unreadable: list[str] = []
+    for relative in sorted(tracked):
         try:
-            text = (ROOT / relative).read_text(encoding="utf-8")
-        except (OSError, UnicodeError) as exc:
-            unsafe.append(f"{relative}: unreadable ({exc})")
-            continue
-        if HOST_PATH.search(text):
-            unsafe.append(f"{relative}: host absolute path")
-        if any(pattern.search(text) for pattern in SECRET_PATTERNS):
-            unsafe.append(f"{relative}: secret-shaped value")
+            blobs.append((relative, (ROOT / relative).read_bytes()))
+        except OSError:
+            unreadable.append(relative)
+    unsafe = list(scan_tracked_texts(blobs))
+    unsafe.extend(f"{path}:unreadable" for path in unreadable)
     record(
-        "tracked-deliverables-have-no-host-path-or-secret",
+        "all-tracked-files-have-no-host-path-or-secret",
         not unsafe,
-        *DELIVERABLE_SCAN,
+        f"tracked_files_scanned={len(blobs)}",
+        "fixture allowlist: exact reviewed host-path sentinels only",
         error="; ".join(unsafe) if unsafe else None,
     )
 

@@ -32,8 +32,10 @@ Python 3.12 is the supported local test runtime. Create the environment and inst
 
 ```sh
 uv sync --frozen
-.venv/bin/python -m pip check
+.venv/bin/python -c "import trade_agent"
 ```
+
+The local `.venv` may be created without the `pip` module; the container-only dependency check is listed in [docs/operations.md](docs/operations.md).
 
 Generate the deterministic demonstration corpus in a new directory:
 

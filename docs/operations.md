@@ -5,7 +5,6 @@
 Repository and report verification do not require services:
 
 ```sh
-.venv/bin/python -m pip check
 .venv/bin/python -m pytest tests/security/test_repository_hygiene.py tests/contract/test_api.py -q
 .venv/bin/python -m scripts.verify_repository
 .venv/bin/python -m scripts.verify_trade_report --latest data/eval/trade_intel/reports_public --kind development
@@ -13,6 +12,7 @@ Repository and report verification do not require services:
 ```
 
 `scripts.verify_repository` reports repository/artifact state. It deliberately does not infer that MySQL, Redis, Milvus, BGE, or the API are running.
+The local uv-managed `.venv` may omit the `pip` module. `python -m pip check` below is a controller gate inside the built API image, where pip is part of that environment.
 
 ## Secrets and service startup
 

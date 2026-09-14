@@ -6,6 +6,8 @@ from pathlib import Path
 import subprocess
 import sys
 
+import scripts.verify_repository as repository_audit
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PUBLIC_REPORTS = REPO_ROOT / "data/eval/trade_intel/reports_public"
@@ -94,3 +96,62 @@ def test_machine_readable_repository_audit_passes() -> None:
     payload = json.loads(result.stdout)
     assert payload["valid"] is True
     assert payload["errors"] == []
+
+
+def test_completion_matrix_has_every_stable_row_with_concrete_evidence() -> None:
+    matrix = (REPO_ROOT / "docs/completion-audit.md").read_text(encoding="utf-8")
+    tracked = set(_git("ls-files").stdout.splitlines())
+    assert repository_audit.validate_completion_matrix(matrix, tracked, root=REPO_ROOT) == ()
+
+
+def test_completion_matrix_validator_rejects_missing_and_indirect_rows() -> None:
+    matrix = (REPO_ROOT / "docs/completion-audit.md").read_text(encoding="utf-8")
+    tracked = set(_git("ls-files").stdout.splitlines())
+    without_first = "\n".join(
+        line for line in matrix.splitlines() if not line.startswith("| REQ-001 |")
+    )
+    assert any("REQ-001" in error for error in repository_audit.validate_completion_matrix(
+        without_first, tracked, root=REPO_ROOT
+    ))
+
+    indirect = "\n".join(
+        line.replace("`trade_agent/data/demo_generator.py`", "synthetic corpus generator")
+        if line.startswith("| REQ-001 |") else line
+        for line in matrix.splitlines()
+    )
+    assert any("REQ-001" in error for error in repository_audit.validate_completion_matrix(
+        indirect, tracked, root=REPO_ROOT
+    ))
+
+    nonexistent = "\n".join(
+        line.replace(
+            "`demo/trade_intel_seed/manifests/corpus_manifest.json`",
+            "`demo/trade_intel_seed/manifests/corpus_manifest.json`; `docs/not-evidence.md`",
+            1,
+        )
+        if line.startswith("| REQ-001 |") else line
+        for line in matrix.splitlines()
+    )
+    assert any("does not exist" in error for error in repository_audit.validate_completion_matrix(
+        nonexistent, tracked, root=REPO_ROOT
+    ))
+
+
+def test_tracked_text_scanner_rejects_host_paths_and_secret_shapes() -> None:
+    findings = repository_audit.scan_tracked_texts((
+        ("docs/unsafe.md", b"cache=/" + b"Users/alice/private/model"),
+        ("config/unsafe.txt", b"AWS=AK" + b"IA1234567890ABCDEF"),
+    ))
+    assert "docs/unsafe.md:1:host_absolute_path" in findings
+    assert "config/unsafe.txt:1:secret_shaped_value" in findings
+
+
+def test_tracked_text_scanner_allowlists_only_exact_reviewed_test_sentinels() -> None:
+    allowed = repository_audit.scan_tracked_texts((
+        ("tests/unit/test_evidence_models.py", b'        "/' + b'Users/private",'),
+    ))
+    changed = repository_audit.scan_tracked_texts((
+        ("tests/unit/test_evidence_models.py", b'        "/' + b'Users/reviewer/private",'),
+    ))
+    assert allowed == ()
+    assert changed == ("tests/unit/test_evidence_models.py:1:host_absolute_path",)
