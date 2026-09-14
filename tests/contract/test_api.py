@@ -239,13 +239,42 @@ def test_cli_help_exposes_the_complete_product_command_surface(capsys) -> None:
         assert command in help_text
 
 
-@pytest.mark.parametrize("command", ["eval", "verify-report"])
-def test_unavailable_evaluation_cli_commands_fail_closed(command: str, capsys) -> None:
-    assert cli_main([command]) == 2
+def test_eval_cli_delegates_argument_validation_to_trade_runner(capsys) -> None:
+    assert cli_main([
+        "eval",
+        "--dataset",
+        "unused.jsonl",
+        "--output",
+        "unused-output",
+        "--max-cases",
+        "0",
+    ]) == 2
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert '"status": "unavailable"' in captured.err
-    assert '"code": "evaluation_not_implemented"' in captured.err
+    assert "max-cases must be positive" in captured.err
+
+
+def test_verify_report_cli_delegates_argument_validation_to_report_verifier(
+    tmp_path, capsys
+) -> None:
+    assert cli_main(["verify-report", "--latest", str(tmp_path)]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "--latest requires --kind" in captured.err
+
+
+def test_eval_cli_help_comes_from_trade_runner(capsys) -> None:
+    assert cli_main(["eval", "--help"]) == 0
+    help_text = capsys.readouterr().out
+    assert "--dataset" in help_text
+    assert "--consume-holdout" in help_text
+
+
+def test_verify_report_cli_help_comes_from_report_verifier(capsys) -> None:
+    assert cli_main(["verify-report", "--help"]) == 0
+    help_text = capsys.readouterr().out
+    assert "--latest" in help_text
+    assert "--kind" in help_text
 
 
 def test_bootstrap_demo_cli_composes_the_existing_generator(tmp_path, capsys) -> None:

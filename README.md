@@ -1,148 +1,69 @@
-# Trade Intelligence Agent
+# Synthetic Foreign-Trade Intelligence Agent
 
-An evidence-first foreign-trade intelligence agent. The foundation is under
-construction and currently covers only the local data/services contract.
+> **Evidence boundary:** this repository is a synthetic, non-production engineering demonstration. Its committed evaluation reports use a local CPU hash-token cosine retriever, BM25, and a lexical reranker. They do **not** establish real Milvus/BGE acceptance, generated-answer quality, live buyer coverage, business-decision validity, production readiness, or performance on customer data.
 
-Every company, trade record, website, B2B listing, news item, social post, PDF,
-customs profile, label, and metric in this repository is fictional synthetic
-data. It is not customer, company, customs, or production data.
+The project combines a read-only MySQL query path with a source-grounded RAG path. It ingests synthetic website, B2B, news, social, PDF, scanned-PDF, and customs-derived records; builds canonical metadata; retrieves with BM25, dense search, weighted RRF, filters, and reranking; and runs a LangGraph workflow that binds each factual claim to reviewable evidence. Redis stores a bounded checkpoint projection.
 
-## Safe local foundation run
+## What is implemented
 
-The example file is a field checklist only; do not source it as shell code.
-Copy it for Compose variable names, edit only non-secret host/model fields, and
-do not commit `.env`. Never put a secret in `.env`; the shell exports below
-override its placeholder values without writing secrets to a file:
+- Seven-table foreign-trade schema, deterministic synthetic seed, read-only query role, schema registry, restricted query plans, SQLGlot policy validation, and `SqlEvidence`.
+- Source routing, parsing, quarantine, chunking, provenance manifests, entity resolution, deduplication, conflict handling, and canonical metadata.
+- Pinned BGE-M3 embedding contract, Milvus collection contract, BM25, filter-first dense search, weighted RRF, pinned BGE reranker contract, and retrieval traces.
+- LangGraph SQL/RAG orchestration, evidence validation, claim guard, structured refusal, retry/step/LLM limits, Redis checkpoint projection, FastAPI routes, and CLI commands.
+- Public development evaluation, ignored private holdout workflow, hash freeze, leakage checks, immutable reports, and deterministic rule metrics.
 
-```bash
-set -eu
-cp .env.example .env
-if [ -n "${EDITOR:-}" ]; then
-  "$EDITOR" .env
-fi
-export MYSQL__ROOT_PASSWORD="$(python3 -c 'import getpass; print(getpass.getpass("MySQL root password: "))')"
-export MYSQL__MIGRATION_PASSWORD="$(python3 -c 'import getpass; print(getpass.getpass("MySQL migration password: "))')"
-export MYSQL__QUERY_PASSWORD="$(python3 -c 'import getpass; print(getpass.getpass("MySQL query password: "))')"
-export MINIO_ROOT_PASSWORD="$(python3 -c 'import getpass; print(getpass.getpass("MinIO root password: "))')"
-: "${MYSQL__ROOT_PASSWORD:?MYSQL__ROOT_PASSWORD must be non-empty}"
-: "${MYSQL__MIGRATION_PASSWORD:?MYSQL__MIGRATION_PASSWORD must be non-empty}"
-: "${MYSQL__QUERY_PASSWORD:?MYSQL__QUERY_PASSWORD must be non-empty}"
-: "${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be non-empty}"
-export MYSQL__ROOT_PASSWORD MYSQL__MIGRATION_PASSWORD MYSQL__QUERY_PASSWORD MINIO_ROOT_PASSWORD
+The architecture and trust boundaries are described in [docs/architecture.md](docs/architecture.md), the schemas in [docs/data-contract.md](docs/data-contract.md), evaluation in [docs/evaluation.md](docs/evaluation.md), and operating procedures in [docs/operations.md](docs/operations.md). The requirement-by-requirement status is in [docs/completion-audit.md](docs/completion-audit.md).
 
-cleanup_foundation_secrets() {
-  unset MYSQL__ROOT_PASSWORD MYSQL__MIGRATION_PASSWORD MYSQL__QUERY_PASSWORD MINIO_ROOT_PASSWORD
-}
-trap cleanup_foundation_secrets EXIT
+## Measured synthetic results
+
+The public development cycle contains 44 queries. For the `full_rerank` arm, context precision changed from `0.075231` to `0.194907`, Recall@10 stayed `0.472222`, and there were zero paired recall or precision regressions. The accepted change was explicit calendar-month filtering. These figures come from one sequential local CPU pass and are not neural-retrieval or production latency measurements.
+
+The first private holdout publication contains aggregates only. It records 44 completed retrieval cases, Recall@10 `0.5833333333333334`, and context precision `0.20601851851851852`. Generation was unavailable, so generation is `not_run`; the LLM Judge is `judge_not_run` with null faithfulness and relevance scores. Rule metrics remain authoritative.
+
+- [Development paired report](data/eval/trade_intel/reports_public/cycle-d2f1d18c65a549e2a191a989fd734236/report.md)
+- [First holdout aggregate](data/eval/trade_intel/reports_public/report-7cd261cf288521093c50d1083afec460ea2bb2c624cbea16e46abdfe8d70daf8-local-build-a3137d12491fb54f1a058fefa47cc96e-full_rerank-20260910T214832Z-7bb1aa43/report.md)
+- [Frozen public holdout snapshot](data/eval/trade_intel/holdout_snapshot.json)
+
+Older ecommerce datasets and reports remain historical artifacts in separate paths. They are never inputs to, or evidence for, the trade-agent results above.
+
+## Local setup
+
+Python 3.12 is the supported local test runtime. Create the environment and install the locked project dependencies:
+
+```sh
+uv sync --frozen
+.venv/bin/python -m pip check
 ```
 
-Start exactly the five foundation dependencies (ports are loopback-only):
+Generate the deterministic demonstration corpus in a new directory:
 
-```bash
-docker compose --env-file .env up -d mysql etcd minio milvus redis --wait
+```sh
+.venv/bin/python -m trade_agent.cli bootstrap-demo --output demo/trade_intel_seed --clean
 ```
 
-Run migration and seed as one-shot commands. The migration secret is injected
-only into these transient containers; it is not part of the persistent API
-environment, which receives only the query role password:
+The service-backed path requires MySQL, Milvus, etcd, MinIO, Redis, the pinned BGE model artifacts, and locally supplied secrets. Follow [docs/operations.md](docs/operations.md); the committed local evaluation reports are not substitutes for those live checks.
 
-```bash
-docker compose --env-file .env run --rm --no-deps \
-  -e MYSQL__MIGRATION_PASSWORD api \
-  python -m trade_agent.db.migrate
-docker compose --env-file .env run --rm --no-deps \
-  -e MYSQL__MIGRATION_PASSWORD api \
-  python -m trade_agent.db.seed --seed 20260830
+## CLI
+
+```text
+trade-intel bootstrap-demo [generator options]
+trade-intel db migrate|seed [options]
+trade-intel ingest [ingestion options]
+trade-intel index [index options]
+trade-intel query QUESTION [--top-k N] [--api-url URL]
+trade-intel eval [evaluation options]
+trade-intel smoke [foundation|retrieval]
+trade-intel verify-report [report path or --latest ROOT --kind ROLE]
 ```
 
-Rebuild the API image, then run the read-only foundation smoke command:
+The evaluation command runs the synthetic local evaluation adapter. It does not silently switch to Milvus/BGE or online generation.
 
-```bash
-docker compose --env-file .env build api
-docker compose --env-file .env run --rm --no-deps api python -m scripts.smoke_foundation
+## Repository audit
+
+Run the deterministic repository and artifact audit without Docker:
+
+```sh
+.venv/bin/python -m scripts.verify_repository
 ```
 
-Run the complete foundation test command:
-
-```bash
-docker compose --env-file .env run --rm --no-deps \
-  -e MYSQL__MIGRATION_PASSWORD api \
-  pytest tests/unit tests/contract/test_compose_contract.py \
-  tests/integration/test_mysql_schema.py tests/integration/test_ingestion_pipeline.py \
-  tests/integration/test_pdf_pipeline.py -q
-```
-
-Tear down services when finished (named volumes are retained unless removed
-explicitly):
-
-```bash
-docker compose --env-file .env down
-
-unset MYSQL__ROOT_PASSWORD MYSQL__MIGRATION_PASSWORD MYSQL__QUERY_PASSWORD MINIO_ROOT_PASSWORD
-```
-
-The MySQL named-volume users and passwords are applied only during the
-volume's first initialization; changing environment variables does not rotate
-credentials for an existing database. To replace local credentials, first
-understand that `docker compose down -v` deletes all local synthetic data and
-named volumes, then run the startup, migration, and seed commands again.
-
-The scanned regulator PDF is intentionally expected to be quarantined when
-MinerU is unavailable; the smoke output records this degradation truthfully.
-This task verifies only foundation services, schema/seed, synthetic corpus,
-ingestion, and manifests. Retrieval, SQL-agent orchestration, answer
-generation, and evaluation are later scopes.
-
-## Pinned embedding smoke
-
-Retrieval uses `BAAI/bge-m3` at immutable revision
-`5617a9f61b028005a4858fdac845db406aefb181` (1024 dimensions). The API keeps
-only model artifacts in the named `model_cache` volume; it does not receive
-the MySQL root or migration secrets. A committed allowlist identifies the ten
-dense SentenceTransformer, tokenizer, configuration, and PyTorch runtime files.
-Each load verifies their byte sizes and SHA256 digests before constructing the
-model. Before any download or model construction, the installed manifest's
-canonical JSON must also match the hard-coded trust anchor and its strict
-schema/path rules. Online loads additionally compare the pinned revision and
-Git/LFS file metadata with Hugging Face. README/image assets, duplicate ONNX
-weights, and the unused ColBERT/sparse heads are excluded; unrelated cache
-extras are never counted as trusted artifacts.
-
-The manifest loader returns frozen artifact values. One freshly loaded,
-process-attested manifest is passed explicitly through metadata checks,
-download allow-patterns, and local file verification; exported observation
-tuples are not security inputs. After all required paths, sizes, and SHA256
-values pass, only those ten files are exposed to SentenceTransformer through a
-private verified runtime view. Cache extras—including alternate weights,
-indexes, or adapter configuration—cannot become loader inputs. The exact view
-is fully hashed both before and immediately after model construction; only the
-post-load check can issue a live process-local snapshot receipt and activate
-manager state. A persistent in-place cache mutation during construction
-therefore fails closed and cleans the view. The production contract factory
-accepts only that receipt and derives every production identity/invariant field
-internally rather than accepting caller-supplied values.
-
-This pre/post integrity check is not a model-deserialization sandbox. It
-prevents production authority from being issued for bytes that remain changed
-at the post-load check, but it cannot undo loader side effects or detect an
-adversarial same-process writer that changes bytes and restores them entirely
-between the two hashes. The runtime also disables remote model code; stronger
-same-process attacker isolation would require sealed immutable storage and a
-separate restricted loader process.
-
-`EmbeddingContract.model_dump()` deliberately persists only portable identity
-fields. It does not persist the process-local production attestation. Consumers
-that write a real vector index must use the live contract returned by a
-content-verified `BgeEmbeddingManager` and call `require_production()`; loading
-the same pinned-looking fields from JSON is not proof that this process verified
-the model bytes. Likewise, directly constructing, copying, replacing, or
-deserializing a snapshot receipt cannot recreate live verification authority.
-
-After building the API image, run the non-fake smoke command. It emits one
-safe JSON line containing the resolved revision, artifact-manifest identity,
-and vector checks. A deterministic test encoder is rejected by this public
-smoke rather than being reported as a production pass:
-
-```bash
-docker compose --env-file .env run --rm --no-deps api python -m scripts.smoke_embeddings
-```
+It verifies required tracked evidence, immutable public report checksums, CLI delegation, the ignored one-shot holdout lock, absence of public holdout rows/labels, removal of legacy ecommerce runtime paths, and tracked-deliverable hygiene. It does not report live infrastructure acceptance. The controller-final Docker, MySQL, Milvus/BGE, Redis, and full workflow gates are listed in the completion audit.

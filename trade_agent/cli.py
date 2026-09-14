@@ -10,12 +10,6 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
-_EVALUATION_UNAVAILABLE = {
-    "code": "evaluation_not_implemented",
-    "status": "unavailable",
-}
-
-
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="trade-intel", description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -28,9 +22,13 @@ def _parser() -> argparse.ArgumentParser:
     query.add_argument("--top-k", type=int, default=10)
     query.add_argument("--api-url", default="http://127.0.0.1:8000")
     query.add_argument("--idempotency-key")
-    commands.add_parser("eval", help="run evaluation when the evaluation plan is installed")
+    commands.add_parser(
+        "eval", help="run the synthetic local evaluation workflow", add_help=False
+    )
     commands.add_parser("smoke", help="run foundation or retrieval smoke verification")
-    commands.add_parser("verify-report", help="verify an evaluation report when available")
+    commands.add_parser(
+        "verify-report", help="verify an immutable evaluation report", add_help=False
+    )
     return parser
 
 
@@ -113,11 +111,10 @@ def _smoke(arguments: Sequence[str]) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _parser()
     args, remaining = parser.parse_known_args(argv)
-    if args.command in {"eval", "verify-report"}:
-        if remaining:
-            parser.error("unrecognized arguments: " + " ".join(remaining))
-        print(json.dumps(_EVALUATION_UNAVAILABLE, sort_keys=True), file=sys.stderr)
-        return 2
+    if args.command == "eval":
+        return _delegate("scripts.run_trade_eval", remaining)
+    if args.command == "verify-report":
+        return _delegate("scripts.verify_trade_report", remaining)
     if args.command == "bootstrap-demo":
         return _delegate("scripts.bootstrap_trade_intel_demo", remaining)
     if args.command == "db":
