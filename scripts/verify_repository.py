@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import math
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -118,6 +119,13 @@ class MatrixExpectation:
     artifact_paths: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class RepositoryInventory:
+    source: str
+    paths: set[str]
+    error: str | None = None
+
+
 _HOLDOUT_REPORT = (
     f"data/eval/trade_intel/reports_public/{HOLDOUT_BUNDLE_NAME}/report.json"
 )
@@ -131,6 +139,31 @@ _STATUSES = {
     "committed_synthetic_evidence",
     "controller_final_live_gate",
 }
+_PACKAGED_SOURCE_ENV = "TRADE_AGENT_PACKAGED_SOURCE"
+_PACKAGED_EXCLUDED_PARTS = {
+    ".git",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".mypy_cache",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+}
+_PACKAGED_EXCLUDED_PREFIXES = (
+    "data/eval/reports/",
+    "data/indexes/",
+    "data/manifests/builds/",
+)
+_PACKAGED_EXCLUDED_SUFFIXES = (
+    ".egg-info",
+    ".gguf",
+    ".onnx",
+    ".pt",
+    ".pth",
+    ".pyc",
+    ".safetensors",
+)
 
 
 def _matrix(
@@ -279,6 +312,8 @@ def validate_completion_matrix(
                 candidate = Path(path)
                 if candidate.is_absolute() or ".." in candidate.parts:
                     errors.append(f"{row_id}: unsafe evidence path {path}")
+                elif is_packaged_source() and path.startswith("data/eval/private/"):
+                    continue
                 elif not (root / candidate).exists():
                     errors.append(f"{row_id}: evidence path does not exist: {path}")
                 elif not path.startswith("data/eval/private/") and path not in tracked:
@@ -304,6 +339,54 @@ def scan_tracked_texts(files: Iterable[tuple[str, bytes]]) -> tuple[str, ...]:
             if any(pattern.search(line) for pattern in _SECRET_PATTERNS):
                 findings.add(f"{path}:{line_number}:secret_shaped_value")
     return tuple(sorted(findings))
+
+
+def is_packaged_source() -> bool:
+    """Return whether this process is running from the source-only API image."""
+    return os.environ.get(_PACKAGED_SOURCE_ENV) == "1"
+
+
+def _is_packaged_repository_file(relative: Path) -> bool:
+    value = relative.as_posix()
+    if any(
+        part in _PACKAGED_EXCLUDED_PARTS or part.endswith(".egg-info")
+        for part in relative.parts
+    ):
+        return False
+    if any(value.startswith(prefix) for prefix in _PACKAGED_EXCLUDED_PREFIXES):
+        return False
+    return not value.endswith(_PACKAGED_EXCLUDED_SUFFIXES)
+
+
+def repository_inventory(*, root: Path = ROOT) -> RepositoryInventory:
+    """Use Git on hosts and a fail-closed packaged-file inventory in the API image."""
+    if is_packaged_source():
+        try:
+            paths = {
+                path.relative_to(root).as_posix()
+                for path in root.rglob("*")
+                if path.is_file()
+                and _is_packaged_repository_file(path.relative_to(root))
+            }
+        except OSError as exc:
+            return RepositoryInventory("packaged", set(), str(exc))
+        return RepositoryInventory("packaged", paths)
+
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "ls-files"],
+            cwd=root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        return RepositoryInventory("git", set(), str(exc))
+    if result.returncode != 0:
+        return RepositoryInventory(
+            "git", set(), result.stderr.strip() or "git ls-files failed"
+        )
+    return RepositoryInventory("git", set(result.stdout.splitlines()))
 
 
 def _command(arguments: Iterable[str]) -> subprocess.CompletedProcess[str]:
@@ -341,13 +424,14 @@ def audit_repository() -> tuple[Check, ...]:
     def record(check_id: str, passed: bool, *evidence: str, error: str | None = None) -> None:
         checks.append(Check(check_id, passed, tuple(evidence), error if not passed else None))
 
-    tracked_result = _git("ls-files")
-    tracked = set(tracked_result.stdout.splitlines()) if tracked_result.returncode == 0 else set()
+    inventory = repository_inventory()
+    tracked = inventory.paths
     record(
-        "git-index-readable",
-        tracked_result.returncode == 0,
-        "git ls-files",
-        error="unable to read Git index" if tracked_result.returncode else None,
+        "repository-source-inventory-readable",
+        inventory.error is None,
+        f"source={inventory.source}",
+        f"files={len(tracked)}",
+        error=inventory.error,
     )
 
     missing = sorted(path for path in REQUIRED_TRACKED if path not in tracked or not (ROOT / path).is_file())
@@ -375,24 +459,41 @@ def audit_repository() -> tuple[Check, ...]:
     )
 
     private_tracked = sorted(path for path in tracked if path.startswith("data/eval/private/"))
-    private_missing = sorted(path for path in PRIVATE_REQUIRED if not (ROOT / path).is_file())
-    private_unignored = sorted(
-        path
-        for path in PRIVATE_REQUIRED
-        if _git("check-ignore", "-q", path).returncode != 0
-    )
-    private_ok = not private_tracked and not private_missing and not private_unignored
-    private_errors = []
-    if private_tracked:
-        private_errors.append("tracked private paths: " + ", ".join(private_tracked))
-    if private_missing:
-        private_errors.append("missing local private control artifacts: " + ", ".join(private_missing))
-    if private_unignored:
-        private_errors.append("private paths not ignored: " + ", ".join(private_unignored))
+    private_errors: list[str] = []
+    if inventory.source == "packaged":
+        ignore_file = ROOT / ".gitignore"
+        try:
+            ignore_rule_present = "data/eval/private/" in ignore_file.read_text(
+                encoding="utf-8"
+            ).splitlines()
+        except OSError:
+            ignore_rule_present = False
+        if private_tracked:
+            private_errors.append("private paths packaged: " + ", ".join(private_tracked))
+        if not ignore_rule_present:
+            private_errors.append("packaged .gitignore lacks data/eval/private/ rule")
+        private_evidence = (
+            "packaged source excludes ignored private inputs and lock",
+            ".gitignore:data/eval/private/",
+        )
+    else:
+        private_missing = sorted(path for path in PRIVATE_REQUIRED if not (ROOT / path).is_file())
+        private_unignored = sorted(
+            path
+            for path in PRIVATE_REQUIRED
+            if _git("check-ignore", "-q", path).returncode != 0
+        )
+        if private_tracked:
+            private_errors.append("tracked private paths: " + ", ".join(private_tracked))
+        if private_missing:
+            private_errors.append("missing local private control artifacts: " + ", ".join(private_missing))
+        if private_unignored:
+            private_errors.append("private paths not ignored: " + ", ".join(private_unignored))
+        private_evidence = PRIVATE_REQUIRED
     record(
         "private-holdout-and-lock-ignored",
-        private_ok,
-        *PRIVATE_REQUIRED,
+        not private_errors,
+        *private_evidence,
         error="; ".join(private_errors) if private_errors else None,
     )
 
@@ -516,29 +617,41 @@ def audit_repository() -> tuple[Check, ...]:
         error="; ".join(public_errors) if public_errors else None,
     )
 
-    leakage = _command(
-        (
-            sys.executable,
-            "-m",
-            "scripts.validate_trade_eval",
-            "--dev",
-            "data/eval/trade_intel",
-            "--holdout",
-            "data/eval/private/trade_intel",
-            "--require-zero-leakage",
+    if inventory.source == "packaged":
+        leakage_ok = (
+            "trade_agent/evaluation/leakage.py" in tracked
+            and "scripts/validate_trade_eval.py" in tracked
+            and not private_tracked
         )
-    )
-    leakage_ok = leakage.returncode == 0
-    if leakage_ok:
-        try:
-            leakage_ok = json.loads(leakage.stdout).get("passed") is True
-        except (json.JSONDecodeError, AttributeError):
-            leakage_ok = False
+        leakage_evidence = (
+            "packaged private inputs absent",
+            "full public/private leakage recomputation is host-only",
+        )
+    else:
+        leakage = _command(
+            (
+                sys.executable,
+                "-m",
+                "scripts.validate_trade_eval",
+                "--dev",
+                "data/eval/trade_intel",
+                "--holdout",
+                "data/eval/private/trade_intel",
+                "--require-zero-leakage",
+            )
+        )
+        leakage_ok = leakage.returncode == 0
+        if leakage_ok:
+            try:
+                leakage_ok = json.loads(leakage.stdout).get("passed") is True
+            except (json.JSONDecodeError, AttributeError):
+                leakage_ok = False
+        leakage_evidence = ("question/reference/index separation",)
     record(
         "evaluation-leakage-gate",
         leakage_ok,
         "scripts.validate_trade_eval",
-        "question/reference/index separation",
+        *leakage_evidence,
         error=None if leakage_ok else "public/private contamination validation failed",
     )
 
@@ -641,7 +754,7 @@ def audit_repository() -> tuple[Check, ...]:
     record(
         "all-tracked-files-have-no-host-path-or-secret",
         not unsafe,
-        f"tracked_files_scanned={len(blobs)}",
+        f"{inventory.source}_files_scanned={len(blobs)}",
         "fixture allowlist: exact reviewed host-path sentinels only",
         error="; ".join(unsafe) if unsafe else None,
     )

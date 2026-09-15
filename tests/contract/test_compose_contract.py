@@ -40,6 +40,34 @@ def test_compose_api_persists_only_the_model_cache_for_embedding_weights() -> No
     assert api["environment"]["MODELS__EMBEDDING_CACHE_DIR"] == "/model-cache"
 
 
+def test_compose_api_uses_the_milvus_service_for_live_tests() -> None:
+    compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
+    assert compose["services"]["api"]["environment"]["MILVUS_TEST_URI"] == (
+        "http://milvus:19530"
+    )
+
+
+def test_api_image_contains_repository_audit_evidence_and_temp_git_support() -> None:
+    dockerfile = Path("docker/Dockerfile").read_text(encoding="utf-8")
+    assert "COPY docs ./docs" in dockerfile
+    assert "COPY .gitignore .env.example ./" in dockerfile
+    assert "TRADE_AGENT_PACKAGED_SOURCE=1" in dockerfile
+    assert "apt-get install" in dockerfile and "git" in dockerfile and "zsh" in dockerfile
+
+
+def test_api_healthcheck_allows_pinned_model_startup() -> None:
+    compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
+    assert compose["services"]["api"]["healthcheck"]["retries"] >= 60
+
+
+def test_production_runtime_wires_the_real_bge_reranker() -> None:
+    source = Path("trade_agent/api/dependencies.py").read_text(encoding="utf-8")
+    assert "from trade_agent.retrieval.reranker import BgeReranker" in source
+    assert "reranker = BgeReranker(" in source
+    assert "reranker=reranker" in source
+    assert "production reranker smoke failed" in source
+
+
 def test_etcd_persists_to_the_declared_data_directory() -> None:
     compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
     etcd = compose["services"]["etcd"]

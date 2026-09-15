@@ -16,9 +16,22 @@ The local uv-managed `.venv` may omit the `pip` module. `python -m pip check` be
 
 ## Secrets and service startup
 
-Copy `.env.example` to an untracked `.env` and replace every placeholder locally. Use separate MySQL root, migration, and query passwords. Never place credentials on a command line, in a report, or in Git. The API receives only the query-role credential. Model artifacts live in the external model cache and are verified against pinned revisions and checksums.
+Copy `.env.example` to an untracked `.env` as a field checklist and edit only non-secret host/model fields. Use the hidden-prompt shell exports in the README for separate MySQL root, migration, and query passwords. Never load `.env` as shell code or place credential values on a command line, in a report, or in Git. The API receives only the query-role credential. Model artifacts live in the external model cache and are verified against pinned revisions and checksums.
 
-The controller-final live gate starts the six Compose services and waits for health:
+A fresh Compose volume must be initialized before the API can become ready. First start only the stateful foundation services, then run schema/data/index publication with the least credential each step needs. Keep secret values in hidden prompt exports or the untracked `.env`; do not echo them into logs.
+
+```sh
+docker compose --env-file .env up -d --wait mysql etcd minio milvus redis
+docker compose --env-file .env run --rm --no-deps -e MYSQL__MIGRATION_PASSWORD api python -m trade_agent.db.migrate
+docker compose --env-file .env run --rm --no-deps -e MYSQL__MIGRATION_PASSWORD api python -m trade_agent.db.seed --seed 20260830
+docker compose --env-file .env run --rm --no-deps api python -m scripts.ingest_trade_sources --catalog /app/data/sources/trade_intel_demo.yaml --output /app/data/indexes/canonical-build.json
+docker compose --env-file .env run --rm --no-deps api python -m scripts.build_trade_index --manifest /app/data/indexes/canonical-build.json --output-dir /app/data/indexes
+docker compose --env-file .env run --rm --no-deps api python -m scripts.smoke_foundation
+```
+
+Record the emitted bundle path from `scripts.build_trade_index` in the untracked environment as an absolute container path, for example `TRADE_AGENT_INDEX_BUNDLE=/app/data/indexes/<build_id>/bundle.json`, then recreate the API so it loads the published MySQL scope, Milvus collection, BM25 artifact, BGE-M3 encoder, and BGE reranker together.
+
+The controller-final live gate starts or recreates the full stack and waits for health:
 
 ```sh
 docker compose --env-file .env up -d --wait

@@ -31,6 +31,20 @@ def test_query_password_is_runtime_default_and_migration_values_are_not_loaded(m
     assert not hasattr(settings.mysql, "root_password")
 
 
+
+def test_query_password_from_env_file_populates_runtime_password(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("MYSQL__PASSWORD", raising=False)
+    monkeypatch.delenv("MYSQL_APP_PASSWORD", raising=False)
+    monkeypatch.delenv("MYSQL__QUERY_PASSWORD", raising=False)
+    (tmp_path / ".env").write_text("MYSQL__QUERY_PASSWORD=file-query-secret\n", encoding="utf-8")
+
+    settings = Settings.load(runtime="compose")
+
+    assert settings.mysql.password == "file-query-secret"
+    assert not hasattr(settings.mysql, "query_password")
+
+
 def test_limits_are_positive():
     limits = RuntimeLimits(max_graph_steps=12, max_retries=1, max_llm_calls=5)
     assert limits.max_graph_steps == 12

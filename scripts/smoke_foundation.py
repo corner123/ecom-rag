@@ -15,6 +15,7 @@ import tempfile
 from collections import Counter
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import quote_plus
 from urllib.request import Request, urlopen
 
 from sqlalchemy import create_engine, text
@@ -26,7 +27,6 @@ from trade_agent.data.manifest import BuildManifest, canonical_hash, canonical_j
 from trade_agent.data.pipeline import IngestionPipeline, SourceCatalog
 from trade_agent.db.models import Base
 from trade_agent.db.seed import generate_trade_seed
-from trade_agent.db.session import database_url_from_environment
 
 SEED = 20260830
 EXPECTED_TABLES = (
@@ -214,11 +214,23 @@ def _seed_snapshot(connection: Any, bundle: Any) -> tuple[dict[str, list[dict[st
     return actual, canonical_hash(actual)
 
 
-def _probe_mysql(settings: Settings) -> dict[str, Any]:
-    # This is the only database URL constructed by the smoke runner.
+def _query_database_url(settings: Settings) -> str:
     if settings.mysql.user != "trade_query":
         raise ValueError("runtime database user must be trade_query")
-    engine = create_engine(database_url_from_environment(role="query"), pool_pre_ping=True)
+    if settings.mysql.password is None:
+        raise ValueError("runtime database password must be configured")
+    user = quote_plus(settings.mysql.user)
+    password = quote_plus(settings.mysql.password)
+    database = quote_plus(settings.mysql.database)
+    return (
+        f"mysql+pymysql://{user}:{password}"
+        f"@{settings.mysql.host}:{settings.mysql.port}/{database}?charset=utf8mb4"
+    )
+
+
+def _probe_mysql(settings: Settings) -> dict[str, Any]:
+    # This is the only database URL constructed by the smoke runner.
+    engine = create_engine(_query_database_url(settings), pool_pre_ping=True)
     try:
         with engine.connect() as connection:
             version = str(connection.scalar(text("SELECT VERSION()")))
@@ -386,13 +398,14 @@ def run_foundation_smoke(*, settings: Settings | None = None) -> dict[str, Any]:
             "milvus": _stage("milvus", lambda: _probe_milvus(config)),
         }
         import os
-        etcd_host = os.environ.get("ETCD__HOST", "etcd")
+        packaged = os.environ.get("TRADE_AGENT_PACKAGED_SOURCE") == "1"
+        etcd_host = os.environ.get("ETCD__HOST", "etcd" if packaged else "127.0.0.1")
         etcd_port = int(os.environ.get("ETCD__PORT", "2379"))
         etcd_health = _stage("etcd", lambda: _http_json(etcd_host, etcd_port, "/health"))
         etcd_version = _stage("etcd", lambda: _http_json(etcd_host, etcd_port, "/version"))
         if str(etcd_health.get("health", "")).lower() not in {"true", "ok"}:
             raise FoundationSmokeFailure("etcd", RuntimeError("health not ready"))
-        minio_host = os.environ.get("MINIO__HOST", "minio")
+        minio_host = os.environ.get("MINIO__HOST", "minio" if packaged else "127.0.0.1")
         minio_port = int(os.environ.get("MINIO__PORT", "9000"))
         _stage("minio", lambda: _http_ok(minio_host, minio_port, "/minio/health/live"))
         services["etcd"] = {"ready": True, "live": etcd_version}

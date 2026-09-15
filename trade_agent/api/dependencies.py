@@ -96,12 +96,15 @@ class AgentRuntime:
     ] | None = None
     close_callback: Callable[[], Awaitable[None]] | None = None
     max_outstanding_requests: int = 8
+    max_retrieval_candidates: int = 100
 
     def __post_init__(self) -> None:
         if not self.build_id.startswith("build_") or len(self.build_id) != 38:
             raise ValueError("runtime requires a published build identity")
         if type(self.max_outstanding_requests) is not int or not 1 <= self.max_outstanding_requests <= 128:
             raise ValueError("max outstanding requests must be from 1 through 128")
+        if type(self.max_retrieval_candidates) is not int or not 1 <= self.max_retrieval_candidates <= 512:
+            raise ValueError("max retrieval candidates must be from 1 through 512")
         self._limiter = anyio.CapacityLimiter(self.max_outstanding_requests)
         self._runs: dict[str, QueryResponse] = {}
         self._evidence_refs: dict[str, EvidenceRef] = {}
@@ -242,7 +245,7 @@ class AgentRuntime:
                     lambda: self.retrieval_service.search(
                         to_retrieval_query_intent(intent),
                         top_k=request.top_k,
-                        candidate_limit=100,
+                        candidate_limit=self.max_retrieval_candidates,
                         transport_timeout_seconds=5.0,
                     )
                 )
@@ -435,7 +438,9 @@ async def build_production_runtime() -> AgentRuntime:
     from trade_agent.db.sql_renderer import SqlDataScope
     from trade_agent.index.builder import TradeIndexBundle, validate_sparse_build
     from trade_agent.index.milvus_store import TradeMilvusStore
+    from trade_agent.retrieval.fusion import FusedHit
     from trade_agent.retrieval.profiles import load_retrieval_profile
+    from trade_agent.retrieval.reranker import BgeReranker
     from trade_agent.retrieval.service import RetrievalService
 
     settings = Settings.load()
@@ -477,12 +482,48 @@ async def build_production_runtime() -> AgentRuntime:
         manager = _manager()
         store = TradeMilvusStore(client=milvus_client, embedding_manager=manager)
         bundle = TradeIndexBundle.load(bundle_path, milvus=store, embedding_manager=manager)
+
+        def rerank_hit(chunk_id: str, content: str) -> FusedHit:
+            return FusedHit(
+                chunk_id=chunk_id,
+                record={"content": content},
+                score=1.0,
+                rank=1,
+                relevance_subtotal=1.0,
+                source_prior=1.0,
+                prior_contribution=1.0,
+                profile_id="balanced-v1",
+                profile_version="trade-source-profiles-v1",
+                components={},
+            )
+
+        reranker = BgeReranker(
+            device=settings.models.embedding_device,
+            cache_dir=settings.models.embedding_cache_dir,
+            local_files_only=settings.models.embedding_offline,
+            batch_size=settings.models.embedding_batch_size,
+        )
+        rerank_probe = reranker.rerank(
+            "HS 850440 charger procurement growth",
+            (
+                rerank_hit("irrelevant", "Unrelated synthetic scanned policy"),
+                rerank_hit("relevant", "HS 850440 USB-C charger procurement increased"),
+            ),
+            2,
+        )
+        if (
+            rerank_probe.degraded
+            or rerank_probe.model_contract.provider != "sentence-transformers"
+            or rerank_probe.hits[0].chunk_id != "relevant"
+        ):
+            raise ValueError("production reranker smoke failed")
         retrieval = RetrievalService(
             build=bundle.build,
             bm25=bundle.bm25,
             milvus=store,
             embedding_manager=manager,
             profile=load_retrieval_profile(),
+            reranker=reranker,
         )
         checkpointer = await RedisCheckpointFactory.create(settings.redis)
         repository_root = Path(
@@ -530,6 +571,7 @@ async def build_production_runtime() -> AgentRuntime:
                         max_llm_calls=settings.limits.max_llm_calls,
                         node_timeout_seconds=timeout,
                         max_outstanding_calls=8,
+                        max_evidence_candidates=settings.limits.max_evidence_candidates,
                     ),
                 ),
                 checkpointer=checkpointer,
@@ -585,6 +627,7 @@ async def build_production_runtime() -> AgentRuntime:
             resume_state_loader=lambda run_id: resume_run(run_id, run_id),
             close_callback=close,
             max_outstanding_requests=8,
+            max_retrieval_candidates=settings.limits.max_evidence_candidates,
         )
     except BaseException:
         if checkpointer is not None:

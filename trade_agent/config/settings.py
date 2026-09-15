@@ -2,7 +2,7 @@
 from __future__ import annotations
 import os
 import re
-from typing import Literal
+from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -15,6 +15,13 @@ def _is_placeholder(value: str | None) -> bool:
     return normalized in _PLACEHOLDERS or normalized.startswith(("replace-", "change-", "example-"))
 
 class MysqlSettings(BaseModel):
+    @model_validator(mode="before")
+    @classmethod
+    def accept_query_password_from_env_file(cls, value: Any) -> Any:
+        if isinstance(value, dict) and "password" not in value and "query_password" in value:
+            value = {**value, "password": value["query_password"]}
+        return value
+
     host: str = "mysql"
     port: int = Field(default=3306, ge=1, le=65535)
     database: str = "foreign_trade_db"
@@ -74,6 +81,7 @@ class RuntimeLimits(BaseModel):
     max_graph_steps: int = Field(default=12, gt=0, le=50)
     max_retries: int = Field(default=1, ge=0, le=3)
     max_llm_calls: int = Field(default=5, ge=0, le=10)
+    max_evidence_candidates: int = Field(default=10, ge=1, le=512)
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -101,9 +109,12 @@ class Settings(BaseSettings):
         password = legacy_password if legacy_password is not None else query_password
         if runtime == "test" and legacy_password is None:
             # Tests must opt into a password explicitly; never inherit a
-            # developer/Compose secret accidentally.
-            password = None
-        if password is not None:
+            # developer/Compose secret accidentally, including values from .env.
+            values["mysql"] = {
+                "user": os.environ.get("MYSQL__QUERY_USER", "trade_query"),
+                "password": None,
+            }
+        elif password is not None:
             values["mysql"] = {
                 "user": os.environ.get("MYSQL__QUERY_USER", "trade_query"),
                 "password": password,

@@ -77,6 +77,7 @@ services:
       MYSQL__HOST: mysql
       MYSQL__QUERY_PASSWORD: ${MYSQL__QUERY_PASSWORD:?set MYSQL__QUERY_PASSWORD in .env}
       MILVUS__HOST: milvus
+      MILVUS_TEST_URI: http://milvus:19530
       REDIS__HOST: redis
       MODELS__EMBEDDING_CACHE_DIR: /model-cache
       TRADE_AGENT_INDEX_BUNDLE: ${TRADE_AGENT_INDEX_BUNDLE:-}
@@ -90,7 +91,7 @@ services:
       test: ["CMD", "python", "/app/healthcheck.py"]
       interval: 5s
       timeout: 3s
-      retries: 20
+      retries: 80
     depends_on:
       mysql: {condition: service_healthy}
       milvus: {condition: service_healthy}

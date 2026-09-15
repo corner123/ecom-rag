@@ -39,16 +39,15 @@ def isolated_canonical_build(tmp_path_factory: pytest.TempPathFactory):
 
 
 def _manager():
+    from scripts.smoke_embeddings import model_settings_from_environment
     from trade_agent.index.embeddings import BgeEmbeddingManager
 
-    cache = os.environ.get("MODELS__EMBEDDING_CACHE_DIR")
-    if cache is None:
-        cache = str(Path.home() / ".cache/huggingface/hub")
+    models = model_settings_from_environment()
     return BgeEmbeddingManager(
-        cache_folder=cache,
+        cache_folder=models.embedding_cache_dir,
         local_files_only=True,
-        batch_size=16,
-        device="cpu",
+        batch_size=models.embedding_batch_size,
+        device=models.embedding_device,
     )
 
 

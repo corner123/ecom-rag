@@ -35,7 +35,7 @@ def test_real_cached_bge_m3_is_verified_before_producing_vectors() -> None:
         / BGE_M3_REVISION
     )
     if not snapshot.is_dir():
-        pytest.skip("the pinned BAAI/bge-m3 snapshot is not present in the model cache")
+        pytest.fail("the pinned BAAI/bge-m3 snapshot is required; run scripts.smoke_embeddings to populate and verify the model cache")
 
     manager = BgeEmbeddingManager(cache_folder=cache, local_files_only=True, batch_size=2)
     documents = manager.embed_documents(

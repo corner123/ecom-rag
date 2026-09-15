@@ -45,6 +45,40 @@ Generate the deterministic demonstration corpus in a new directory:
 
 The service-backed path requires MySQL, Milvus, etcd, MinIO, Redis, the pinned BGE model artifacts, and locally supplied secrets. Follow [docs/operations.md](docs/operations.md); the committed local evaluation reports are not substitutes for those live checks.
 
+## Safe service credentials
+
+Copy the example as a field checklist, edit only non-secret host/model fields, and keep `.env` untracked. Load secret values into the current shell from hidden prompts; do not load `.env` as shell code or place secret values in command arguments:
+
+```bash
+set -eu
+cp .env.example .env
+if [ -n "${EDITOR:-}" ]; then
+  "$EDITOR" .env
+fi
+export MYSQL__ROOT_PASSWORD="$(python3 -c 'import getpass; print(getpass.getpass("MySQL root password: "))')"
+export MYSQL__MIGRATION_PASSWORD="$(python3 -c 'import getpass; print(getpass.getpass("MySQL migration password: "))')"
+export MYSQL__QUERY_PASSWORD="$(python3 -c 'import getpass; print(getpass.getpass("MySQL query password: "))')"
+export MINIO_ROOT_PASSWORD="$(python3 -c 'import getpass; print(getpass.getpass("MinIO root password: "))')"
+: "${MYSQL__ROOT_PASSWORD:?MYSQL__ROOT_PASSWORD must be non-empty}"
+: "${MYSQL__MIGRATION_PASSWORD:?MYSQL__MIGRATION_PASSWORD must be non-empty}"
+: "${MYSQL__QUERY_PASSWORD:?MYSQL__QUERY_PASSWORD must be non-empty}"
+: "${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be non-empty}"
+export MYSQL__ROOT_PASSWORD MYSQL__MIGRATION_PASSWORD MYSQL__QUERY_PASSWORD MINIO_ROOT_PASSWORD
+
+cleanup_service_secrets() {
+  unset MYSQL__ROOT_PASSWORD MYSQL__MIGRATION_PASSWORD MYSQL__QUERY_PASSWORD MINIO_ROOT_PASSWORD
+}
+trap cleanup_service_secrets EXIT
+```
+
+Compose resolves those exported values while `-e` passes only the variable name to the transient migration container:
+
+```sh
+docker compose --env-file .env run --rm --no-deps \
+  -e MYSQL__MIGRATION_PASSWORD api \
+  python -m trade_agent.db.migrate
+```
+
 ## CLI
 
 ```text

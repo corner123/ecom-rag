@@ -9,6 +9,10 @@ from pathlib import Path
 import pytest
 
 
+def _stderr_json_payload(stderr: str) -> dict[str, str]:
+    return json.loads(stderr.strip().splitlines()[-1])
+
+
 def test_summary_validation_is_fail_closed_for_zero_chunks() -> None:
     from scripts.smoke_foundation import validate_foundation_summary
 
@@ -81,7 +85,7 @@ def test_cli_unknown_argument_is_redacted_without_usage_or_echo(unsafe_value: st
     )
     assert result.returncode != 0
     assert result.stdout == ""
-    assert json.loads(result.stderr) == {"error": "ArgumentError", "stage": "arguments", "status": "error"}
+    assert _stderr_json_payload(result.stderr) == {"error": "ArgumentError", "stage": "arguments", "status": "error"}
     assert unsafe_value not in result.stderr
     assert "usage:" not in result.stderr
 
@@ -95,7 +99,7 @@ def test_cli_help_is_a_redacted_argument_error(flag: str) -> None:
     )
     assert result.returncode == 2
     assert result.stdout == ""
-    assert json.loads(result.stderr) == {"error": "ArgumentError", "stage": "arguments", "status": "error"}
+    assert _stderr_json_payload(result.stderr) == {"error": "ArgumentError", "stage": "arguments", "status": "error"}
     assert "usage:" not in result.stderr
 
 
@@ -143,10 +147,57 @@ def test_mysql_probe_disposes_engine_when_connection_fails(monkeypatch: pytest.M
             self.disposed = True
 
     engine = FakeEngine()
-    monkeypatch.setattr(smoke, "create_engine", lambda *args, **kwargs: engine)
-    monkeypatch.setattr(smoke, "database_url_from_environment", lambda role: "mysql://query")
-    settings = type("SettingsStub", (), {"mysql": type("MySQLStub", (), {"user": "trade_query"})()})()
+    captured: dict[str, str] = {}
+
+    def fake_create_engine(url: str, *args, **kwargs):
+        captured["url"] = url
+        return engine
+
+    monkeypatch.setattr(smoke, "create_engine", fake_create_engine)
+    settings = type(
+        "SettingsStub",
+        (),
+        {
+            "mysql": type(
+                "MySQLStub",
+                (),
+                {
+                    "user": "trade_query",
+                    "password": "query secret",
+                    "host": "127.0.0.1",
+                    "port": 3306,
+                    "database": "foreign_trade_db",
+                },
+            )()
+        },
+    )()
 
     with pytest.raises(RuntimeError, match="connection failure"):
         smoke._probe_mysql(settings)
+    assert captured["url"] == "mysql+pymysql://trade_query:query+secret@127.0.0.1:3306/foreign_trade_db?charset=utf8mb4"
     assert engine.disposed is True
+
+
+def test_smoke_query_database_url_requires_query_role() -> None:
+    import scripts.smoke_foundation as smoke
+
+    settings = type(
+        "SettingsStub",
+        (),
+        {
+            "mysql": type(
+                "MySQLStub",
+                (),
+                {
+                    "user": "trade_migrator",
+                    "password": "migration-secret",
+                    "host": "127.0.0.1",
+                    "port": 3306,
+                    "database": "foreign_trade_db",
+                },
+            )()
+        },
+    )()
+
+    with pytest.raises(ValueError, match="trade_query"):
+        smoke._query_database_url(settings)

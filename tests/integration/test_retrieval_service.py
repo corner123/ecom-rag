@@ -1,5 +1,4 @@
 """Real BGE-M3, BGE reranker and Milvus; failures are never skipped."""
-import os
 from collections import Counter
 import pytest
 
@@ -21,18 +20,22 @@ def service(full_index_bundle):
         normalized_name=company.normalized_name, country_code=countries[company.country_id],
         website_domain=company.website_domain, registration_id=company.registration_id)
         for company in seed.companies]
+    from scripts.smoke_embeddings import model_settings_from_environment
+
+    models = model_settings_from_environment()
     return RetrievalService(build=bundle.build, bm25=bundle.bm25, milvus=store,
         embedding_manager=manager, profile=load_retrieval_profile(), entity_registry=registry,
-        reranker=BgeReranker(cache_dir=os.environ.get("MODELS__EMBEDDING_CACHE_DIR"),
-                             local_files_only=True, max_length=512, batch_size=8))
+        reranker=BgeReranker(cache_dir=models.embedding_cache_dir,
+                             local_files_only=True, max_length=512, batch_size=8,
+                             device=models.embedding_device))
 
 
 def test_exact_hs_and_semantic_growth_are_both_retrievable(service):
     planner = RetrievalPlanner()
     exact_plan = planner.plan(QueryIntent(query="HS850440 charger procurement"))
-    exact = service.retrieve(exact_plan.query, exact_plan)
+    exact = service.retrieve(exact_plan.query, exact_plan, candidate_limit=10)
     semantic_plan = planner.plan(QueryIntent(query="最近采购活跃度明显提高的客户"))
-    semantic = service.retrieve(semantic_plan.query, semantic_plan)
+    semantic = service.retrieve(semantic_plan.query, semantic_plan, candidate_limit=5)
     assert any(hit.metadata.hs_code == "850440" for hit in exact.hits)
     # Current source schema uses trade_activity; purchase_growth is an obsolete plan example.
     assert any(hit.metadata.fact_type.value == "trade_activity" for hit in semantic.hits)
@@ -51,7 +54,7 @@ def test_exact_hs_and_semantic_growth_are_both_retrievable(service):
 def test_filtered_mixed_query_returns_only_allowed_evidence(service):
     outcome = service.search(QueryIntent(query="HS850440 最近采购增长客户",
         hs_codes=("850440",), source_types=("customs_profile",),
-        fact_types=("trade_activity",), is_synthetic=True), top_k=10)
+        fact_types=("trade_activity",), is_synthetic=True), top_k=10, candidate_limit=5)
     assert outcome.hits
     assert all(h.metadata.hs_code == "850440" for h in outcome.hits)
     assert all(h.metadata.source_type.value == "customs_profile" for h in outcome.hits)

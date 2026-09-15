@@ -14,6 +14,7 @@ from trade_agent.api.models import (
     QueryResponse,
     ReadinessCheck,
     ReadinessResponse,
+    RetrieveRequest,
 )
 from trade_agent.cli import main as cli_main
 from trade_agent.config.settings import RedisSettings
@@ -397,6 +398,75 @@ async def test_resume_uses_only_the_stored_request_scope(tmp_path) -> None:
     assert captured["top_k"] == 37
     assert captured["config"]["configurable"]["resume_question"] == "Acme 是否值得跟进"
     assert captured["config"]["configurable"]["idempotency_key"] == "durable-key"
+
+
+@pytest.mark.asyncio
+async def test_retrieve_uses_runtime_candidate_budget_beyond_response_top_k(tmp_path) -> None:
+    from types import SimpleNamespace
+
+    from trade_agent.agents.intent import QueryIntent as BusinessIntent
+    from trade_agent.retrieval.filters import RetrievalFilter
+    from trade_agent.retrieval.planner import RetrievalPlan
+
+    repository = FileEvidenceRepository((tmp_path / "evidence").resolve())
+    captured: dict[str, object] = {}
+
+    async def ready():
+        return ReadinessResponse(
+            ready=True,
+            build_id=BUILD_ID,
+            schema_fingerprint="e" * 64,
+            checks={"runtime": ReadinessCheck(ok=True)},
+        )
+
+    class Parser:
+        def parse(self, question, explicit_filters):
+            captured["explicit_filters"] = explicit_filters
+            return BusinessIntent(
+                question=question,
+                kind="external_intelligence",
+                need_external_intel=True,
+            )
+
+    class Retrieval:
+        def search(self, intent, *, top_k, candidate_limit, transport_timeout_seconds):
+            captured["intent"] = intent
+            captured["top_k"] = top_k
+            captured["candidate_limit"] = candidate_limit
+            captured["transport_timeout_seconds"] = transport_timeout_seconds
+            return SimpleNamespace(
+                build_id=BUILD_ID,
+                query=intent.query,
+                plan=RetrievalPlan(
+                    query=intent.query,
+                    filter=RetrievalFilter(),
+                    extraction_confidence=1.0,
+                    applied_constraints=(),
+                    unapplied_constraints=(),
+                ),
+                hits=(),
+                degradation=(),
+            )
+
+    runtime = AgentRuntime(
+        graph_factory=lambda _top_k: None,
+        evidence_repository=repository,
+        build_id=BUILD_ID,
+        readiness_probe=ready,
+        retrieval_service=Retrieval(),
+        intent_parser=Parser(),
+        max_retrieval_candidates=10,
+    )
+
+    response = await runtime.retrieve(
+        RetrieveRequest(question="HS850440 charger procurement", top_k=3)
+    )
+
+    assert response.ranking_only is True
+    assert captured["top_k"] == 3
+    assert captured["candidate_limit"] == 10
+    assert captured["transport_timeout_seconds"] == 5.0
+    assert captured["explicit_filters"] == RetrievalFilter()
 
 
 def test_resume_maps_a_clean_missing_checkpoint_to_not_found(tmp_path) -> None:

@@ -30,7 +30,9 @@ def run_roundtrip(*, uri: str):
     from scripts.index_trade_corpus import _manager
     from trade_agent.index.builder import TradeIndexBuilder, TradeIndexBundle
     from trade_agent.index.milvus_store import TradeMilvusStore
+    from scripts.smoke_embeddings import model_settings_from_environment
     from trade_agent.retrieval import QueryIntent, load_retrieval_profile
+    from trade_agent.retrieval.reranker import BgeReranker
     from trade_agent.retrieval.service import RetrievalService
 
     with tempfile.TemporaryDirectory(prefix="trade-index-roundtrip-") as name:
@@ -46,15 +48,26 @@ def run_roundtrip(*, uri: str):
             fresh_store = TradeMilvusStore(client=client, embedding_manager=manager)
             reloaded = TradeIndexBundle.load(bundle.descriptor_path, milvus=fresh_store,
                                               embedding_manager=manager)
+            model_settings = model_settings_from_environment()
+            reranker = BgeReranker(
+                device=model_settings.embedding_device,
+                cache_dir=model_settings.embedding_cache_dir,
+                local_files_only=model_settings.embedding_offline,
+                batch_size=model_settings.embedding_batch_size,
+            )
             service = RetrievalService(build=reloaded.build, bm25=reloaded.bm25,
-                milvus=fresh_store, embedding_manager=manager, profile=load_retrieval_profile())
+                milvus=fresh_store, embedding_manager=manager, profile=load_retrieval_profile(),
+                reranker=reranker)
             result = service.search(QueryIntent(query="HS850440 charger procurement",
-                                                hs_codes=("850440",)), top_k=3, rerank=False)
+                                                hs_codes=("850440",)), top_k=3, candidate_limit=10)
             if not result.hits or any(h.metadata.hs_code != "850440" for h in result.hits):
                 raise RuntimeError("round-trip retrieval did not return filtered evidence")
+            if result.rerank_degraded or result.rerank_contract is None or any(h.trace.rerank_score is None for h in result.hits):
+                raise RuntimeError("round-trip retrieval did not exercise real reranking")
             return {"status": "ok", "build_id": build.build_id,
                     "collection_name": bundle.descriptor.collection_contract.collection_name,
-                    "row_count": len(build.chunks), "hit_count": len(result.hits)}
+                    "row_count": len(build.chunks), "hit_count": len(result.hits),
+                    "reranker": result.rerank_contract.provider}
         finally:
             if bundle is not None:
                 store.drop_owned_collection(bundle.descriptor.collection_contract)
