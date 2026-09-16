@@ -660,10 +660,10 @@ def audit_repository() -> tuple[Check, ...]:
     qualification_ok = all(
         phrase in readme
         for phrase in (
-            "synthetic, non-production",
-            "local CPU hash-token cosine",
-            "do **not** establish real Milvus/BGE acceptance",
-            "Generation was unavailable",
+            "合成、非生产用途",
+            "本地 CPU 哈希词元余弦检索",
+            "不能证明真实 Milvus/BGE 的验收结果",
+            "生成环节未运行",
             "judge_not_run",
         )
     )
